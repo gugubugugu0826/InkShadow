@@ -689,6 +689,13 @@ pub(crate) fn local_migrator() -> Migrator {
                 "persist exact selection skill identity on AI candidates",
                 include_str!("../../../../packages/data/migrations/0080_candidate_selection_action.sql"),
             ),
+            migration(
+                84,
+                "optimize exact story fact evidence validation",
+                include_str!(
+                    "../../../../packages/data/migrations/0081_story_fact_evidence_guard_performance.sql"
+                ),
+            ),
         ]),
         ignore_missing: false,
         locking: true,
@@ -4016,7 +4023,7 @@ mod tests {
             .fetch_one(&mut connection)
             .await
             .expect("maximum migration version");
-        assert_eq!(maximum_version, 83);
+        assert_eq!(maximum_version, 84);
         let forbidden_columns: i64 = sqlx::query_scalar(
             "SELECT COUNT(*)
              FROM pragma_table_info('novel_skill_evaluation_predispatch_authority_snapshots')

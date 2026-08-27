@@ -61,6 +61,10 @@ const storyFactEvidenceMigration = readFileSync(
   new URL("../../data/migrations/0079_story_fact_evidence.sql", import.meta.url),
   "utf8",
 );
+const storyFactEvidenceGuardPerformanceMigration = readFileSync(
+  new URL("../../data/migrations/0081_story_fact_evidence_guard_performance.sql", import.meta.url),
+  "utf8",
+);
 const migration = [
   baseMigration,
   aliasResolutionMigration,
@@ -69,6 +73,7 @@ const migration = [
   userRevisionMigration,
   directLocalAuthorRevisionMigration,
   storyFactEvidenceMigration,
+  storyFactEvidenceGuardPerformanceMigration,
 ].join("\n");
 const T0 = "2026-08-01T00:00:00.000Z";
 const T1 = "2026-08-01T00:01:00.000Z";
@@ -654,10 +659,11 @@ describe("unified story fact SQLite store", () => {
     const store = new SqliteStoryFactStore(executor);
     const chapterId = uuid(230);
     const versionId = uuid(231);
-    const content = `${"长".repeat(40_935)}🌙结尾`;
+    const astralPrefix = "\u{10000}\u{40000}\u{80000}\u{c0000}\u{10ffff}";
+    const content = `${astralPrefix}${"长".repeat(40_925)}🌙结尾`;
     seedChapter(executor, chapterId, versionId, content);
     const spans = [
-      { start: 0, excerpt: "长长长长" },
+      { start: 0, excerpt: "\u{10000}\u{40000}" },
       { start: 20_000, excerpt: "长长长长" },
       { start: 40_935, excerpt: "🌙结尾" },
     ] as const;

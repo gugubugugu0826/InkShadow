@@ -1,8 +1,8 @@
 # InkShadow 非前端工程文档
 
 > 文档状态：`SUPPORTING_CURRENT`  
-> 基于源码复核：2026-08-27  
-> 当前发布目标：`0.2.14`；当前只向前新增 Data `0079`–`0080`／Tauri `82`–`83`，升级、备份和恢复自动化已通过，正式候选门禁尚未闭合；0.2.13 候选与 v0.2.12 及更早发布证据保持不可变  
+> 基于源码复核：2026-08-28  
+> 当前发布目标：`0.2.14`；当前只向前新增 Data `0079`–`0081`／Tauri `82`–`84`，升级、备份和恢复聚焦自动化已通过，最终同源候选链仍须重跑；0.2.13 候选与 v0.2.12 及更早发布证据保持不可变  
 > 设计基线（Design Baseline）：`DESIGN v0.3.1b`  
 > 文档性质：当前实现指引，不把计划代码描述成已部署能力
 
@@ -10,7 +10,7 @@
 `v0.2.7` 只向前追加到 Data `0075` / Tauri `78`，区分正文结果与方向用途，
 并补充用户故事事实修订、版本整理责任和隐私快照规则；最终候选、远端门禁、未签名打包和公开预发行已完成，真实供应商、最终安装程序真机与商业门禁仍未完成。
 `v0.2.9` 继续向前追加 Data `0076`–`0077` / Tauri `79`–`80`。0.2.10 与 0.2.11 均未修改已发布迁移，0.2.11 只作为人工复测候选。
-Data `0078_generation_attempt_prose_invocation.sql` / Tauri `81` 已属于 v0.2.12 发布历史。0.2.14 只向前新增 Data `0079_story_fact_evidence.sql`／Tauri `82` 和 `0080_candidate_selection_action.sql`／Tauri `83`：前者为同一故事事实保留多处不可变证据，后者为新选区隔离结果冻结改写、润色、扩写或缩写的准确动作；不得修改 `0078` 或更早迁移字节与校验。
+Data `0078_generation_attempt_prose_invocation.sql` / Tauri `81` 已属于 v0.2.12 发布历史。0.2.14 只向前新增 Data `0079_story_fact_evidence.sql`／Tauri `82`、`0080_candidate_selection_action.sql`／Tauri `83` 和 `0081_story_fact_evidence_guard_performance.sql`／Tauri `84`：前三者分别保留一条事实的多处不可变证据、冻结四项选区动作，并在保持精确 UTF-16 证据保护的同时消除长正文递归校验的重复字节读取；不得修改 `0078` 或更早迁移字节与校验。
 当前差异与边界见
 [`../execution/2026-08-27-V0214-RELEASE-BLOCKERS.md`](../execution/2026-08-27-V0214-RELEASE-BLOCKERS.md)；0.2.13 与更早记录继续作为历史证据保留。
 
@@ -33,8 +33,8 @@ DESIGN v0.3.1b 只约束目标界面与交互验收；它不会改变 Tauri、�
 | 状态                    | 文档                                                                                                     | 内容与边界                                                                            |
 | ----------------------- | -------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------- |
 | `SUPPORTING_CURRENT`    | [`CLOUD_BACKEND.md`](CLOUD_BACKEND.md)                                                                   | Cloud API、PostgreSQL、HTTP、服务和后台任务；代码存在不表示生产 Cloud 已部署          |
-| `SUPPORTING_CURRENT`    | [`DESKTOP_NATIVE.md`](DESKTOP_NATIVE.md)                                                                 | 桌面原生可信边界、本地数据库、凭据、模型网络、项目密钥和备份；工作树原生迁移上限 `83` |
-| `SUPPORTING_CURRENT`    | [`SHARED_PACKAGES.md`](SHARED_PACKAGES.md)                                                               | 工作区领域、应用、数据、导入导出和共享界面包；工作树数据迁移上限 `0080`               |
+| `SUPPORTING_CURRENT`    | [`DESKTOP_NATIVE.md`](DESKTOP_NATIVE.md)                                                                 | 桌面原生可信边界、本地数据库、凭据、模型网络、项目密钥和备份；工作树原生迁移上限 `84` |
+| `SUPPORTING_CURRENT`    | [`SHARED_PACKAGES.md`](SHARED_PACKAGES.md)                                                               | 工作区领域、应用、数据、导入导出和共享界面包；工作树数据迁移上限 `0081`               |
 | `SUPPORTING_CURRENT`    | [`ANDROID_OPERATIONS_TOOLING.md`](ANDROID_OPERATIONS_TOOLING.md)                                         | Android POC、部署模板、发布/安全脚本、CI 和 E2E；不属于当前默认创作主链路             |
 | `AUTHORITATIVE_CURRENT` | [`../product-rebuild/02-DATA-REUSE-AND-MIGRATION.md`](../product-rebuild/02-DATA-REUSE-AND-MIGRATION.md) | 数据复用、前向迁移与回滚规则                                                          |
 

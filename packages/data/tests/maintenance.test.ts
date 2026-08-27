@@ -80,6 +80,10 @@ const candidateSelectionActionMigration = readFileSync(
   new URL("../migrations/0080_candidate_selection_action.sql", import.meta.url),
   "utf8",
 );
+const storyFactEvidenceGuardPerformanceMigration = readFileSync(
+  new URL("../migrations/0081_story_fact_evidence_guard_performance.sql", import.meta.url),
+  "utf8",
+);
 const inkShadowMigration = [
   readFileSync(new URL("../migrations/0001_core.sql", import.meta.url), "utf8"),
   readFileSync(new URL("../migrations/0002_tasks_notifications.sql", import.meta.url), "utf8"),
@@ -299,6 +303,7 @@ const inkShadowMigration = [
   proseInvocationPrivacyMigration,
   storyFactEvidenceMigration,
   candidateSelectionActionMigration,
+  storyFactEvidenceGuardPerformanceMigration,
 ].join("\n");
 const inkShadowMigrationV73 = inkShadowMigration
   .replace(capabilityProbeInvocationLedgerMigration, "")
@@ -310,7 +315,8 @@ const inkShadowMigrationV73 = inkShadowMigration
   .replace(projectDisplayIdentityMigration, "")
   .replace(proseInvocationPrivacyMigration, "")
   .replace(storyFactEvidenceMigration, "")
-  .replace(candidateSelectionActionMigration, "");
+  .replace(candidateSelectionActionMigration, "")
+  .replace(storyFactEvidenceGuardPerformanceMigration, "");
 const BACKUP_PROJECT_ID = "019f9f4a-b3c7-7350-9226-000000000001";
 const BACKUP_ACCOUNT_ID = "019f9f4a-b3c7-7350-9226-000000000101";
 const BACKUP_OBJECT_ID = "019f9f4a-b3c7-7350-9226-000000000102";

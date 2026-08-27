@@ -1,14 +1,14 @@
 # InkShadow 共享核心包逐文件指引
 
-> 基于源码快照：2026-08-27  
+> 基于源码快照：2026-08-28  
 > 文档状态：`SUPPORTING_CURRENT`  
 > 当前发布目标：`0.2.14`；0.2.13 候选与 v0.2.12 及更早发布证据保持不可变；设计基线：`DESIGN v0.3.1b`  
-> 覆盖范围：`packages/*/src` 的 17 个工作区包，以及 `packages/data/migrations` 的 80 个本地数据库迁移（当前工作树前向上限为 `0080`，已发布上限仍为 `0078`）
+> 覆盖范围：`packages/*/src` 的 17 个工作区包，以及 `packages/data/migrations` 的 81 个本地数据库迁移（当前工作树前向上限为 `0081`，已发布上限仍为 `0078`）
 
 `0071` 已随 `v0.2.6` 工程预发布冻结；`0072`–`0075` 已随 `v0.2.7` 最终候选冻结：
 `0074` 冻结不可变章节版本的本地故事资料整理责任，`0075` 保存生成尝试隐私快照及同一次调用标识。
 `0076`–`0077` / Tauri `79`–`80` 已随 `v0.2.9` 来源提交 `54d9647031bb97b4fc9f021d3b1acca7f6d25c47` 冻结；0.2.10 与 0.2.11 均没有新增迁移。
-`0078_generation_attempt_prose_invocation.sql` / Tauri `81` 已随 v0.2.12 冻结。0.2.14 当前只向前新增 `0079_story_fact_evidence.sql`／Tauri `82` 和 `0080_candidate_selection_action.sql`／Tauri `83`。前者以追加关系保存同一事实的多处不可变依据，历史重复行不删除、不改写；后者为新选区隔离结果冻结准确动作，历史空值保持兼容且不得伪造。迁移、维护和备份恢复自动化已经通过；正式构建、最终候选和人工安装门禁尚未完成。
+`0078_generation_attempt_prose_invocation.sql` / Tauri `81` 已随 v0.2.12 冻结。0.2.14 当前只向前新增 `0079_story_fact_evidence.sql`／Tauri `82`、`0080_candidate_selection_action.sql`／Tauri `83` 和 `0081_story_fact_evidence_guard_performance.sql`／Tauri `84`。`0079` 以追加关系保存同一事实的多处不可变依据，历史重复行不删除、不改写；`0080` 为新选区隔离结果冻结准确动作；`0081` 保持精确 UTF-16 总长、边界与摘录核对，并消除长正文递归扫描的重复字节读取。聚焦迁移、维护和备份恢复自动化已经通过；最终同源候选和人工安装门禁尚未完成。
 既有版本的最终候选、远端门禁、未签名打包和公开预发行事实保持不变；真实供应商和最终安装程序真机仍未完成，且不能借此改写
 `v0.2.9`、`v0.2.7`、`v0.2.6` 及更早标签、迁移校验值和制品证据。
 
@@ -256,6 +256,7 @@
 | `packages/data/migrations/0078_generation_attempt_prose_invocation.sql`              | 不新增字段或表，只扩展不可变生成尝试隐私守卫，使续写与开头生成均可绑定精确 Model Hub 调用标识。                                                                                |
 | `packages/data/migrations/0079_story_fact_evidence.sql`                              | 为一条受治理故事事实追加多处不可变正文依据，保留原始来源、作者决定和历史重复行。                                                                                               |
 | `packages/data/migrations/0080_candidate_selection_action.sql`                       | 为新选区隔离结果冻结改写、润色、扩写或缩写的准确动作；历史记录允许空值并走明确兼容分支。                                                                                       |
+| `packages/data/migrations/0081_story_fact_evidence_guard_performance.sql`            | 以一次 UTF-8 前导字节读取和有界递归保持精确 UTF-16 证据核对，避免长正文每条证据重复扫描整篇内容。                                                                              |
 
 当前六张写作体验/调查权威表全部进入既有备份删除与恢复顺序；`planned_invocation_id` 随
 `consistency_investigation_steps` 整表恢复。当前恢复断言为 172 张表；唯一排除项仍是 1 张不含用户

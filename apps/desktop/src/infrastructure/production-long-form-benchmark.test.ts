@@ -152,7 +152,7 @@ interface ProductionLongFormBenchmarkReport {
   readonly evaluatedAtK: number;
   readonly execution: Readonly<{
     readonly database: "temporary_file_backed_node_sqlite";
-    readonly schemaHead: "0080_candidate_selection_action.sql";
+    readonly schemaHead: "0081_story_fact_evidence_guard_performance.sql";
     readonly searchPath: "LocalProjectSearchService.searchFtsOnly+TauriProjectSearchSnapshotStore";
     readonly storyMemoryPath: "CompositeStoryMemoryReadModel+SQLite_authority_repositories";
     readonly agentPath: "ConsistencyInvestigationService+ConsistencyInvestigationToolRegistry";
@@ -524,7 +524,7 @@ async function runProductionLongFormBenchmark(
       evaluatedAtK: BENCHMARK_K,
       execution: Object.freeze({
         database: "temporary_file_backed_node_sqlite",
-        schemaHead: "0080_candidate_selection_action.sql",
+        schemaHead: "0081_story_fact_evidence_guard_performance.sql",
         searchPath: "LocalProjectSearchService.searchFtsOnly+TauriProjectSearchSnapshotStore",
         storyMemoryPath: "CompositeStoryMemoryReadModel+SQLite_authority_repositories",
         agentPath: "ConsistencyInvestigationService+ConsistencyInvestigationToolRegistry",
@@ -1706,17 +1706,18 @@ function readCurrentLocalSchema(workspaceRoot: string): string {
     .filter((name) => /^\d{4}_.*\.sql$/u.test(name))
     .sort();
   if (
-    dataMigrations.length !== 80 ||
+    dataMigrations.length !== 81 ||
     dataMigrations[0] !== "0001_core.sql" ||
-    dataMigrations.at(-7) !== "0074_chapter_version_story_fact_responsibility.sql" ||
-    dataMigrations.at(-6) !== "0075_generation_attempt_privacy_snapshot.sql" ||
-    dataMigrations.at(-5) !== "0076_direct_local_story_fact_author_revision.sql" ||
-    dataMigrations.at(-4) !== "0077_project_display_identities.sql" ||
-    dataMigrations.at(-3) !== "0078_generation_attempt_prose_invocation.sql" ||
-    dataMigrations.at(-2) !== "0079_story_fact_evidence.sql" ||
-    dataMigrations.at(-1) !== "0080_candidate_selection_action.sql"
+    dataMigrations.at(-8) !== "0074_chapter_version_story_fact_responsibility.sql" ||
+    dataMigrations.at(-7) !== "0075_generation_attempt_privacy_snapshot.sql" ||
+    dataMigrations.at(-6) !== "0076_direct_local_story_fact_author_revision.sql" ||
+    dataMigrations.at(-5) !== "0077_project_display_identities.sql" ||
+    dataMigrations.at(-4) !== "0078_generation_attempt_prose_invocation.sql" ||
+    dataMigrations.at(-3) !== "0079_story_fact_evidence.sql" ||
+    dataMigrations.at(-2) !== "0080_candidate_selection_action.sql" ||
+    dataMigrations.at(-1) !== "0081_story_fact_evidence_guard_performance.sql"
   ) {
-    throw new Error("The production benchmark expected the exact Data 0001-0080 migration chain.");
+    throw new Error("The production benchmark expected the exact Data 0001-0081 migration chain.");
   }
   const sql: string[] = [];
   for (const fileName of dataMigrations) {

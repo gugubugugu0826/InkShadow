@@ -4029,7 +4029,7 @@ mod tests {
             diagnostic
                 .get("expectedVersion")
                 .and_then(JsonValue::as_i64),
-            Some(83)
+            Some(84)
         );
         assert_eq!(
             diagnostic
@@ -4059,7 +4059,7 @@ mod tests {
         );
         assert_eq!(
             diagnostic.get("actualVersion").and_then(JsonValue::as_i64),
-            Some(83)
+            Some(84)
         );
         assert_eq!(
             diagnostic

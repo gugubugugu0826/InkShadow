@@ -1,15 +1,15 @@
 # InkShadow Desktop 原生层逐文件指引
 
-> 基于源码快照：2026-08-27  
+> 基于源码快照：2026-08-28  
 > 文档状态：`SUPPORTING_CURRENT`  
-> 当前发布目标：`0.2.14`；当前工作树迁移上限 Data `0080`／Tauri `83`，数据与原生自动化已通过，正式候选门禁尚未结束；0.2.13 候选和 v0.2.12 及更早发布证据保持不可变；设计基线：`DESIGN v0.3.1b`  
+> 当前发布目标：`0.2.14`；当前工作树迁移上限 Data `0081`／Tauri `84`，数据与原生迁移聚焦自动化已通过，最终同源候选门禁尚未结束；0.2.13 候选和 v0.2.12 及更早发布证据保持不可变；设计基线：`DESIGN v0.3.1b`  
 > 覆盖范围：`apps/desktop/src-tauri`、本地 SQLite 原生桥、自动备份、系统凭据库、原生网络、项目密钥、安全更新与系统容量
 
 `v0.2.6` 已冻结 Tauri `74`、SQLite 重载恢复、自动备份清单第 2 版和能力验证调用回执。
 `v0.2.7` 只向前追加 Data `0072`–`0075` / Tauri `75`–`78`，并已随最终候选提交冻结公开；
 原生层、最终候选、远端门禁和未签名打包已通过，真实供应商、最终安装程序真机与系统百分之二百缩放仍未完成。
 历史隔离 Windows 聚焦结果继续只绑定 `722e67e`，不能外推为当前安装程序验证。
-Data `0078_generation_attempt_prose_invocation.sql` / Tauri `81` 已随 v0.2.12 冻结。0.2.14 只向前新增 `0079_story_fact_evidence.sql`／Tauri `82` 和 `0080_candidate_selection_action.sql`／Tauri `83`；原生保存对话框、外部打开、真实 Windows 凭据管理器和安装版升级恢复尚未执行。
+Data `0078_generation_attempt_prose_invocation.sql` / Tauri `81` 已随 v0.2.12 冻结。0.2.14 只向前新增 `0079_story_fact_evidence.sql`／Tauri `82`、`0080_candidate_selection_action.sql`／Tauri `83` 和证据校验性能修复 `0081`／Tauri `84`；原生保存对话框、外部打开、真实 Windows 凭据管理器和安装版升级恢复尚未执行。
 
 ## 1. 它不是传统“后端”
 
@@ -114,8 +114,8 @@ React 页面
 - 打开时强制 `foreign_keys=ON`、WAL、`synchronous=NORMAL`、5 秒 busy timeout。
 - 配置和全部 migration 验证成功后才返回随机会话 token。
 - migration 校验和不一致会报 `SQLITE_MIGRATION_INTEGRITY_FAILED` 并停止，而不是覆盖用户数据。
-- 当前工作树前向上限为 Data `0080_candidate_selection_action.sql` / Tauri `83`；
-  80 个 Data migration 与 3 个 story-core migration 合并为一个原生连续序列，所以目录前缀与
+- 当前工作树前向上限为 Data `0081_story_fact_evidence_guard_performance.sql` / Tauri `84`；
+  81 个 Data migration 与 3 个 story-core migration 合并为一个原生连续序列，所以目录前缀与
   原生版本不要求相同。`0066`–`0068` / Tauri `69`–`71` 依次追加写作体验偏好与 Provider 披露
   grant、有界一致性调查四表，以及只统计 active grant 的上限修复。`0069` / Tauri `72` 在模型
   step 上预留 content-free invocation UUID；账本 INSERT 会在同一 SQLite 语句中绑定 step 和
@@ -131,7 +131,7 @@ React 页面
   迁移前旧行保留空值，新行缺失、部分缺失、关联不一致或后续改写均失败关闭。
   `0076` / Tauri `79` 为直接模式本地故事事实增加带审计的作者修订；`0077` / Tauri `80` 增加
   不含作品正文的项目显示标识与修订历史。两项均已随 v0.2.9 冻结；0.2.10 与 0.2.11 均没有新增迁移。
-  `0078` / Tauri `81` 不新增字段或表，只扩展 `0075` 的不可变生成尝试隐私守卫，使 `continuation` 和 `prose_generation` 均可保存精确 Model Hub 调用标识；`0079` / Tauri `82` 追加不可变故事事实多证据关系；`0080` / Tauri `83` 为新选区隔离结果保存不可变准确动作，历史空值保持兼容。`0078` 及其他已发布迁移和校验保持原样。
+  `0078` / Tauri `81` 不新增字段或表，只扩展 `0075` 的不可变生成尝试隐私守卫，使 `continuation` 和 `prose_generation` 均可保存精确 Model Hub 调用标识；`0079` / Tauri `82` 追加不可变故事事实多证据关系；`0080` / Tauri `83` 为新选区隔离结果保存不可变准确动作；`0081` / Tauri `84` 只替换尚未发布的证据插入保护触发器实现，保持校验条件并缩短长正文扫描。`0078` 及其他已发布迁移和校验保持原样。
 - 启动恢复以 `provider_dispatch_started_at` 为网络边界：发送前中断把 running ledger 结清为
   `cancelled`、run 结清为 `not_dispatched`；发送后中断把 ledger 结清为 `timed_out`、run 结清为
   `ambiguous`。两者都会把非终态 task 对账到相应终态，且绝不自动重发。

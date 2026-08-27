@@ -38,7 +38,7 @@ describe("released v0.2.3 continuous database upgrade", () => {
     ];
     const v023HeadIndex = migrations.findIndex(({ name }) => name === V023_SCHEMA_HEAD);
     expect(v023HeadIndex).toBeGreaterThanOrEqual(0);
-    expect(migrations.at(-1)?.name).toBe("0080_candidate_selection_action.sql");
+    expect(migrations.at(-1)?.name).toBe("0081_story_fact_evidence_guard_performance.sql");
 
     const database = new DatabaseSync(":memory:");
     for (const migration of migrations.slice(0, v023HeadIndex + 1)) {
