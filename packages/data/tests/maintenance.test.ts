@@ -40,6 +40,7 @@ const candidateSelectionBackupPath = path.join(
   `inkshadow-maintenance-selection-action-${process.pid}.db`,
 );
 const HISTORICAL_V73_RESTORE_TIMEOUT_MS = 30_000;
+const PAID_AUTHORITY_RESTORE_TIMEOUT_MS = 30_000;
 const capabilityProbeInvocationLedgerMigration = readFileSync(
   new URL("../migrations/0071_model_capability_probe_invocation_ledger.sql", import.meta.url),
   "utf8",
@@ -2305,37 +2306,49 @@ describe("DatabaseMaintenanceService", () => {
       state === "settled"
         ? "round-trips a fully reconstructible no-skill paid settled chain"
         : `round-trips a canonical paid ${state} authority chain`;
-    fileSqliteIt(description, async () => {
-      const executor = new NodeSqliteExecutor(inkShadowMigration);
-      const service = new DatabaseMaintenanceService(executor);
-      const ids = await insertPaidRestoreScenario(executor, state);
-      expect(await service.createConsistentBackup(backupPath)).toMatchObject({ ok: true });
+    fileSqliteIt(
+      description,
+      async () => {
+        const paidBackupPath = path.join(
+          tmpdir(),
+          `inkshadow-maintenance-paid-${state}-${process.pid}.db`,
+        );
+        const executor = new NodeSqliteExecutor(inkShadowMigration);
+        try {
+          const service = new DatabaseMaintenanceService(executor);
+          const ids = await insertPaidRestoreScenario(executor, state);
+          expect(await service.createConsistentBackup(paidBackupPath)).toMatchObject({ ok: true });
 
-      expect(await service.restoreConsistentBackup(backupPath)).toMatchObject({ ok: true });
-      await expect(
-        executor.select<{ readonly status: string }>(
-          "SELECT status FROM novel_skill_evaluation_runs WHERE id = ?",
-          [ids.runId],
-        ),
-      ).resolves.toEqual([{ status: state === "authorized" ? "planned" : "running" }]);
-      await expect(
-        executor.select<{ readonly state: string }>(
-          `SELECT state FROM novel_skill_evaluation_dispatch_reservations WHERE run_id = ?`,
-          [ids.runId],
-        ),
-      ).resolves.toEqual(state === "settled" ? [{ state: "settled" }] : []);
-      await expect(
-        executor.select<{ readonly reservation_id: string }>(
-          `SELECT authority.reservation_id
-           FROM novel_skill_evaluation_predispatch_authority_snapshots AS authority
-           INNER JOIN novel_skill_evaluation_dispatch_reservations AS reservation
-             ON reservation.id = authority.reservation_id
-           WHERE reservation.run_id = ?`,
-          [ids.runId],
-        ),
-      ).resolves.toEqual(state === "settled" ? [{ reservation_id: ids.reservationId }] : []);
-      await executor.close();
-    });
+          expect(await service.restoreConsistentBackup(paidBackupPath)).toMatchObject({ ok: true });
+          await expect(
+            executor.select<{ readonly status: string }>(
+              "SELECT status FROM novel_skill_evaluation_runs WHERE id = ?",
+              [ids.runId],
+            ),
+          ).resolves.toEqual([{ status: state === "authorized" ? "planned" : "running" }]);
+          await expect(
+            executor.select<{ readonly state: string }>(
+              `SELECT state FROM novel_skill_evaluation_dispatch_reservations WHERE run_id = ?`,
+              [ids.runId],
+            ),
+          ).resolves.toEqual(state === "settled" ? [{ state: "settled" }] : []);
+          await expect(
+            executor.select<{ readonly reservation_id: string }>(
+              `SELECT authority.reservation_id
+               FROM novel_skill_evaluation_predispatch_authority_snapshots AS authority
+               INNER JOIN novel_skill_evaluation_dispatch_reservations AS reservation
+                 ON reservation.id = authority.reservation_id
+               WHERE reservation.run_id = ?`,
+              [ids.runId],
+            ),
+          ).resolves.toEqual(state === "settled" ? [{ reservation_id: ids.reservationId }] : []);
+        } finally {
+          await executor.close();
+          rmSync(paidBackupPath, { force: true });
+        }
+      },
+      PAID_AUTHORITY_RESTORE_TIMEOUT_MS,
+    );
   }
 
   for (const [name, tamper] of [

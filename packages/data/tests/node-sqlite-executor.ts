@@ -11,8 +11,12 @@ import {
 
 const FILE_BACKED_SQLITE_TEST_TIMEOUT_MS = 15_000;
 
-export function fileSqliteIt(name: string, testFunction: TestFunction): void {
-  it(name, testFunction, FILE_BACKED_SQLITE_TEST_TIMEOUT_MS);
+export function fileSqliteIt(
+  name: string,
+  testFunction: TestFunction,
+  timeoutMs = FILE_BACKED_SQLITE_TEST_TIMEOUT_MS,
+): void {
+  it(name, testFunction, timeoutMs);
 }
 
 export class NodeSqliteExecutor implements SqlExecutor {
