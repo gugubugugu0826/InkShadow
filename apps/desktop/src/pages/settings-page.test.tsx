@@ -23,7 +23,10 @@ import {
 import { SELECTABLE_MODEL_CATALOG_REGISTRY_VERSION } from "../infrastructure/selectable-model-catalog-registry";
 import { NOVEL_AI_TASKS } from "../infrastructure/model-hub-provider-registry";
 import { applyAutomaticModelHubRouting } from "../infrastructure/model-hub-routing-service";
-import { ModelHubStoreError } from "../infrastructure/model-hub-store";
+import {
+  BrowserDevelopmentModelHubStore,
+  ModelHubStoreError,
+} from "../infrastructure/model-hub-store";
 import { readSafeModelHubSessionDiagnostics } from "../infrastructure/model-hub-ui-diagnostics";
 import {
   createDevelopmentRuntime,
@@ -1532,7 +1535,13 @@ describe("SettingsPage model routing", () => {
     const check = screen.getByRole("button", { name: "测试连接并发现模型" });
     await waitFor(() => expect(check).toBeEnabled());
     await user.click(check);
+    expect(await screen.findByText(/12 毫秒/u)).toBeVisible();
+    expect(screen.queryByText(/12 ms/u)).not.toBeInTheDocument();
     await screen.findByRole("option", { name: "Writer model" });
+    await user.selectOptions(
+      screen.getByRole("combobox", { name: "要检查的能力" }),
+      "text_generation",
+    );
     await user.click(screen.getByRole("button", { name: "确认 1 次固定验证" }));
     expect(await screen.findByText("写作能力已验证")).toBeVisible();
 
@@ -1631,68 +1640,195 @@ describe("SettingsPage model routing", () => {
     expect(screen.getByLabelText("配置标识")).toHaveValue("custom-provider");
   }, 10_000);
 
-  it("refreshes the authoritative revision after partial retirement cleanup and retries safely", async () => {
+  it("opens a failed active connection for non-sensitive editing without changing its credential", async () => {
     const development = createDevelopmentRuntime(window.localStorage);
-    const connection = await development.modelHub.saveConnection({
-      id: "ui-retirement-cleanup-retry",
+    let connection = await development.modelHub.saveConnection({
+      id: "failed-editable-provider",
       providerKind: "custom_openai_compatible",
-      displayName: "可重试退役连接",
-      baseUrlOverride: "https://retire-retry.example/v1",
-      credentialRef: "keyring:model-hub:ui-retirement-cleanup-retry",
+      displayName: "待修复写作连接",
+      baseUrlOverride: "https://failed-edit.example/v1",
+      credentialRef: "keyring:model-hub:failed-editable-provider",
       credentialState: "present",
       authenticationMode: "bearer_keyring",
       expectedRevision: null,
     });
-    await development.modelCenter.save({
-      providerId: connection.id,
-      provider: "open_ai_compatible",
-      baseUrl: connection.baseUrl,
-      authentication: "bearer_keyring",
-      selectedModel: "writer-model",
-      expectedRevision: null,
+    connection = await development.modelHub.recordConnectionTest({
+      connectionId: connection.id,
+      status: "error",
+      errorCode: "MODEL_HTTP_NOT_FOUND",
+      errorSummary: "provider returned not found",
+      expectedRevision: connection.revision,
     });
-    const deleteCredential = vi
-      .fn()
-      .mockRejectedValueOnce(new Error("temporary vault failure"))
-      .mockResolvedValue({ configured: false, lastFour: null });
+    const saveCredential = vi.fn(() => Promise.resolve({ configured: true, lastFour: "1234" }));
+    const deleteCredential = vi.fn(() => Promise.resolve({ configured: false, lastFour: null }));
     const runtime: DesktopRuntime = {
       ...development,
       mode: "tauri",
       credentials: {
         getSummary: () => Promise.resolve({ configured: true, lastFour: "1234" }),
-        save: () => Promise.resolve({ configured: true, lastFour: "1234" }),
+        save: saveCredential,
         delete: deleteCredential,
       },
     };
     const user = userEvent.setup();
     renderRoute(runtime);
 
-    await user.click(await screen.findByRole("button", { name: "退役连接" }));
+    const editAndRetry = await screen.findByRole("button", { name: "编辑并重试" });
+    expect(screen.getByText(/连接设置和已保存密钥都仍然保留/u)).toBeVisible();
+    await user.click(editAndRetry);
+
+    const baseUrlInput = await screen.findByLabelText("基础地址");
+    await waitFor(() => expect(baseUrlInput).toHaveFocus());
+    expect(baseUrlInput).toHaveValue("https://failed-edit.example/v1");
+    expect(screen.getByLabelText("接口密钥")).toHaveValue("");
+    expect(saveCredential).not.toHaveBeenCalled();
+    expect(deleteCredential).not.toHaveBeenCalled();
+    await expect(runtime.modelHub.findConnection(connection.id)).resolves.toMatchObject({
+      credentialRef: "keyring:model-hub:failed-editable-provider",
+      credentialState: "present",
+      enabled: true,
+      connectionStatus: "error",
+    });
+  });
+
+  it("uses the loaded connection revision so a stale page cannot overwrite a newer edit", async () => {
+    const development = createDevelopmentRuntime(window.localStorage);
+    const loaded = await development.modelHub.saveConnection({
+      id: "stale-edit-provider",
+      providerKind: "custom_openai_compatible",
+      displayName: "并发编辑连接",
+      baseUrlOverride: "https://loaded.example/v1",
+      credentialRef: "keyring:model-hub:stale-edit-provider",
+      credentialState: "present",
+      authenticationMode: "bearer_keyring",
+      expectedRevision: null,
+    });
+    const originalSaveConnection = development.modelHub.saveConnection.bind(development.modelHub);
+    const observedSaveInputs: Parameters<typeof development.modelHub.saveConnection>[0][] = [];
+    vi.spyOn(development.modelHub, "saveConnection").mockImplementation(async (input) => {
+      observedSaveInputs.push(input);
+      return originalSaveConnection(input);
+    });
+    const saveCredential = vi.fn(() => Promise.resolve({ configured: true, lastFour: "1234" }));
+    const deleteCredential = vi.fn(() => Promise.resolve({ configured: false, lastFour: null }));
+    const runtime: DesktopRuntime = {
+      ...development,
+      mode: "tauri",
+      credentials: {
+        getSummary: () => Promise.resolve({ configured: true, lastFour: "1234" }),
+        save: saveCredential,
+        delete: deleteCredential,
+      },
+    };
+    const user = userEvent.setup();
+    renderRoute(runtime);
+
+    await screen.findByRole("heading", { name: "墨影模型中心" });
+    await user.click(screen.getByRole("button", { name: "专家设置" }));
+    const baseUrlInput = await screen.findByLabelText("基础地址");
+    expect(baseUrlInput).toHaveValue("https://loaded.example/v1");
+
+    await originalSaveConnection({
+      id: loaded.id,
+      providerKind: loaded.providerKind,
+      displayName: loaded.displayName,
+      baseUrlOverride: "https://newer.example/v1",
+      credentialRef: loaded.credentialRef,
+      credentialState: loaded.credentialState,
+      authenticationMode: loaded.authenticationMode,
+      enabled: true,
+      expectedRevision: loaded.revision,
+    });
+    await user.clear(baseUrlInput);
+    await user.type(baseUrlInput, "https://stale.example/v1");
+    await user.click(screen.getByRole("button", { name: "保存供应商与模型" }));
+
+    await waitFor(() => expect(observedSaveInputs.length).toBeGreaterThan(0));
+    expect(observedSaveInputs.at(-1)?.expectedRevision).toBe(loaded.revision);
+    await expect(runtime.modelHub.findConnection(loaded.id)).resolves.toMatchObject({
+      baseUrl: "https://newer.example/v1",
+      credentialRef: loaded.credentialRef,
+      credentialState: "present",
+    });
+    expect(saveCredential).not.toHaveBeenCalled();
+    expect(deleteCredential).not.toHaveBeenCalled();
+  });
+
+  it("restores a no-credential retirement with unfinished legacy cleanup after restart", async () => {
+    const development = createDevelopmentRuntime(window.localStorage);
+    const connection = await development.modelHub.saveConnection({
+      id: "ui-retirement-cleanup-retry",
+      providerKind: "custom_openai_compatible",
+      displayName: "可重试退役连接",
+      baseUrlOverride: "https://retire-retry.example/v1",
+      credentialRef: null,
+      credentialState: "missing",
+      authenticationMode: "none",
+      expectedRevision: null,
+    });
+    await development.modelCenter.save({
+      providerId: connection.id,
+      provider: "open_ai_compatible",
+      baseUrl: connection.baseUrl,
+      authentication: "none",
+      selectedModel: "writer-model",
+      expectedRevision: null,
+    });
+    const saveLegacyProfile = vi.spyOn(development.modelCenter, "save");
+    const deleteCredential = vi.fn(() => Promise.resolve({ configured: false, lastFour: null }));
+    const runtime: DesktopRuntime = {
+      ...development,
+      mode: "tauri",
+      credentials: {
+        getSummary: () => Promise.resolve({ configured: false, lastFour: null }),
+        save: () => Promise.resolve({ configured: false, lastFour: null }),
+        delete: deleteCredential,
+      },
+    };
+    const user = userEvent.setup();
+    const view = renderRoute(runtime);
+
+    const retireButton = await screen.findByRole("button", { name: "退役连接" });
+    saveLegacyProfile.mockClear();
+    saveLegacyProfile.mockRejectedValue(new Error("temporary legacy selection failure"));
+    await user.click(retireButton);
     let dialog = screen.getByRole("dialog", { name: "退役“可重试退役连接”连接？" });
     await user.click(within(dialog).getByRole("button", { name: "确认退役连接" }));
-    await waitFor(() => expect(deleteCredential).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(saveLegacyProfile).toHaveBeenCalledTimes(2));
     await expect(runtime.modelHub.findConnection(connection.id)).resolves.toMatchObject({
       enabled: false,
       revision: connection.revision + 1,
-      credentialRef: "keyring:model-hub:ui-retirement-cleanup-retry",
-      lastErrorCode: null,
+      credentialRef: null,
+      lastErrorCode: "MODEL_HUB_CONNECTION_RETIREMENT_INCOMPLETE",
     });
 
+    view.unmount();
+    const reopenedDevelopment = createDevelopmentRuntime(window.localStorage);
+    const reopened: DesktopRuntime = {
+      ...reopenedDevelopment,
+      mode: "tauri",
+      credentials: runtime.credentials,
+    };
+    renderRoute(reopened);
+
+    expect(await screen.findByText("退役尚未完成")).toBeVisible();
+    expect(screen.queryByRole("list", { name: "当前 AI 连接" })).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "继续清理并完成退役" }));
     dialog = screen.getByRole("dialog", { name: "退役“可重试退役连接”连接？" });
     const retry = within(dialog).getByRole("button", { name: "确认退役连接" });
     await waitFor(() => expect(retry).toBeEnabled());
     await user.click(retry);
 
     expect(await screen.findByText(/可重试退役连接.*已退役/u)).toBeVisible();
-    expect(deleteCredential).toHaveBeenCalledTimes(2);
-    await expect(runtime.modelHub.findConnection(connection.id)).resolves.toMatchObject({
+    expect(deleteCredential).not.toHaveBeenCalled();
+    await expect(reopened.modelHub.findConnection(connection.id)).resolves.toMatchObject({
       enabled: false,
       credentialRef: null,
       credentialState: "missing",
       lastErrorCode: "MODEL_HUB_CONNECTION_RETIRED",
       revision: connection.revision + 2,
     });
-  }, 10_000);
+  }, 15_000);
 
   it("deletes a credential, survives restart, and rebinds the same ordinary connection id", async () => {
     const development = createDevelopmentRuntime(window.localStorage);
@@ -1739,7 +1875,9 @@ describe("SettingsPage model routing", () => {
     const user = userEvent.setup();
     const view = renderRoute(runtime);
 
-    expect(await screen.findByRole("button", { name: "删除密钥" })).toBeVisible();
+    expect(
+      await screen.findByRole("button", { name: "删除密钥" }, { timeout: 5_000 }),
+    ).toBeVisible();
     await user.click(screen.getByRole("button", { name: "删除密钥" }));
     expect(await screen.findByText("凭据已删除，可重新绑定")).toBeVisible();
     expect(await screen.findByRole("heading", { name: "未连接", level: 3 })).toBeVisible();
@@ -1775,6 +1913,78 @@ describe("SettingsPage model routing", () => {
       enabled: true,
       credentialState: "present",
       connectionStatus: "not_tested",
+    });
+    expect(credentials.save).toHaveBeenCalledTimes(1);
+  }, 15_000);
+
+  it("keeps a retired connection historical after restart and rebuilds the same provider with a new id", async () => {
+    const development = createDevelopmentRuntime(window.localStorage);
+    let retired = await development.modelHub.saveConnection({
+      id: "deepseek",
+      providerKind: "deepseek",
+      displayName: "旧 DeepSeek 连接",
+      credentialRef: "keyring:model-hub:deepseek",
+      credentialState: "present",
+      authenticationMode: "bearer_keyring",
+      enabled: true,
+      expectedRevision: null,
+    });
+    retired = await development.modelHub.retireConnection({
+      connectionId: retired.id,
+      expectedRevision: retired.revision,
+    });
+    const secrets = new Map<string, string>();
+    const credentials = {
+      getSummary: vi.fn((providerId: string) =>
+        Promise.resolve({
+          configured: secrets.has(providerId),
+          lastFour: secrets.get(providerId)?.slice(-4) ?? null,
+        }),
+      ),
+      save: vi.fn((providerId: string, secret: string) => {
+        secrets.set(providerId, secret);
+        return Promise.resolve({ configured: true, lastFour: secret.slice(-4) });
+      }),
+      delete: vi.fn((providerId: string) => {
+        secrets.delete(providerId);
+        return Promise.resolve({ configured: false, lastFour: null });
+      }),
+    };
+    const reopenedModelHub = new BrowserDevelopmentModelHubStore(
+      window.localStorage,
+      development.clock,
+    );
+    await expect(reopenedModelHub.listConnections()).resolves.toEqual([
+      expect.objectContaining({ id: retired.id, enabled: false }),
+    ]);
+    const runtime: DesktopRuntime = {
+      ...development,
+      modelHub: reopenedModelHub,
+      mode: "tauri",
+      credentials,
+    };
+    const user = userEvent.setup();
+    renderRoute(runtime);
+
+    expect(await screen.findByText("已退役连接历史（1）")).toBeVisible();
+    expect(screen.queryByText("连接已退役")).not.toBeInTheDocument();
+    expect(screen.queryByRole("option", { name: /旧 DeepSeek 连接/u })).not.toBeInTheDocument();
+    await user.selectOptions(screen.getByRole("combobox", { name: "供应商" }), "deepseek");
+    await user.click(screen.getByRole("button", { name: "专家设置" }));
+    expect(screen.getByLabelText("配置标识")).toHaveValue("deepseek-2");
+    await user.type(screen.getByLabelText("接口密钥"), "new-test-key");
+    await user.click(screen.getByRole("button", { name: "保存到系统凭据库" }));
+
+    await waitFor(async () => {
+      await expect(runtime.modelHub.findConnection("deepseek-2")).resolves.toMatchObject({
+        enabled: true,
+        credentialState: "present",
+      });
+    });
+    await expect(runtime.modelHub.findConnection(retired.id)).resolves.toMatchObject({
+      enabled: false,
+      connectionStatus: "disabled",
+      lastErrorCode: "MODEL_HUB_CONNECTION_RETIRED",
     });
     expect(credentials.save).toHaveBeenCalledTimes(1);
   }, 15_000);
@@ -1843,9 +2053,10 @@ describe("SettingsPage model routing", () => {
       id: "shared-provider-id",
       providerKind: "openai",
       displayName: "Existing OpenAI",
-      credentialState: "missing",
+      credentialRef: "keyring:model-hub:shared-provider-id",
+      credentialState: "present",
       authenticationMode: "bearer_keyring",
-      enabled: false,
+      enabled: true,
       expectedRevision: null,
     });
     const saveCredential = vi.fn(() => Promise.resolve({ configured: true, lastFour: "alue" }));
@@ -1862,8 +2073,10 @@ describe("SettingsPage model routing", () => {
     renderRoute(runtime);
 
     await screen.findByRole("heading", { name: "墨影模型中心" });
+    const beginConnection = screen.queryByRole("button", { name: "连接 AI 服务" });
+    if (beginConnection !== null) await user.click(beginConnection);
     const providerSelect = screen.getByRole("combobox", { name: "供应商" });
-    await waitFor(() => expect(providerSelect).toBeEnabled());
+    await waitFor(() => expect(providerSelect).toBeEnabled(), { timeout: 8_000 });
     await user.selectOptions(providerSelect, "custom_openai_compatible");
     fireEvent.change(screen.getByLabelText("服务根地址"), {
       target: { value: "https://custom-models.example/v1" },
@@ -2535,7 +2748,11 @@ describe("SettingsPage model routing", () => {
       trainingPolicy: "not_used",
     });
 
-    expect(screen.getByText(/请求只在本机运行/u)).toBeVisible();
+    await user.selectOptions(
+      await screen.findByRole("combobox", { name: "要检查的能力" }),
+      "text_generation",
+    );
+    expect(await screen.findByText(/请求只在本机运行/u)).toBeVisible();
     await user.click(screen.getByRole("button", { name: "专家设置" }));
     const editedBaseUrl = screen.getByLabelText("基础地址");
     await user.clear(editedBaseUrl);
@@ -2616,29 +2833,40 @@ describe("SettingsPage model routing", () => {
     });
   });
 
-  it("verifies a manual Qwen model with the shared 64-token probe without calling /models", async () => {
+  it("lets Qwen users refresh /models before running the matching embedding probe", async () => {
     const developmentRuntime = createDevelopmentRuntime(window.localStorage);
     await developmentRuntime.modelHub.saveConnection({
-      id: "qwen-writing",
+      id: "qwen-embedding",
       providerKind: "alibaba_qwen",
       displayName: "阿里云百炼 / Qwen",
       region: "singapore",
       baseUrlOverride: "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
-      credentialRef: "keyring:legacy-model-profile:qwen-writing",
+      credentialRef: "keyring:legacy-model-profile:qwen-embedding",
       credentialState: "present",
       expectedRevision: null,
     });
     const listModels = vi.fn<NativeModelGatewayClient["listModels"]>(() =>
-      Promise.reject(new Error("manual provider must not call /models")),
+      Promise.resolve({
+        provider: "open_ai_compatible",
+        models: [
+          {
+            id: "text-embedding-v4",
+            displayName: "text-embedding-v4",
+          },
+        ],
+      }),
     );
-    const generate = vi.fn<NativeModelGatewayClient["generate"]>((input) => {
-      input.onDelta?.("OK");
-      return Promise.resolve({
-        text: "OK",
-        usage: { inputTokens: 4, outputTokens: 1, cachedInputTokens: null },
-        streamed: true,
-      });
-    });
+    const generate = vi.fn<NativeModelGatewayClient["generate"]>();
+    const embed = vi.fn<NativeModelGatewayClient["embed"]>(() =>
+      Promise.resolve({
+        provider: "open_ai_compatible",
+        endpointOrigin: "https://dashscope-intl.aliyuncs.com",
+        model: "text-embedding-v4",
+        vectorCount: 1,
+        dimension: 3,
+        embeddings: [[0.25, -0.5, 0.75]],
+      }),
+    );
     const runtime: DesktopRuntime = {
       ...developmentRuntime,
       mode: "tauri",
@@ -2649,56 +2877,71 @@ describe("SettingsPage model routing", () => {
       },
       modelGateway: {
         available: true,
-        checkConnection: () => Promise.reject(new Error("manual provider uses the probe")),
+        checkConnection: () =>
+          Promise.resolve({
+            provider: "open_ai_compatible",
+            endpointOrigin: "https://dashscope-intl.aliyuncs.com",
+            modelCount: 1,
+            latencyMs: 12,
+          }),
         listModels,
         generate,
-        embed: () => Promise.reject(new Error("not used")),
+        embed,
         cancelGeneration: () => Promise.resolve(false),
       },
     };
     const user = userEvent.setup();
     renderRoute(runtime);
 
-    const modelInput = await screen.findByRole("textbox", { name: "模型标识" });
-    await user.type(modelInput, "qwen-writing-model");
+    const refreshButton = await screen.findByRole("button", {
+      name: "重新读取模型列表",
+    });
+    await waitFor(() => expect(refreshButton).toBeEnabled());
+    await user.click(refreshButton);
+
+    expect(await screen.findByText("text-embedding-v4")).toBeVisible();
+    expect(listModels).toHaveBeenCalledTimes(1);
+    expect(generate).not.toHaveBeenCalled();
+    expect(embed).not.toHaveBeenCalled();
+    const catalogAfterRefresh = await runtime.modelHub.listCatalog("qwen-embedding");
+    expect(catalogAfterRefresh).toEqual([
+      expect.objectContaining({
+        providerModelId: "text-embedding-v4",
+        catalogSource: "provider_api",
+      }),
+    ]);
+    const refreshedConnection = await runtime.modelHub.findConnection("qwen-embedding");
+    expect(refreshedConnection?.catalogSyncStatus).toBe("succeeded");
+    expect(typeof refreshedConnection?.lastCatalogSyncedAt).toBe("string");
+    expect(screen.getByRole("combobox", { name: "要检查的能力" })).toHaveValue("embedding");
+
     const verifyButton = screen.getByRole("button", {
-      name: "确认 1 次固定验证并检查连接",
+      name: "确认 1 次固定验证",
     });
     await waitFor(() => expect(verifyButton).toBeEnabled());
     await user.click(verifyButton);
 
-    expect(await screen.findByText("写作能力已验证")).toBeVisible();
-    expect(listModels).not.toHaveBeenCalled();
-    expect(generate).toHaveBeenCalledTimes(1);
-    const generatedInput = generate.mock.calls[0]?.[0];
-    expect(generatedInput).toMatchObject({
+    expect(await screen.findByText("语义向量能力已验证")).toBeVisible();
+    expect(generate).not.toHaveBeenCalled();
+    expect(embed).toHaveBeenCalledTimes(1);
+    const embeddingInput = embed.mock.calls[0]?.[0];
+    expect(embeddingInput).toMatchObject({
       dispatchScope: { kind: "non_project", reason: "connection_probe" },
       config: {
-        providerId: "qwen-writing",
+        providerId: "qwen-embedding",
         provider: "open_ai_compatible",
         retryLimit: 0,
       },
-      model: "qwen-writing-model",
-      messages: [{ role: "user", content: "只回复：OK" }],
-      maxOutputTokens: 64,
+      model: "text-embedding-v4",
+      inputs: ["墨影向量能力检查"],
     });
-    expect(generatedInput).not.toHaveProperty("temperature");
-    const catalog = await runtime.modelHub.listCatalog("qwen-writing");
-    const selected = catalog.find(
-      ({ providerModelId }) => providerModelId === "qwen-writing-model",
-    );
-    expect(selected).toBeDefined();
+    const selected = catalogAfterRefresh[0];
     await expect(
       runtime.modelHub.listCapabilityEvidence(selected?.id ?? "missing"),
     ).resolves.toEqual(
       expect.arrayContaining([
         expect.objectContaining({
-          capability: "text_generation",
-          verdict: "supported",
-          evidenceSource: "lightweight_probe",
-        }),
-        expect.objectContaining({
-          capability: "streaming",
+          capability: "embedding",
           verdict: "supported",
           evidenceSource: "lightweight_probe",
         }),
@@ -2712,6 +2955,87 @@ describe("SettingsPage model routing", () => {
       trainingPolicy: "unknown",
       evidenceSource: "provider_metadata",
     });
+  }, 30_000);
+
+  it("preserves a manual Qwen model and its persisted source when /models refresh fails", async () => {
+    const developmentRuntime = createDevelopmentRuntime(window.localStorage);
+    await developmentRuntime.modelHub.saveConnection({
+      id: "qwen-refresh-failure",
+      providerKind: "alibaba_qwen",
+      displayName: "Qwen 刷新失败测试",
+      region: "singapore",
+      baseUrlOverride: "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
+      credentialRef: "keyring:model-hub:qwen-refresh-failure",
+      credentialState: "present",
+      expectedRevision: null,
+    });
+    await developmentRuntime.modelHub.syncCatalog({
+      syncId: "qwen-refresh-failure-manual-sync",
+      connectionId: "qwen-refresh-failure",
+      source: "manual",
+      status: "succeeded",
+      models: [
+        {
+          id: "catalog-qwen-manual",
+          providerModelId: "qwen-manual-model",
+          displayName: "Qwen 手动模型",
+        },
+      ],
+    });
+    const listModels = vi.fn<NativeModelGatewayClient["listModels"]>(() =>
+      Promise.reject(new Error("MODEL_HUB_HTTP_STATUS:404")),
+    );
+    const generate = vi.fn<NativeModelGatewayClient["generate"]>();
+    const embed = vi.fn<NativeModelGatewayClient["embed"]>();
+    const runtime: DesktopRuntime = {
+      ...developmentRuntime,
+      mode: "tauri",
+      credentials: {
+        getSummary: () => Promise.resolve({ configured: true, lastFour: "1234" }),
+        save: () => Promise.resolve({ configured: true, lastFour: "1234" }),
+        delete: () => Promise.resolve({ configured: false, lastFour: null }),
+      },
+      modelGateway: {
+        available: true,
+        checkConnection: () =>
+          Promise.resolve({
+            provider: "open_ai_compatible",
+            endpointOrigin: "https://dashscope-intl.aliyuncs.com",
+            modelCount: 0,
+            latencyMs: 10,
+          }),
+        listModels,
+        generate,
+        embed,
+        cancelGeneration: () => Promise.resolve(false),
+      },
+    };
+    const user = userEvent.setup();
+    const firstRender = renderRoute(runtime);
+
+    expect(await screen.findByText(/手动添加/u)).toBeVisible();
+    const refreshButton = screen.getByRole("button", { name: "重新读取模型列表" });
+    await waitFor(() => expect(refreshButton).toBeEnabled());
+    await user.click(refreshButton);
+
+    await waitFor(() => expect(listModels).toHaveBeenCalledTimes(1));
+    expect(screen.getByText(/手动添加/u)).toBeVisible();
+    expect(generate).not.toHaveBeenCalled();
+    expect(embed).not.toHaveBeenCalled();
+    await expect(runtime.modelHub.findConnection("qwen-refresh-failure")).resolves.toMatchObject({
+      catalogSyncStatus: "failed",
+    });
+    await expect(runtime.modelHub.listCatalog("qwen-refresh-failure")).resolves.toEqual([
+      expect.objectContaining({
+        providerModelId: "qwen-manual-model",
+        catalogSource: "manual",
+      }),
+    ]);
+
+    firstRender.unmount();
+    renderRoute(runtime);
+    expect(await screen.findByText(/手动添加/u)).toBeVisible();
+    expect(screen.queryByText(/从服务商读取/u)).not.toBeInTheDocument();
   }, 30_000);
 
   it("discloses and sends the same effective Volcengine 接入点编号 when both model fields differ", async () => {
@@ -2757,6 +3081,10 @@ describe("SettingsPage model routing", () => {
     expect(endpointInput).toHaveValue("doubao-endpoint-actual");
     const modelInput = screen.getByRole("textbox", { name: "模型名称或接入点编号" });
     await user.type(modelInput, "doubao-model-only-visible-field");
+    await user.selectOptions(
+      screen.getByRole("combobox", { name: "要检查的能力" }),
+      "text_generation",
+    );
 
     expect(
       await screen.findByText(/的“doubao-endpoint-actual”发送固定短句“只回复：OK”/u),
@@ -2842,6 +3170,10 @@ describe("SettingsPage model routing", () => {
     const verifyButton = await screen.findByRole("button", {
       name: "确认 1 次固定验证",
     });
+    await user.selectOptions(
+      await screen.findByRole("combobox", { name: "要检查的能力" }),
+      "text_generation",
+    );
     expect(await screen.findByText(/最多请求 64 个输出内容额度/u)).toBeVisible();
     expect(screen.queryByText(/最多请求 8 个输出内容额度/u)).not.toBeInTheDocument();
     await waitFor(() => expect(verifyButton).toBeEnabled());
@@ -3208,6 +3540,63 @@ describe("SettingsPage model routing", () => {
     expect(document.body).not.toHaveTextContent("MODEL_OUTPUT_TRUNCATED");
   });
 
+  it("shows the exact Chinese capability failure stage and keeps HTTP details advanced", async () => {
+    const prepared = await createReadyDeepSeekProbeRuntime("deepseek-capability-not-found");
+    const generate = vi.fn<NativeModelGatewayClient["generate"]>(() =>
+      Promise.reject(
+        Object.assign(new Error("provider returned not found"), {
+          code: "MODEL_HTTP_NOT_FOUND",
+          retryable: false,
+          diagnostics: { httpStatus: 404 },
+        }),
+      ),
+    );
+    const runtime: DesktopRuntime = {
+      ...prepared.runtime,
+      modelGateway: {
+        ...prepared.runtime.modelGateway,
+        generate,
+      },
+    };
+    const user = userEvent.setup();
+    renderRoute(runtime);
+
+    const verifyButton = await screen.findByRole("button", {
+      name: "确认 1 次固定验证",
+    });
+    await waitFor(() => expect(verifyButton).toBeEnabled());
+    await user.click(verifyButton);
+
+    const failureTitle = await screen.findByText("模型能力检查失败");
+    const alert = failureTitle.closest("[role='alert']");
+    if (!(alert instanceof HTMLElement)) throw new Error("Expected a capability failure alert.");
+    expect(within(alert).getByText(/阶段：服务商响应/u)).toBeVisible();
+    expect(within(alert).getByText(/模型或接口路径.*证据不足以判断是哪一项不匹配/u)).toBeVisible();
+    expect(within(alert).getByText(/同时核对模型标识和接口路径/u)).toBeVisible();
+    expect(within(alert).getByText(/支持编号：墨影-/u)).toBeVisible();
+    expect(within(alert).queryByText(/404|MODEL_HTTP_NOT_FOUND/u)).not.toBeInTheDocument();
+
+    const advanced = screen.getByText("查看高级诊断详情").closest("details");
+    if (!(advanced instanceof HTMLDetailsElement)) {
+      throw new Error("Expected advanced capability diagnostics.");
+    }
+    expect(advanced.open).toBe(false);
+    await user.click(within(advanced).getByText("查看高级诊断详情"));
+    expect(within(advanced).getByText(/内部错误编号：MODEL_HTTP_NOT_FOUND/u)).toBeVisible();
+    expect(within(advanced).getByText(/服务响应状态：404/u)).toBeVisible();
+    expect(generate).toHaveBeenCalledTimes(1);
+    const invocations = await runtime.modelHub.listRecentAiFailures();
+    expect(invocations).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          normalizedErrorCode: "MODEL_HTTP_NOT_FOUND",
+          httpStatus: 404,
+          taskType: "capability_probe",
+        }),
+      ]),
+    );
+  }, 15_000);
+
   it("shows an uncertain capability result as pending review without a failed scan or redispatch", async () => {
     const connectionId = "deepseek-ambiguous-capability";
     const prepared = await createReadyDeepSeekProbeRuntime(connectionId);
@@ -3474,6 +3863,10 @@ describe("SettingsPage model routing", () => {
     const verifyButton = await screen.findByRole("button", {
       name: "确认 1 次固定验证",
     });
+    await user.selectOptions(
+      await screen.findByRole("combobox", { name: "要检查的能力" }),
+      "text_generation",
+    );
     await user.click(screen.getByRole("button", { name: "专家设置" }));
     const baseUrlInput = screen.getByLabelText("基础地址");
     expect(baseUrlInput).toHaveValue("http://127.0.0.1:11434");
@@ -3499,8 +3892,8 @@ describe("SettingsPage model routing", () => {
       const developmentRuntime = createDevelopmentRuntime(window.localStorage);
       await developmentRuntime.modelHub.saveConnection({
         id: "qwen-guarded",
-        providerKind: "alibaba_qwen",
-        displayName: "阿里云百炼 / Qwen",
+        providerKind: "zhipu_glm",
+        displayName: "智谱 GLM",
         region: "singapore",
         baseUrlOverride: "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
         credentialRef: "keyring:legacy-model-profile:qwen-guarded",
@@ -3601,6 +3994,10 @@ describe("SettingsPage model routing", () => {
 
       const modelInput = await screen.findByRole("textbox", { name: "模型标识" });
       await user.type(modelInput, "qwen-guarded-model");
+      await user.selectOptions(
+        screen.getByRole("combobox", { name: "要检查的能力" }),
+        "text_generation",
+      );
       const verifyButton = screen.getByRole("button", {
         name: "确认 1 次固定验证并检查连接",
       });
@@ -3652,8 +4049,8 @@ describe("SettingsPage model routing", () => {
       const developmentRuntime = createDevelopmentRuntime(window.localStorage);
       await developmentRuntime.modelHub.saveConnection({
         id: "qwen-final-write-guard",
-        providerKind: "alibaba_qwen",
-        displayName: "Qwen final write guard",
+        providerKind: "zhipu_glm",
+        displayName: "GLM final write guard",
         region: "singapore",
         baseUrlOverride: "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
         credentialRef: "keyring:model-hub:qwen-final-write-guard",
@@ -3730,6 +4127,10 @@ describe("SettingsPage model routing", () => {
       await screen.findByRole("heading", { name: "墨影模型中心" });
       const modelInput = await screen.findByRole("textbox", { name: "模型标识" });
       await user.type(modelInput, "qwen-final-write-model");
+      await user.selectOptions(
+        screen.getByRole("combobox", { name: "要检查的能力" }),
+        "text_generation",
+      );
       const verifyButton = screen.getByRole("button", {
         name: "确认 1 次固定验证并检查连接",
       });

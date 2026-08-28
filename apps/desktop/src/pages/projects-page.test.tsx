@@ -265,10 +265,15 @@ describe("ProjectsPage library states", () => {
     const card = projectCard("未完成的钟楼");
     expect(await within(card).findByText("未完成创作")).toBeVisible();
     expect(within(card).getByText(/继续后仍由你决定使用或放弃结果/u)).toBeVisible();
-    expect(within(card).getByRole("link", { name: "继续未完成创作" })).toHaveAttribute(
+    const content = card.querySelector<HTMLElement>(".ink-card__content");
+    const footer = card.querySelector<HTMLElement>(".ink-card__footer");
+    if (content === null || footer === null) throw new Error("作品卡片缺少统一内容或操作区。 ");
+    expect(within(content).queryByRole("link", { name: "继续未完成创作" })).toBeNull();
+    expect(within(footer).getByRole("link", { name: "继续未完成创作" })).toHaveAttribute(
       "href",
       "/create/idea?journey=" + journeyId,
     );
+    expect(within(footer).queryByRole("link", { name: "打开" })).toBeNull();
     expect(within(card).getByText("完成或结束这次创作后即可重命名作品。")).toBeVisible();
     expect(within(card).getByRole("button", { name: "重命名" })).toBeDisabled();
   });

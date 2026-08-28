@@ -640,7 +640,12 @@ export class StoryFact {
     });
   }
 
-  /** Rewrites only the author-facing content while preserving identity and evidence. */
+  /**
+   * Rewrites only the author-facing content while preserving identity and evidence.
+   * Author-review structures are immutable provenance, not editable semantics;
+   * keeping them allows the confirmed wording to remain traceable to its seed or
+   * exact local source range without making other structured facts text-editable.
+   */
   public editAsUser(input: {
     readonly contentText: string;
     readonly actorId: string;
@@ -656,7 +661,8 @@ export class StoryFact {
         "A branch or locked story fact must be unlocked or handled in its branch before editing.",
       );
     }
-    if (this.snapshot.structuredValue !== null) {
+    const structuredAuthorDraft = isStructuredAuthorReviewDraft(this.snapshot);
+    if (this.snapshot.structuredValue !== null && !structuredAuthorDraft) {
       return invalidTransition(
         "A structured story fact cannot be edited as plain text until a structured edit transaction is available.",
       );
@@ -676,6 +682,7 @@ export class StoryFact {
     return StoryFact.rehydrate({
       ...this.snapshot,
       contentText: contentText.value,
+      structuredValue: this.snapshot.structuredValue,
       confidence: 1,
       status: "formal",
       origin: "user",
@@ -953,6 +960,29 @@ type DirectLocalReviewDraftSnapshot = StoryFactSnapshot &
         excerpt: string;
       }>;
   }>;
+
+function isStructuredAuthorReviewDraft(snapshot: StoryFactSnapshot): boolean {
+  return (
+    isStructuredAuthorDraftProvenance(snapshot.structuredValue) &&
+    snapshot.status === "unconfirmed" &&
+    snapshot.origin === "user" &&
+    snapshot.needsReview &&
+    !snapshot.userConfirmed &&
+    !snapshot.locked &&
+    snapshot.source.kind === "user_statement" &&
+    snapshot.source.reference.startsWith("user-statement:draft:")
+  );
+}
+
+function isStructuredAuthorDraftProvenance(value: StoryFactSnapshot["structuredValue"]): boolean {
+  if (!isStoryValueRecord(value)) {
+    return false;
+  }
+  return (
+    value.schemaVersion === "inkshadow.local-bulk-setting-draft.v1" ||
+    value.schemaVersion === "inkshadow.professional-setup-fact-draft.v1"
+  );
+}
 
 function isDirectLocalReviewDraft(
   snapshot: StoryFactSnapshot,

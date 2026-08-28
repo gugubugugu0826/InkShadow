@@ -85,6 +85,10 @@ const storyFactEvidenceGuardPerformanceMigration = readFileSync(
   new URL("../migrations/0081_story_fact_evidence_guard_performance.sql", import.meta.url),
   "utf8",
 );
+const authorRecoveryRecordsMigration = readFileSync(
+  new URL("../migrations/0082_author_recovery_records.sql", import.meta.url),
+  "utf8",
+);
 const inkShadowMigration = [
   readFileSync(new URL("../migrations/0001_core.sql", import.meta.url), "utf8"),
   readFileSync(new URL("../migrations/0002_tasks_notifications.sql", import.meta.url), "utf8"),
@@ -305,6 +309,7 @@ const inkShadowMigration = [
   storyFactEvidenceMigration,
   candidateSelectionActionMigration,
   storyFactEvidenceGuardPerformanceMigration,
+  authorRecoveryRecordsMigration,
 ].join("\n");
 const inkShadowMigrationV73 = inkShadowMigration
   .replace(capabilityProbeInvocationLedgerMigration, "")
@@ -460,7 +465,7 @@ describe("DatabaseMaintenanceService", () => {
         value: {
           sourceKind: "user_selected_file",
           integrityVerified: true,
-          restoredTableCount: 175,
+          restoredTableCount: 176,
         },
       });
       await expect(
@@ -717,6 +722,27 @@ describe("DatabaseMaintenanceService", () => {
     const executor = new NodeSqliteExecutor(inkShadowMigration);
     const service = new DatabaseMaintenanceService(executor);
     await insertProject(executor, BACKUP_PROJECT_ID, "备份中的项目");
+    const recoveryPayload = JSON.stringify({
+      schemaVersion: "inkshadow.local-bulk-setting-recovery.v1",
+      projectId: BACKUP_PROJECT_ID,
+      batchId: "019f9f4a-b3c7-7350-9226-000000000901",
+      source: "林深是调查记者。故事发生在旧城。",
+      sourceLength: 18,
+      drafts: [{ draftId: "原始草稿-一", startOffset: 0, endOffset: 9 }],
+    });
+    await executor.execute(
+      `INSERT INTO author_recovery_records (
+         project_id, kind, schema_version, payload_json,
+         revision, created_at, updated_at
+       ) VALUES (?, 'bulk_story_settings', ?, ?, 3, ?, ?)`,
+      [
+        BACKUP_PROJECT_ID,
+        "inkshadow.local-bulk-setting-recovery.v1",
+        recoveryPayload,
+        "2026-07-27T00:00:00.000Z",
+        "2026-07-27T00:02:00.000Z",
+      ],
+    );
     await executor.execute(
       `INSERT INTO project_display_identities (
          project_id, display_kind, provenance, created_at, updated_at
@@ -1041,6 +1067,13 @@ describe("DatabaseMaintenanceService", () => {
        WHERE id = 'maintenance-writing-preference'`,
     );
     await executor.execute(
+      `UPDATE author_recovery_records
+       SET schema_version = 'changed.after.backup', payload_json = ?,
+           revision = 4, updated_at = '2026-07-27T00:03:00.000Z'
+       WHERE project_id = ? AND kind = 'bulk_story_settings'`,
+      [JSON.stringify({ source: "恢复前被修改" }), BACKUP_PROJECT_ID],
+    );
+    await executor.execute(
       "DELETE FROM writing_feedback_events WHERE id = 'maintenance-feedback-event'",
     );
     await executor.execute("DELETE FROM novel_skill_invocation_items WHERE snapshot_id = ?", [
@@ -1060,9 +1093,32 @@ describe("DatabaseMaintenanceService", () => {
       value: {
         sourceKind: "user_selected_file",
         integrityVerified: true,
-        restoredTableCount: 175,
+        restoredTableCount: 176,
       },
     });
+    await expect(
+      executor.select<{
+        readonly schemaVersion: string;
+        readonly payloadJson: string;
+        readonly revision: number;
+        readonly createdAt: string;
+        readonly updatedAt: string;
+      }>(
+        `SELECT schema_version AS schemaVersion, payload_json AS payloadJson,
+                revision, created_at AS createdAt, updated_at AS updatedAt
+         FROM author_recovery_records
+         WHERE project_id = ? AND kind = 'bulk_story_settings'`,
+        [BACKUP_PROJECT_ID],
+      ),
+    ).resolves.toEqual([
+      {
+        schemaVersion: "inkshadow.local-bulk-setting-recovery.v1",
+        payloadJson: recoveryPayload,
+        revision: 3,
+        createdAt: "2026-07-27T00:00:00.000Z",
+        updatedAt: "2026-07-27T00:02:00.000Z",
+      },
+    ]);
     await expect(
       executor.select<{
         displayKind: string;

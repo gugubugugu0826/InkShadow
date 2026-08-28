@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import type { Chapter, Project } from "@inkshadow/domain";
+import { MAX_CHAPTER_TITLE_LENGTH, type Chapter, type Project } from "@inkshadow/domain";
 import {
   Badge,
   Button,
@@ -65,9 +65,15 @@ export function WorkspacePage() {
   const [insightsLoading, setInsightsLoading] = useState(false);
   const [insightsError, setInsightsError] = useState<unknown>(null);
   const [pendingCandidateChapterId, setPendingCandidateChapterId] = useState<string | null>(null);
+  const titleInputRef = useRef<HTMLInputElement>(null);
   const loadSequence = useRef(0);
   const routeIdentityRef = useRef(diagnosticRoute);
   const operationSequence = useRef(0);
+  useLayoutEffect(() => {
+    if (createOpen && formError !== null) {
+      titleInputRef.current?.focus();
+    }
+  }, [createOpen, formError]);
   useLayoutEffect(() => {
     routeIdentityRef.current = diagnosticRoute;
     operationSequence.current += 1;
@@ -220,6 +226,10 @@ export function WorkspacePage() {
 
   async function createChapter(): Promise<void> {
     if (projectId === null) {
+      return;
+    }
+    if (title.trim().length === 0) {
+      setFormError(`章节标题不能为空，请输入 1 至 ${String(MAX_CHAPTER_TITLE_LENGTH)} 个字符。`);
       return;
     }
     const operationRoute = diagnosticRoute;
@@ -432,7 +442,9 @@ export function WorkspacePage() {
                 <CardHeader>
                   <div className="card-heading-row">
                     <span className="chapter-number">{String(index + 1).padStart(2, "0")}</span>
-                    <CardTitle>{chapter.title}</CardTitle>
+                    <CardTitle className="workspace-page__chapter-title" title={chapter.title}>
+                      {chapter.title}
+                    </CardTitle>
                     {chapter.isLocalOnly && <Badge tone="success">本地私密</Badge>}
                   </div>
                 </CardHeader>
@@ -486,11 +498,7 @@ export function WorkspacePage() {
             >
               取消
             </Button>
-            <Button
-              loading={submitting}
-              disabled={title.trim().length === 0}
-              onClick={() => void createChapter()}
-            >
+            <Button loading={submitting} disabled={submitting} onClick={() => void createChapter()}>
               创建章节
             </Button>
           </>
@@ -500,16 +508,15 @@ export function WorkspacePage() {
           {(fieldProps) => (
             <Input
               {...fieldProps}
+              ref={titleInputRef}
               value={title}
-              maxLength={200}
-              onChange={(event) => setTitle(event.currentTarget.value)}
+              maxLength={MAX_CHAPTER_TITLE_LENGTH}
+              onChange={(event) => {
+                setTitle(event.currentTarget.value);
+                setFormError(null);
+              }}
               onKeyDown={(event) => {
-                if (
-                  event.key === "Enter" &&
-                  !event.nativeEvent.isComposing &&
-                  !submitting &&
-                  title.trim().length > 0
-                ) {
+                if (event.key === "Enter" && !event.nativeEvent.isComposing && !submitting) {
                   event.preventDefault();
                   void createChapter();
                 }

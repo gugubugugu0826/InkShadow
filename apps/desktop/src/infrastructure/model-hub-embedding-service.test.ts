@@ -255,6 +255,200 @@ describe("Model Hub embedding execution service", () => {
     );
   });
 
+  it("does not create a renderer dispatch receipt when native preparation rejects the request", async () => {
+    const harness = createHarness();
+    const target = await seedTarget(harness.modelHub, {
+      connectionId: "native-preflight-rejection",
+      catalogEntryId: "native-preflight-rejection-catalog",
+      modelId: "native-preflight-model",
+    });
+    await saveRoute(harness.modelHub, { primaryCatalogEntryId: target.id });
+    const rendererDispatch = vi.spyOn(harness.modelHub, "markInvocationDispatched");
+    let invocationId = "";
+    harness.embed.mockRejectedValue({
+      code: "MODEL_CREDENTIAL_MISSING",
+      retryable: false,
+    });
+    const nativeGateway = {
+      available: true,
+      supportsNativeInvocationDispatchLedger: true as const,
+      embed: harness.embed,
+    };
+
+    await expect(
+      executeModelHubEmbeddingTask(
+        { ...harness.dependencies, modelGateway: nativeGateway },
+        { dispatchScope: TEST_DISPATCH_SCOPE, inputs: [PRIVATE_INPUT] },
+      ),
+    ).rejects.toMatchObject({ dispatched: false });
+
+    expect(rendererDispatch).not.toHaveBeenCalled();
+    expect(harness.embed).toHaveBeenCalledOnce();
+    expect(harness.embed.mock.calls[0]?.[0]).toHaveProperty("invocationDispatchLedger");
+    invocationId = harness.embed.mock.calls[0]?.[0].invocationDispatchLedger?.invocationId ?? "";
+    const invocation = await harness.modelHub.findInvocation(invocationId);
+    expect(invocation).toMatchObject({
+      status: "failed",
+      providerDispatchStartedAt: null,
+    });
+  });
+
+  it("recovers one native receipt and marks an interrupted HTTP outcome for review", async () => {
+    const harness = createHarness();
+    const target = await seedTarget(harness.modelHub, {
+      connectionId: "native-http-interruption",
+      catalogEntryId: "native-http-interruption-catalog",
+      modelId: "native-http-interruption-model",
+    });
+    await saveRoute(harness.modelHub, { primaryCatalogEntryId: target.id });
+    const rendererDispatch = vi.spyOn(harness.modelHub, "markInvocationDispatched");
+    let invocationId = "";
+    harness.embed.mockImplementation(async (request) => {
+      const ledger = request.invocationDispatchLedger;
+      if (ledger === undefined) throw new Error("missing native dispatch ledger");
+      invocationId = ledger.invocationId;
+      const dispatched = await harness.modelHub.markInvocationDispatched({
+        id: ledger.invocationId,
+        dispatchedAt: NOW,
+        expectedRevision: ledger.expectedRevision,
+      });
+      await request.onInvocationDispatchAccepted?.({
+        invocationId: dispatched.id,
+        dispatchedAt: dispatched.providerDispatchStartedAt ?? NOW,
+        revision: dispatched.revision,
+      });
+      throw Object.assign(new Error("native embedding timed out"), {
+        code: "MODEL_TIMEOUT",
+        retryable: true,
+      });
+    });
+    const nativeGateway = {
+      available: true,
+      supportsNativeInvocationDispatchLedger: true as const,
+      embed: harness.embed,
+    };
+
+    await expect(
+      executeModelHubEmbeddingTask(
+        { ...harness.dependencies, modelGateway: nativeGateway },
+        { dispatchScope: TEST_DISPATCH_SCOPE, inputs: [PRIVATE_INPUT] },
+      ),
+    ).rejects.toMatchObject({
+      code: "PROVIDER_RESULT_AMBIGUOUS",
+      dispatched: true,
+      retryable: false,
+    });
+
+    expect(rendererDispatch).toHaveBeenCalledOnce();
+    expect(harness.embed).toHaveBeenCalledOnce();
+    const invocation = await harness.modelHub.findInvocation(invocationId);
+    expect(invocation).toMatchObject({
+      status: "timed_out",
+      providerDispatchStartedAt: NOW,
+    });
+  });
+
+  it("recovers the durable native receipt when the WebView loses the receipt callback", async () => {
+    const harness = createHarness();
+    const target = await seedTarget(harness.modelHub, {
+      connectionId: "native-lost-receipt-callback",
+      catalogEntryId: "native-lost-receipt-callback-catalog",
+      modelId: "native-lost-receipt-callback-model",
+    });
+    await saveRoute(harness.modelHub, { primaryCatalogEntryId: target.id });
+    let invocationId = "";
+    harness.embed.mockImplementation(async (request) => {
+      const ledger = request.invocationDispatchLedger;
+      if (ledger === undefined) throw new Error("missing native dispatch ledger");
+      invocationId = ledger.invocationId;
+      await harness.modelHub.markInvocationDispatched({
+        id: ledger.invocationId,
+        dispatchedAt: NOW,
+        expectedRevision: ledger.expectedRevision,
+      });
+      throw Object.assign(new Error("native receipt callback was lost"), {
+        code: "MODEL_RUNTIME_FAILED",
+        retryable: false,
+      });
+    });
+    const nativeGateway = {
+      available: true,
+      supportsNativeInvocationDispatchLedger: true as const,
+      embed: harness.embed,
+    };
+
+    await expect(
+      executeModelHubEmbeddingTask(
+        { ...harness.dependencies, modelGateway: nativeGateway },
+        { dispatchScope: TEST_DISPATCH_SCOPE, inputs: [PRIVATE_INPUT] },
+      ),
+    ).rejects.toMatchObject({
+      code: "PROVIDER_RESULT_AMBIGUOUS",
+      dispatched: true,
+      retryable: false,
+    });
+
+    expect(harness.embed).toHaveBeenCalledOnce();
+    const invocation = await harness.modelHub.findInvocation(invocationId);
+    expect(invocation).toMatchObject({
+      status: "timed_out",
+      providerDispatchStartedAt: NOW,
+      errorCode: "PROVIDER_RESULT_AMBIGUOUS",
+    });
+    expect(JSON.stringify(invocation)).not.toContain(PRIVATE_INPUT);
+    expect(JSON.stringify(invocation)).not.toContain(JSON.stringify(PRIVATE_VECTOR));
+  });
+
+  it("keeps an explicit provider HTTP failure definite after recovering a lost receipt callback", async () => {
+    const harness = createHarness();
+    const target = await seedTarget(harness.modelHub, {
+      connectionId: "native-explicit-http-failure",
+      catalogEntryId: "native-explicit-http-failure-catalog",
+      modelId: "native-explicit-http-failure-model",
+    });
+    await saveRoute(harness.modelHub, { primaryCatalogEntryId: target.id });
+    let invocationId = "";
+    harness.embed.mockImplementation(async (request) => {
+      const ledger = request.invocationDispatchLedger;
+      if (ledger === undefined) throw new Error("missing native dispatch ledger");
+      invocationId = ledger.invocationId;
+      await harness.modelHub.markInvocationDispatched({
+        id: ledger.invocationId,
+        dispatchedAt: NOW,
+        expectedRevision: ledger.expectedRevision,
+      });
+      throw Object.assign(new Error("provider returned an explicit HTTP failure"), {
+        code: "MODEL_HTTP_SERVICE_UNAVAILABLE",
+        retryable: true,
+        diagnostics: { httpStatus: 503 },
+      });
+    });
+
+    await expect(
+      executeModelHubEmbeddingTask(
+        {
+          ...harness.dependencies,
+          modelGateway: {
+            available: true,
+            supportsNativeInvocationDispatchLedger: true,
+            embed: harness.embed,
+          },
+        },
+        { dispatchScope: TEST_DISPATCH_SCOPE, inputs: [PRIVATE_INPUT] },
+      ),
+    ).rejects.toMatchObject({
+      code: "MODEL_HTTP_SERVICE_UNAVAILABLE",
+      dispatched: true,
+    });
+
+    const invocation = await harness.modelHub.findInvocation(invocationId);
+    expect(invocation).toMatchObject({
+      status: "failed",
+      providerDispatchStartedAt: NOW,
+      errorCode: "MODEL_HTTP_SERVICE_UNAVAILABLE",
+    });
+  });
+
   it("does not embed when the credential slot rotates in onBeforeDispatch", async () => {
     const harness = createHarness();
     const target = await seedTarget(harness.modelHub, {

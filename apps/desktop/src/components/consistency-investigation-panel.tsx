@@ -690,7 +690,10 @@ function InvestigationTaskGraph({
             description="上一次调查不会被续跑，也不会因为打开此结果而自动重发。"
           />
         )}
-        <ol className="chapter-check-history" aria-label="只读调查任务图">
+        <ol
+          className="chapter-check-history consistency-investigation-task-graph"
+          aria-label="只读调查任务图"
+        >
           {graph.nodes.map((node) => (
             <li key={node.id}>
               <div className="card-heading-row">

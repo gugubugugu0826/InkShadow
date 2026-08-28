@@ -108,6 +108,9 @@ export interface RecentAiFailure {
 const RETIRED_CONNECTION_ERROR_CODE = "MODEL_HUB_CONNECTION_RETIRED";
 const RETIRED_CONNECTION_SUMMARY =
   "The connection was retired. Its credential reference was cleared while immutable invocation history was retained.";
+export const RETIREMENT_CLEANUP_PENDING_ERROR_CODE = "MODEL_HUB_CONNECTION_RETIREMENT_INCOMPLETE";
+const RETIREMENT_CLEANUP_PENDING_SUMMARY =
+  "The connection was disabled before retirement cleanup and requires an explicit cleanup retry.";
 
 export interface ModelProviderConnection {
   readonly id: string;
@@ -150,6 +153,16 @@ export function isRetiredModelProviderConnection(connection: ModelProviderConnec
   );
 }
 
+export function isRetirementCleanupPendingModelProviderConnection(
+  connection: ModelProviderConnection,
+): boolean {
+  return (
+    !connection.enabled &&
+    connection.connectionStatus === "disabled" &&
+    connection.lastErrorCode === RETIREMENT_CLEANUP_PENDING_ERROR_CODE
+  );
+}
+
 export interface SaveModelProviderConnectionInput {
   readonly id: string;
   readonly providerKind: ModelProviderKind;
@@ -169,6 +182,7 @@ export interface SaveModelProviderConnectionInput {
   readonly retryLimit?: number;
   readonly legacyProviderId?: string | null;
   readonly enabled?: boolean;
+  readonly retirementCleanupPending?: boolean;
   readonly expectedRevision: number | null;
 }
 
@@ -920,37 +934,42 @@ export class TauriModelHubStore implements ModelHubStore {
     input: RecordConnectionTestInput,
   ): Promise<ModelProviderConnection> {
     const validated = validateConnectionTestInput(input);
-    const existing = await this.findConnection(validated.connectionId);
-    if (existing !== null && isRetiredModelProviderConnection(existing)) {
-      throw retiredConnectionMutation();
-    }
-    const now = this.clock.now();
-    const result = await this.executor.execute(
-      `UPDATE model_provider_connections
-       SET connection_status = ?, last_tested_at = ?, last_error_code = ?,
-           last_error_summary = ?, revision = revision + 1, updated_at = ?
-       WHERE id = ? AND revision = ?`,
-      [
-        validated.status,
-        now,
-        validated.errorCode,
-        validated.errorSummary,
-        now,
-        validated.connectionId,
-        validated.expectedRevision,
-      ],
-    );
-    if (result.rowsAffected !== 1) {
-      throw conflict("MODEL_HUB_CONNECTION_CONFLICT");
-    }
-    const saved = await this.findConnection(validated.connectionId);
-    if (saved === null) {
-      throw modelHubError(
-        "MODEL_HUB_CONNECTION_NOT_FOUND",
-        "The provider connection does not exist.",
+    return this.executor.transaction(async (transaction) => {
+      const existing = await findConnectionRow(transaction, validated.connectionId);
+      if (existing !== null && isRetiredConnectionRow(existing)) {
+        throw retiredConnectionMutation();
+      }
+      if (existing !== null && isRetirementCleanupPendingConnectionRow(existing)) {
+        throw retirementCleanupPendingMutation();
+      }
+      const now = this.clock.now();
+      const result = await transaction.execute(
+        `UPDATE model_provider_connections
+         SET connection_status = ?, last_tested_at = ?, last_error_code = ?,
+             last_error_summary = ?, revision = revision + 1, updated_at = ?
+         WHERE id = ? AND revision = ?`,
+        [
+          validated.status,
+          now,
+          validated.errorCode,
+          validated.errorSummary,
+          now,
+          validated.connectionId,
+          validated.expectedRevision,
+        ],
       );
-    }
-    return saved;
+      if (result.rowsAffected !== 1) {
+        throw conflict("MODEL_HUB_CONNECTION_CONFLICT");
+      }
+      const saved = await findConnectionRow(transaction, validated.connectionId);
+      if (saved === null) {
+        throw modelHubError(
+          "MODEL_HUB_CONNECTION_NOT_FOUND",
+          "The provider connection does not exist.",
+        );
+      }
+      return hydrateConnection(saved);
+    });
   }
 
   public async listCatalog(connectionIdValue: string): Promise<readonly ModelCatalogEntry[]> {
@@ -1011,26 +1030,31 @@ export class TauriModelHubStore implements ModelHubStore {
     input: PrepareModelHubConnectionCommitInput,
   ): Promise<ModelHubConnectionCommit> {
     const validated = validatePrepareConnectionCommitInput(input);
-    const existing = await this.findConnection(validated.connectionId);
-    if (existing !== null && isRetiredModelProviderConnection(existing)) {
-      throw retiredConnectionMutation();
-    }
-    const now = this.clock.now();
-    await this.executor.execute(
-      `INSERT INTO model_hub_connection_commits (
-         id, connection_id, phase, credential_provider_id,
-         cleanup_credential_provider_id, created_at, updated_at
-       ) VALUES (?, ?, 'prepared', ?, NULL, ?, ?)`,
-      [validated.id, validated.connectionId, validated.credentialProviderId, now, now],
-    );
-    const saved = await this.findConnectionCommit(validated.connectionId);
-    if (saved?.id !== validated.id) {
-      throw modelHubError(
-        "MODEL_HUB_CONNECTION_COMMIT_WRITE_FAILED",
-        "The connection commit journal was not persisted.",
+    return this.executor.transaction(async (transaction) => {
+      const existing = await findConnectionRow(transaction, validated.connectionId);
+      if (existing !== null && isRetiredConnectionRow(existing)) {
+        throw retiredConnectionMutation();
+      }
+      if (existing !== null && isRetirementCleanupPendingConnectionRow(existing)) {
+        throw retirementCleanupPendingMutation();
+      }
+      const now = this.clock.now();
+      await transaction.execute(
+        `INSERT INTO model_hub_connection_commits (
+           id, connection_id, phase, credential_provider_id,
+           cleanup_credential_provider_id, created_at, updated_at
+         ) VALUES (?, ?, 'prepared', ?, NULL, ?, ?)`,
+        [validated.id, validated.connectionId, validated.credentialProviderId, now, now],
       );
-    }
-    return saved;
+      const saved = await findConnectionCommitRow(transaction, validated.connectionId);
+      if (saved?.id !== validated.id) {
+        throw modelHubError(
+          "MODEL_HUB_CONNECTION_COMMIT_WRITE_FAILED",
+          "The connection commit journal was not persisted.",
+        );
+      }
+      return hydrateConnectionCommit(saved);
+    });
   }
 
   public async publishConnectionCommit(
@@ -1210,6 +1234,10 @@ export class TauriModelHubStore implements ModelHubStore {
     const validated = validateCapabilityScanInput(input);
     await this.executor.transaction(async (transaction) => {
       await ensureCatalogEntryExists(transaction, validated.catalogEntryId);
+      await ensureCatalogConnectionNotPendingRetirementCleanup(
+        transaction,
+        validated.catalogEntryId,
+      );
       await persistSqliteCapabilityScan(transaction, validated, this.clock.now());
     });
     return this.listCapabilityEvidence(validated.catalogEntryId);
@@ -1220,6 +1248,10 @@ export class TauriModelHubStore implements ModelHubStore {
   ): Promise<CapabilityProbeCommitResult> {
     const validated = validateCapabilityProbeCommitInput(input);
     return this.executor.transaction(async (transaction) => {
+      const frozenConnection = await findConnectionRow(transaction, validated.connectionId);
+      if (frozenConnection !== null && isRetirementCleanupPendingConnectionRow(frozenConnection)) {
+        throw retirementCleanupPendingMutation();
+      }
       const connectionGuard = await transaction.execute(
         `UPDATE model_provider_connections
          SET revision = revision
@@ -2090,6 +2122,9 @@ export class InMemoryModelHubStore implements ModelHubStore {
       if (existing !== undefined && isRetiredModelProviderConnection(existing)) {
         throw retiredConnectionMutation();
       }
+      if (existing !== undefined && isRetirementCleanupPendingModelProviderConnection(existing)) {
+        throw retirementCleanupPendingMutation();
+      }
       const endpointIdentityChanged =
         existing !== undefined && connectionEndpointIdentityChanged(existing, validated);
       const now = this.clock.now();
@@ -2114,9 +2149,11 @@ export class InMemoryModelHubStore implements ModelHubStore {
         embeddingPath: validated.embeddingPath,
         requestTimeoutMs: validated.requestTimeoutMs,
         retryLimit: validated.retryLimit,
-        connectionStatus: endpointIdentityChanged
-          ? "not_tested"
-          : (existing?.connectionStatus ?? "not_tested"),
+        connectionStatus: validated.retirementCleanupPending
+          ? "disabled"
+          : endpointIdentityChanged
+            ? "not_tested"
+            : (existing?.connectionStatus ?? "not_tested"),
         catalogSyncStatus: endpointIdentityChanged
           ? "never"
           : (existing?.catalogSyncStatus ?? "never"),
@@ -2124,8 +2161,16 @@ export class InMemoryModelHubStore implements ModelHubStore {
         lastCatalogSyncedAt: endpointIdentityChanged
           ? null
           : (existing?.lastCatalogSyncedAt ?? null),
-        lastErrorCode: endpointIdentityChanged ? null : (existing?.lastErrorCode ?? null),
-        lastErrorSummary: endpointIdentityChanged ? null : (existing?.lastErrorSummary ?? null),
+        lastErrorCode: validated.retirementCleanupPending
+          ? RETIREMENT_CLEANUP_PENDING_ERROR_CODE
+          : endpointIdentityChanged
+            ? null
+            : (existing?.lastErrorCode ?? null),
+        lastErrorSummary: validated.retirementCleanupPending
+          ? RETIREMENT_CLEANUP_PENDING_SUMMARY
+          : endpointIdentityChanged
+            ? null
+            : (existing?.lastErrorSummary ?? null),
         legacyProviderId: validated.legacyProviderId,
         enabled: validated.enabled,
         revision: existing === undefined ? 1 : existing.revision + 1,
@@ -2192,6 +2237,9 @@ export class InMemoryModelHubStore implements ModelHubStore {
       if (isRetiredModelProviderConnection(existing)) {
         throw retiredConnectionMutation();
       }
+      if (isRetirementCleanupPendingModelProviderConnection(existing)) {
+        throw retirementCleanupPendingMutation();
+      }
       const now = this.clock.now();
       const saved: ModelProviderConnection = Object.freeze({
         ...existing,
@@ -2253,6 +2301,9 @@ export class InMemoryModelHubStore implements ModelHubStore {
       }
       if (isRetiredModelProviderConnection(connection)) {
         throw retiredConnectionMutation();
+      }
+      if (isRetirementCleanupPendingModelProviderConnection(connection)) {
+        throw retirementCleanupPendingMutation();
       }
       if (this.state.catalogSyncs[validated.syncId] !== undefined) {
         throw conflict("MODEL_HUB_CATALOG_SYNC_CONFLICT");
@@ -2352,6 +2403,12 @@ export class InMemoryModelHubStore implements ModelHubStore {
       const connection = this.state.connections[validated.connectionId];
       if (connection !== undefined && isRetiredModelProviderConnection(connection)) {
         throw retiredConnectionMutation();
+      }
+      if (
+        connection !== undefined &&
+        isRetirementCleanupPendingModelProviderConnection(connection)
+      ) {
+        throw retirementCleanupPendingMutation();
       }
       if (
         this.state.connectionCommits[validated.connectionId] !== undefined ||
@@ -2539,6 +2596,15 @@ export class InMemoryModelHubStore implements ModelHubStore {
       if (this.state.catalog[validated.catalogEntryId] === undefined) {
         throw modelHubError("MODEL_HUB_MODEL_NOT_FOUND", "The selected model does not exist.");
       }
+      const catalogEntry = this.state.catalog[validated.catalogEntryId];
+      const connection =
+        catalogEntry === undefined ? undefined : this.state.connections[catalogEntry.connectionId];
+      if (
+        connection !== undefined &&
+        isRetirementCleanupPendingModelProviderConnection(connection)
+      ) {
+        throw retirementCleanupPendingMutation();
+      }
       assertMemoryCapabilityScanInvocation(this.state, validated);
       if (Object.hasOwn(this.state.capabilityScans, validated.scanId)) {
         throw conflict("MODEL_HUB_CAPABILITY_SCAN_CONFLICT");
@@ -2587,6 +2653,12 @@ export class InMemoryModelHubStore implements ModelHubStore {
       const nextState = structuredClone(this.state);
       const connection = nextState.connections[validated.connectionId];
       const catalogEntry = nextState.catalog[validated.catalogEntryId];
+      if (
+        connection !== undefined &&
+        isRetirementCleanupPendingModelProviderConnection(connection)
+      ) {
+        throw retirementCleanupPendingMutation();
+      }
       if (
         connection?.revision !== validated.expectedConnectionRevision ||
         !connection.enabled ||
@@ -2867,36 +2939,11 @@ export class InMemoryModelHubStore implements ModelHubStore {
       ) {
         throw conflict("MODEL_HUB_ROUTE_CONFLICT");
       }
-      for (const id of [validated.primaryCatalogEntryId, validated.fallbackCatalogEntryId]) {
-        if (id !== null && this.state.catalog[id]?.availability !== "available") {
-          throw modelHubError(
-            "MODEL_HUB_MODEL_NOT_AVAILABLE",
-            "The selected model is not available.",
-          );
-        }
-      }
-      if (validated.privacyPolicy === "local_only") {
-        for (const id of [validated.primaryCatalogEntryId, validated.fallbackCatalogEntryId]) {
-          if (id === null) {
-            continue;
-          }
-          const privacy = this.state.costPrivacyProfiles[id];
-          const catalog = this.state.catalog[id];
-          const connection =
-            catalog === undefined ? undefined : this.state.connections[catalog.connectionId];
-          if (
-            privacy?.dataDestination !== "local" ||
-            privacy.evidenceSource === "unknown" ||
-            connection === undefined ||
-            !isLoopbackModelBaseUrl(connection.baseUrl)
-          ) {
-            throw modelHubError(
-              "MODEL_HUB_PRIVACY_BLOCKED",
-              "Local-only routes require evidence-confirmed local models.",
-            );
-          }
-        }
-      }
+      assertMemoryRouteCatalogRequirements(this.state, {
+        primaryCatalogEntryId: validated.primaryCatalogEntryId,
+        fallbackCatalogEntryId: validated.fallbackCatalogEntryId,
+        privacyPolicy: validated.privacyPolicy,
+      });
       const now = this.clock.now();
       const saved: NovelTaskRoute = Object.freeze({
         task: validated.task,
@@ -3725,6 +3772,13 @@ function validateConnectionInput(input: SaveModelProviderConnectionInput) {
     );
   }
   const enabled = input.enabled ?? true;
+  const retirementCleanupPending = input.retirementCleanupPending === true;
+  if (retirementCleanupPending && (enabled || input.expectedRevision === null)) {
+    throw modelHubError(
+      "MODEL_HUB_RETIREMENT_STATE_INVALID",
+      "A pending retirement cleanup must disable an existing connection with compare-and-swap protection.",
+    );
+  }
   if (
     enabled &&
     authenticationMode !== "none" &&
@@ -3769,6 +3823,7 @@ function validateConnectionInput(input: SaveModelProviderConnectionInput) {
     retryLimit: normalizeModelHubRetryLimit(input.retryLimit),
     legacyProviderId: optionalText(input.legacyProviderId, "legacy provider id", 128),
     enabled,
+    retirementCleanupPending,
     expectedRevision: validateExpectedRevision(input.expectedRevision),
   });
 }
@@ -4340,16 +4395,20 @@ function assertMemoryRouteCatalogRequirements(
   for (const id of [route.primaryCatalogEntryId, route.fallbackCatalogEntryId]) {
     if (id === null) continue;
     const catalog = state.catalog[id];
-    if (catalog?.availability !== "available") {
+    const connection = catalog === undefined ? undefined : state.connections[catalog.connectionId];
+    if (
+      catalog?.availability !== "available" ||
+      connection === undefined ||
+      !connection.enabled ||
+      connection.connectionStatus === "disabled"
+    ) {
       throw modelHubError("MODEL_HUB_MODEL_NOT_AVAILABLE", "The selected model is not available.");
     }
     if (route.privacyPolicy !== "local_only") continue;
     const privacy = state.costPrivacyProfiles[id];
-    const connection = state.connections[catalog.connectionId];
     if (
       privacy?.dataDestination !== "local" ||
       privacy.evidenceSource === "unknown" ||
-      connection === undefined ||
       !isLoopbackModelBaseUrl(connection.baseUrl)
     ) {
       throw modelHubError(
@@ -4507,6 +4566,9 @@ async function persistSqliteConnection(
   if (existing !== null && isRetiredConnectionRow(existing)) {
     throw retiredConnectionMutation();
   }
+  if (existing !== null && isRetirementCleanupPendingConnectionRow(existing)) {
+    throw retirementCleanupPendingMutation();
+  }
   const endpointIdentityChanged =
     existing !== null && connectionEndpointIdentityChanged(hydrateConnection(existing), validated);
   const revision = existing === null ? 1 : existing.revision + 1;
@@ -4544,6 +4606,15 @@ async function persistSqliteConnection(
       ],
     );
   } else {
+    const connectionStatus = validated.retirementCleanupPending
+      ? "disabled"
+      : existing.connection_status;
+    const lastErrorCode = validated.retirementCleanupPending
+      ? RETIREMENT_CLEANUP_PENDING_ERROR_CODE
+      : existing.last_error_code;
+    const lastErrorSummary = validated.retirementCleanupPending
+      ? RETIREMENT_CLEANUP_PENDING_SUMMARY
+      : existing.last_error_summary;
     const result = await transaction.execute(
       `UPDATE model_provider_connections
        SET provider_kind = ?, display_name = ?, protocol = ?, region = ?,
@@ -4551,6 +4622,7 @@ async function persistSqliteConnection(
            credential_state = ?, authentication_mode = ?, credential_header_name = ?,
            model_discovery_path = ?, text_generation_path = ?, embedding_path = ?,
            request_timeout_ms = ?, retry_limit = ?, legacy_provider_id = ?, enabled = ?,
+           connection_status = ?, last_error_code = ?, last_error_summary = ?,
            revision = ?, updated_at = ?
        WHERE id = ? AND revision = ?`,
       [
@@ -4572,6 +4644,9 @@ async function persistSqliteConnection(
         validated.retryLimit,
         validated.legacyProviderId,
         validated.enabled ? 1 : 0,
+        connectionStatus,
+        lastErrorCode,
+        lastErrorSummary,
         revision,
         now,
         validated.id,
@@ -4604,6 +4679,9 @@ async function persistSqliteCatalogSync(
   }
   if (isRetiredConnectionRow(connection)) {
     throw retiredConnectionMutation();
+  }
+  if (isRetirementCleanupPendingConnectionRow(connection)) {
+    throw retirementCleanupPendingMutation();
   }
   await transaction.execute(
     `INSERT INTO model_catalog_syncs (
@@ -4733,6 +4811,9 @@ function persistMemoryConnection(
   if (existing !== undefined && isRetiredModelProviderConnection(existing)) {
     throw retiredConnectionMutation();
   }
+  if (existing !== undefined && isRetirementCleanupPendingModelProviderConnection(existing)) {
+    throw retirementCleanupPendingMutation();
+  }
   const endpointIdentityChanged =
     existing !== undefined && connectionEndpointIdentityChanged(existing, validated);
   if (endpointIdentityChanged) {
@@ -4756,14 +4837,24 @@ function persistMemoryConnection(
     embeddingPath: validated.embeddingPath,
     requestTimeoutMs: validated.requestTimeoutMs,
     retryLimit: validated.retryLimit,
-    connectionStatus: endpointIdentityChanged
-      ? "not_tested"
-      : (existing?.connectionStatus ?? "not_tested"),
+    connectionStatus: validated.retirementCleanupPending
+      ? "disabled"
+      : endpointIdentityChanged
+        ? "not_tested"
+        : (existing?.connectionStatus ?? "not_tested"),
     catalogSyncStatus: endpointIdentityChanged ? "never" : (existing?.catalogSyncStatus ?? "never"),
     lastTestedAt: endpointIdentityChanged ? null : (existing?.lastTestedAt ?? null),
     lastCatalogSyncedAt: endpointIdentityChanged ? null : (existing?.lastCatalogSyncedAt ?? null),
-    lastErrorCode: endpointIdentityChanged ? null : (existing?.lastErrorCode ?? null),
-    lastErrorSummary: endpointIdentityChanged ? null : (existing?.lastErrorSummary ?? null),
+    lastErrorCode: validated.retirementCleanupPending
+      ? RETIREMENT_CLEANUP_PENDING_ERROR_CODE
+      : endpointIdentityChanged
+        ? null
+        : (existing?.lastErrorCode ?? null),
+    lastErrorSummary: validated.retirementCleanupPending
+      ? RETIREMENT_CLEANUP_PENDING_SUMMARY
+      : endpointIdentityChanged
+        ? null
+        : (existing?.lastErrorSummary ?? null),
     legacyProviderId: validated.legacyProviderId,
     enabled: validated.enabled,
     revision: existing === undefined ? 1 : existing.revision + 1,
@@ -4965,7 +5056,12 @@ function invalidateMemoryConnectionDerivedState(
 
 async function ensureCatalogEntry(executor: TransactionExecutor, id: string): Promise<void> {
   const rows = await executor.select<{ id: string }>(
-    "SELECT id FROM model_catalog_entries WHERE id = ? AND availability = 'available'",
+    `SELECT catalog.id
+     FROM model_catalog_entries AS catalog
+     INNER JOIN model_provider_connections AS connection
+       ON connection.id = catalog.connection_id
+     WHERE catalog.id = ? AND catalog.availability = 'available'
+       AND connection.enabled = 1 AND connection.connection_status <> 'disabled'`,
     [id],
   );
   if (rows[0] === undefined) {
@@ -4980,6 +5076,24 @@ async function ensureCatalogEntryExists(executor: TransactionExecutor, id: strin
   );
   if (rows[0] === undefined) {
     throw modelHubError("MODEL_HUB_MODEL_NOT_FOUND", "The selected model does not exist.");
+  }
+}
+
+async function ensureCatalogConnectionNotPendingRetirementCleanup(
+  executor: TransactionExecutor,
+  catalogEntryId: string,
+): Promise<void> {
+  const rows = await executor.select<{ connection_id: string }>(
+    "SELECT connection_id FROM model_catalog_entries WHERE id = ?",
+    [catalogEntryId],
+  );
+  const connectionId = rows[0]?.connection_id;
+  if (connectionId === undefined) {
+    throw modelHubError("MODEL_HUB_MODEL_NOT_FOUND", "The selected model does not exist.");
+  }
+  const connection = await findConnectionRow(executor, connectionId);
+  if (connection !== null && isRetirementCleanupPendingConnectionRow(connection)) {
+    throw retirementCleanupPendingMutation();
   }
 }
 
@@ -5162,10 +5276,25 @@ function isRetiredConnectionRow(row: ConnectionRow): boolean {
   );
 }
 
+function isRetirementCleanupPendingConnectionRow(row: ConnectionRow): boolean {
+  return (
+    row.enabled === 0 &&
+    row.connection_status === "disabled" &&
+    row.last_error_code === RETIREMENT_CLEANUP_PENDING_ERROR_CODE
+  );
+}
+
 function retiredConnectionMutation(): ModelHubStoreError {
   return modelHubError(
     RETIRED_CONNECTION_ERROR_CODE,
     "A retired provider connection is immutable. Create a new connection instead.",
+  );
+}
+
+function retirementCleanupPendingMutation(): ModelHubStoreError {
+  return modelHubError(
+    RETIREMENT_CLEANUP_PENDING_ERROR_CODE,
+    "A provider connection awaiting retirement cleanup is frozen. Retry the explicit retirement cleanup instead.",
   );
 }
 

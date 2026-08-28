@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   CandidateQualityError,
+  detectCandidateStableOverlap,
   evaluateCandidateQuality,
   scoreCandidateRepetition,
   type CandidateQualityObservation,
@@ -143,6 +144,55 @@ describe("candidate quality gate", () => {
     expect(repeated.score).toBe(0.5);
     expect(repeated.source).toBe("deterministic_rule");
     expect(repeated.evidenceIds).toEqual(["repetition:1"]);
+  });
+
+  it("blocks a long exact stable正文 prefix and exposes only an explicit removable range", () => {
+    const stable = `望潮崖上的雾一层层漫过石阶。${"林深沿着旧路向灯塔走去。".repeat(32)}`;
+    const candidate = `${stable}海面忽然亮起一线银光。`;
+
+    const result = detectCandidateStableOverlap(stable, candidate);
+
+    expect(result).toMatchObject({
+      kind: "exact_prefix",
+      risk: "high",
+      removablePrefixUtf16: stable.length,
+      exactPrefixCharacters: stable.length,
+      comparedCharacters: stable.length,
+      similarity: 1,
+    });
+    expect(candidate.slice(result.removablePrefixUtf16 ?? 0)).toBe("海面忽然亮起一线银光。");
+  });
+
+  it("warns for a highly similar long prefix without offering automatic removal", () => {
+    const stable = Array.from(
+      { length: 48 },
+      (_, index) => `第${String(index + 1)}盏灯在浓雾里依次亮起，林深记下潮声的方向。`,
+    ).join("");
+    const candidate = `${stable.slice(0, 460)}雾语改走了另一条石阶。${stable.slice(485)}新的潮声从北面传来。`;
+
+    const result = detectCandidateStableOverlap(stable, candidate);
+
+    expect(result.kind).toBe("high_similarity_prefix");
+    expect(result.risk).toBe("high");
+    expect(result.similarity).toBeGreaterThanOrEqual(0.88);
+    expect(result.removablePrefixUtf16).toBeNull();
+  });
+
+  it("does not warn for a short common opening, repeated stable正文, or unrelated output", () => {
+    const repeatedStable = `${"雾起了。".repeat(80)}正文随后进入港口调查。`;
+
+    expect(detectCandidateStableOverlap(repeatedStable, "雾起了。新的脚步声靠近。").risk).toBe(
+      "none",
+    );
+    expect(
+      detectCandidateStableOverlap(repeatedStable, "钟声从城南传来，赵伯关上了窗。").risk,
+    ).toBe("none");
+    expect(
+      detectCandidateStableOverlap(
+        "林深在望潮崖守了整夜。".repeat(40),
+        "雾语从浓雾海带回一枚生锈的罗盘。".repeat(18),
+      ).risk,
+    ).toBe("none");
   });
 
   it("rejects duplicate observations and policy weights that do not sum to one", () => {

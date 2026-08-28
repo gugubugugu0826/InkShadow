@@ -247,15 +247,21 @@ describe("DesktopShell", () => {
     });
   });
 
-  it("distinguishes the model center from general settings when the hash route is active", async () => {
-    renderShell("/settings#model-center");
+  it.each(["#model-center", "#model-routing", "#model-evaluation", "#image-generation"])(
+    "keeps the model center title and navigation active for the internal route %s",
+    async (hash) => {
+      renderShell(`/settings${hash}`);
 
-    await waitFor(() => {
-      expect(document.title).toBe("模型中心 · 墨影");
-    });
-    expect(screen.getByRole("link", { name: "模型中心" })).toHaveAttribute("aria-current", "page");
-    expect(screen.getByRole("link", { name: "设置" })).not.toHaveAttribute("aria-current");
-  });
+      await waitFor(() => {
+        expect(document.title).toBe("模型中心 · 墨影");
+      });
+      expect(screen.getByRole("link", { name: "模型中心" })).toHaveAttribute(
+        "aria-current",
+        "page",
+      );
+      expect(screen.getByRole("link", { name: "设置" })).not.toHaveAttribute("aria-current");
+    },
+  );
 
   it("does not advertise shallow basic readiness when exact continuation inspection is blocked", async () => {
     const runtime = createDevelopmentRuntime(window.localStorage);

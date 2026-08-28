@@ -82,6 +82,27 @@ function readyCandidate(): AiCandidate {
 }
 
 describe("content entities", () => {
+  it("preserves a legacy over-limit chapter title without relaxing new chapter validation", () => {
+    const legacyTitle = "旧章节标题".repeat(41);
+    const snapshot = chapter().toSnapshot();
+    const rehydrated = Chapter.rehydrate({ ...snapshot, title: legacyTitle });
+
+    expect(rehydrated.ok).toBe(true);
+    if (!rehydrated.ok) return;
+    expect(rehydrated.value.title).toBe(legacyTitle);
+    expect(rehydrated.value.toSnapshot().title).toBe(legacyTitle);
+    expect(
+      Chapter.create({
+        id: CHAPTER_ID,
+        projectId: PROJECT_ID,
+        title: " ",
+        content: "",
+        initialVersionId: VERSION_ID,
+        now: NOW,
+      }).ok,
+    ).toBe(false);
+  });
+
   it("keeps chapter privacy on an independent optimistic revision", () => {
     const original = chapter();
 

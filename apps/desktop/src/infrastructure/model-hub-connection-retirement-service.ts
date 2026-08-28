@@ -75,6 +75,7 @@ export async function retireModelHubConnection(
           retryLimit: previous.retryLimit,
           legacyProviderId: previous.legacyProviderId,
           enabled: false,
+          retirementCleanupPending: true,
           expectedRevision: previous.revision,
         });
   const sharedCredential =

@@ -251,6 +251,7 @@ export {
 export {
   CANDIDATE_QUALITY_METRICS,
   CandidateQualityError,
+  detectCandidateStableOverlap,
   evaluateCandidateQuality,
   scoreCandidateRepetition,
   type CandidateQualityErrorCode,
@@ -262,6 +263,7 @@ export {
   type CandidateQualityObservation,
   type CandidateQualityPolicy,
   type CandidateQualityThreshold,
+  type CandidateStableOverlapResult,
 } from "./quality-gate.js";
 export {
   NOVEL_SKILL_CONTEXT_LAYERS,

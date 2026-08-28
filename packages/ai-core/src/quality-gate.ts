@@ -69,6 +69,16 @@ export interface CandidateQualityGateResult {
   };
 }
 
+export interface CandidateStableOverlapResult {
+  readonly kind: "none" | "exact_prefix" | "high_similarity_prefix";
+  readonly risk: "none" | "high";
+  readonly comparedCharacters: number;
+  readonly exactPrefixCharacters: number;
+  readonly similarity: number;
+  readonly removablePrefixUtf16: number | null;
+  readonly removableRangeUtf16: Readonly<{ readonly start: number; readonly end: number }> | null;
+}
+
 export type CandidateQualityErrorCode =
   | "QUALITY_INPUT_INVALID"
   | "QUALITY_POLICY_INVALID"
@@ -210,6 +220,134 @@ export function scoreCandidateRepetition(
       duplicateCount === 0 ? ["repetition:none"] : [`repetition:${String(duplicateCount)}`],
     measuredAt,
   };
+}
+
+const MINIMUM_CROSS_TEXT_OVERLAP_CHARACTERS = 240;
+const MINIMUM_STABLE_PREFIX_COVERAGE = 0.6;
+const HIGH_SIMILARITY_THRESHOLD = 0.88;
+const MAXIMUM_OVERLAP_COMPARISON_CHARACTERS = 100_000;
+const OVERLAP_SHINGLE_CHARACTERS = 5;
+
+/**
+ * Compares a continuation with the immutable正文 it was generated from. The
+ * check is local, deterministic, linear in the bounded comparison size, and
+ * never changes the Candidate. Only a literal full正文 prefix is declared safe
+ * to remove; approximate matches deliberately expose no automatic trim range.
+ */
+export function detectCandidateStableOverlap(
+  stableContent: string,
+  candidateContent: string,
+): CandidateStableOverlapResult {
+  const leadingWhitespace = /^\s*/u.exec(candidateContent)?.[0].length ?? 0;
+  const candidateAfterWhitespace = candidateContent.slice(leadingWhitespace);
+  const normalizedStable = normalizeOverlapText(stableContent).slice(
+    0,
+    MAXIMUM_OVERLAP_COMPARISON_CHARACTERS,
+  );
+  const normalizedCandidate = normalizeOverlapText(candidateAfterWhitespace).slice(
+    0,
+    MAXIMUM_OVERLAP_COMPARISON_CHARACTERS,
+  );
+  const comparedCharacters = Math.min(normalizedStable.length, normalizedCandidate.length);
+  const requiredCoverageBase = Math.min(
+    normalizedStable.length,
+    MAXIMUM_OVERLAP_COMPARISON_CHARACTERS,
+  );
+  const stableCoverage = requiredCoverageBase === 0 ? 0 : comparedCharacters / requiredCoverageBase;
+
+  if (
+    normalizedStable.length >= MINIMUM_CROSS_TEXT_OVERLAP_CHARACTERS &&
+    candidateAfterWhitespace.startsWith(stableContent)
+  ) {
+    const removableEnd = leadingWhitespace + stableContent.length;
+    const hasUsableRemainder = candidateContent.slice(removableEnd).trim().length > 0;
+    return Object.freeze({
+      kind: "exact_prefix",
+      risk: "high",
+      comparedCharacters: normalizedStable.length,
+      exactPrefixCharacters: stableContent.length,
+      similarity: 1,
+      removablePrefixUtf16: hasUsableRemainder ? removableEnd : null,
+      removableRangeUtf16: hasUsableRemainder
+        ? Object.freeze({ start: leadingWhitespace, end: removableEnd })
+        : null,
+    });
+  }
+
+  if (
+    comparedCharacters < MINIMUM_CROSS_TEXT_OVERLAP_CHARACTERS ||
+    stableCoverage < MINIMUM_STABLE_PREFIX_COVERAGE
+  ) {
+    return noStableOverlap(comparedCharacters);
+  }
+
+  const stablePrefix = normalizedStable.slice(0, comparedCharacters);
+  const candidatePrefix = normalizedCandidate.slice(0, comparedCharacters);
+  const exactPrefixCharacters = commonPrefixLength(stablePrefix, candidatePrefix);
+  const similarity = roundQualityScore(
+    shingleDiceSimilarity(stablePrefix, candidatePrefix, OVERLAP_SHINGLE_CHARACTERS),
+  );
+  if (similarity < HIGH_SIMILARITY_THRESHOLD) {
+    return noStableOverlap(comparedCharacters, exactPrefixCharacters, similarity);
+  }
+  return Object.freeze({
+    kind: "high_similarity_prefix",
+    risk: "high",
+    comparedCharacters,
+    exactPrefixCharacters,
+    similarity,
+    removablePrefixUtf16: null,
+    removableRangeUtf16: null,
+  });
+}
+
+function normalizeOverlapText(text: string): string {
+  return text.normalize("NFKC").replaceAll(/\s+/gu, "").toLocaleLowerCase("zh-CN");
+}
+
+function commonPrefixLength(left: string, right: string): number {
+  const length = Math.min(left.length, right.length);
+  let index = 0;
+  while (index < length && left[index] === right[index]) index += 1;
+  return index;
+}
+
+function shingleDiceSimilarity(left: string, right: string, width: number): number {
+  if (left === right) return 1;
+  if (left.length < width || right.length < width) return 0;
+  const leftCounts = new Map<string, number>();
+  for (let index = 0; index <= left.length - width; index += 1) {
+    const shingle = left.slice(index, index + width);
+    leftCounts.set(shingle, (leftCounts.get(shingle) ?? 0) + 1);
+  }
+  let intersection = 0;
+  for (let index = 0; index <= right.length - width; index += 1) {
+    const shingle = right.slice(index, index + width);
+    const available = leftCounts.get(shingle) ?? 0;
+    if (available > 0) {
+      intersection += 1;
+      leftCounts.set(shingle, available - 1);
+    }
+  }
+  const leftTotal = left.length - width + 1;
+  const rightTotal = right.length - width + 1;
+  return (2 * intersection) / (leftTotal + rightTotal);
+}
+
+function noStableOverlap(
+  comparedCharacters: number,
+  exactPrefixCharacters = 0,
+  similarity = 0,
+): CandidateStableOverlapResult {
+  return Object.freeze({
+    kind: "none",
+    risk: "none",
+    comparedCharacters,
+    exactPrefixCharacters,
+    similarity: roundQualityScore(similarity),
+    removablePrefixUtf16: null,
+    removableRangeUtf16: null,
+  });
 }
 
 function validateGateInput(input: CandidateQualityGateInput): void {

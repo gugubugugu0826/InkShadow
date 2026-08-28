@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   createStorySettingsTemplate,
   preflightStorySettingsJson,
@@ -6,7 +6,12 @@ import {
   type InkShadowStorySettingsV1,
   type StorySettingsPreflightReport,
 } from "@inkshadow/import-export/core";
-import type { FormalStoryRecord, MemoryRecord, StoryFact } from "@inkshadow/story-core";
+import {
+  parseUuidV7,
+  type FormalStoryRecord,
+  type MemoryRecord,
+  type StoryFact,
+} from "@inkshadow/story-core";
 import {
   Badge,
   Button,
@@ -34,9 +39,12 @@ import {
 } from "../infrastructure/story-settings-ordinary-language";
 import {
   inspectLegacyGuidedOpeningRecords,
+  parseBulkNaturalLanguageSettings,
   parseNaturalLanguageSetting,
   projectStorySettingsForExport,
   readRelationship,
+  type BulkNaturalLanguageSettingCategory,
+  type BulkNaturalLanguageSettingDraft,
   type LegacyGuidedOpeningRepairItem,
   type NaturalLanguageSettingCandidate,
 } from "../infrastructure/story-settings-authoring";
@@ -101,6 +109,742 @@ interface LegacyFinalizeConfirmation {
   readonly currentSourceRevision: number;
 }
 
+const LOCAL_BULK_SETTING_DRAFT_SCHEMA_VERSION = "inkshadow.local-bulk-setting-draft.v1" as const;
+const LOCAL_BULK_SETTING_RECOVERY_SCHEMA_VERSION =
+  "inkshadow.local-bulk-setting-recovery.v1" as const;
+
+const BULK_SETTING_TYPE_OPTIONS = [
+  { value: "character_identity", label: "人物身份" },
+  { value: "relationship", label: "人物关系" },
+  { value: "location", label: "地点" },
+  { value: "world_rule", label: "世界规则" },
+  { value: "writing_rule", label: "写作与禁止项" },
+] as const;
+
+interface BulkSettingReviewDraft extends BulkNaturalLanguageSettingDraft {
+  readonly selectedCategory: BulkNaturalLanguageSettingCategory | "";
+  readonly contentText: string;
+  readonly discarded: boolean;
+  readonly saved: boolean;
+}
+
+interface BulkSettingRecoverySnapshot {
+  readonly schemaVersion: typeof LOCAL_BULK_SETTING_RECOVERY_SCHEMA_VERSION;
+  readonly projectId: string;
+  readonly batchId: string;
+  readonly source: string;
+  readonly sourceLength: number;
+  readonly drafts: readonly BulkSettingReviewDraft[];
+}
+
+export interface BulkStorySettingsToolProps {
+  readonly runtime: Pick<DesktopRuntime, "ids" | "story" | "authorRecovery">;
+  readonly projectId: string;
+  readonly readonly: boolean;
+  readonly onChanged: () => Promise<void> | void;
+}
+
+const BULK_SETTING_RECOVERY_KIND = "bulk_story_settings" as const;
+
+function parseBulkSettingRecoveryPayload(
+  projectId: string,
+  serialized: string,
+): BulkSettingRecoverySnapshot {
+  const parsed: unknown = JSON.parse(serialized);
+  const record = storyObject(parsed);
+  if (
+    record.schemaVersion !== LOCAL_BULK_SETTING_RECOVERY_SCHEMA_VERSION ||
+    record.projectId !== projectId ||
+    typeof record.batchId !== "string" ||
+    record.batchId.trim().length === 0 ||
+    typeof record.source !== "string" ||
+    typeof record.sourceLength !== "number" ||
+    !Number.isInteger(record.sourceLength) ||
+    record.sourceLength !== record.source.length ||
+    !Array.isArray(record.drafts)
+  ) {
+    throw new Error("invalid bulk recovery record");
+  }
+  const recoverySource = record.source;
+  const recoverySourceLength = record.sourceLength;
+  const categories = new Set<string>(BULK_SETTING_TYPE_OPTIONS.map(({ value }) => value));
+  const drafts = record.drafts.map((entry): BulkSettingReviewDraft => {
+    const draft = storyObject(entry);
+    const category = draft.category;
+    const selectedCategory = draft.selectedCategory;
+    if (
+      typeof draft.id !== "string" ||
+      draft.id.length === 0 ||
+      typeof draft.sourceText !== "string" ||
+      typeof draft.startOffset !== "number" ||
+      typeof draft.endOffset !== "number" ||
+      !Number.isInteger(draft.startOffset) ||
+      !Number.isInteger(draft.endOffset) ||
+      draft.startOffset < 0 ||
+      draft.endOffset <= draft.startOffset ||
+      draft.endOffset > recoverySourceLength ||
+      recoverySource.slice(draft.startOffset, draft.endOffset) !== draft.sourceText ||
+      (category !== null && (typeof category !== "string" || !categories.has(category))) ||
+      (selectedCategory !== "" &&
+        (typeof selectedCategory !== "string" || !categories.has(selectedCategory))) ||
+      draft.confirmation !== "pending" ||
+      draft.sourceKind !== "local_text" ||
+      (draft.missingInformation !== null && typeof draft.missingInformation !== "string") ||
+      typeof draft.contentText !== "string" ||
+      draft.contentText.length > 1_000 ||
+      typeof draft.discarded !== "boolean" ||
+      typeof draft.saved !== "boolean"
+    ) {
+      throw new Error("invalid bulk recovery draft");
+    }
+    return {
+      id: draft.id,
+      sourceText: draft.sourceText,
+      startOffset: draft.startOffset,
+      endOffset: draft.endOffset,
+      category: category as BulkNaturalLanguageSettingCategory | null,
+      confirmation: "pending",
+      sourceKind: "local_text",
+      missingInformation: draft.missingInformation,
+      selectedCategory: selectedCategory as BulkNaturalLanguageSettingCategory | "",
+      contentText: draft.contentText,
+      discarded: draft.discarded,
+      saved: draft.saved,
+    };
+  });
+  if (drafts.length === 0) throw new Error("empty bulk recovery batch");
+  return {
+    schemaVersion: LOCAL_BULK_SETTING_RECOVERY_SCHEMA_VERSION,
+    projectId,
+    batchId: record.batchId,
+    source: recoverySource,
+    sourceLength: recoverySourceLength,
+    drafts,
+  };
+}
+
+/**
+ * Reviews a deterministic, local-only batch before staging each surviving
+ * sentence as an independent author draft. The parser deliberately leaves an
+ * unknown sentence uncategorized, so saving cannot guess on the author's behalf.
+ */
+export function BulkStorySettingsTool(props: BulkStorySettingsToolProps) {
+  return <BulkStorySettingsToolForProject key={props.projectId} {...props} />;
+}
+
+function BulkStorySettingsToolForProject(props: BulkStorySettingsToolProps) {
+  const [open, setOpen] = useState(false);
+  const [source, setSource] = useState("");
+  const [sourceLength, setSourceLength] = useState(0);
+  const [batchId, setBatchId] = useState<string | null>(null);
+  const [drafts, setDrafts] = useState<readonly BulkSettingReviewDraft[]>([]);
+  const [busy, setBusy] = useState(false);
+  const [completionCount, setCompletionCount] = useState<number | null>(null);
+  const [recoveryLoaded, setRecoveryLoaded] = useState(false);
+  const [recoveryUnavailable, setRecoveryUnavailable] = useState(false);
+  const [notice, setNotice] = useState<Readonly<{
+    title: string;
+    description: string;
+  }> | null>(null);
+  const saveInFlight = useRef(false);
+  const persistedDraftIds = useRef(new Set<string>());
+  const recoveryRevision = useRef<number | null>(null);
+  const lastPersistedPayload = useRef<string | null>(null);
+  const recoveryWriteQueue = useRef<Promise<void>>(Promise.resolve());
+  const suppressRecoveryWrites = useRef(false);
+  const recoveryProjectScope = useRef(props.projectId);
+
+  useEffect(() => {
+    let cancelled = false;
+    recoveryProjectScope.current = props.projectId;
+    recoveryRevision.current = null;
+    lastPersistedPayload.current = null;
+    persistedDraftIds.current.clear();
+    suppressRecoveryWrites.current = false;
+    recoveryWriteQueue.current = Promise.resolve();
+    void props.runtime.authorRecovery
+      .find(props.projectId, BULK_SETTING_RECOVERY_KIND)
+      .then((record) => {
+        if (cancelled) return;
+        if (record === null) {
+          recoveryRevision.current = null;
+          lastPersistedPayload.current = null;
+          return;
+        }
+        if (record.schemaVersion !== LOCAL_BULK_SETTING_RECOVERY_SCHEMA_VERSION) {
+          throw new Error("unsupported recovery schema");
+        }
+        const recovered = parseBulkSettingRecoveryPayload(props.projectId, record.payloadJson);
+        recoveryRevision.current = record.revision;
+        lastPersistedPayload.current = record.payloadJson;
+        persistedDraftIds.current = new Set(
+          recovered.drafts.filter(({ saved }) => saved).map(({ id }) => id),
+        );
+        setSource(recovered.source);
+        setSourceLength(recovered.sourceLength);
+        setBatchId(recovered.batchId);
+        setDrafts(recovered.drafts);
+      })
+      .catch(() => {
+        if (cancelled) return;
+        setRecoveryUnavailable(true);
+        setNotice({
+          title: "本地批次恢复记录暂不可用",
+          description:
+            "原记录已原样保留，没有被删除或覆盖。为保护其中的内容，请先保留现场并完成诊断后再重新整理。",
+        });
+      })
+      .finally(() => {
+        if (!cancelled) setRecoveryLoaded(true);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [props.projectId, props.runtime.authorRecovery]);
+
+  const persistRecoverySnapshot = useCallback(
+    async (snapshot: BulkSettingRecoverySnapshot): Promise<void> => {
+      const scopedProjectId = snapshot.projectId;
+      if (scopedProjectId !== props.projectId || recoveryProjectScope.current !== scopedProjectId) {
+        return;
+      }
+      const payloadJson = JSON.stringify(snapshot);
+      if (payloadJson === lastPersistedPayload.current) return;
+      let saved;
+      try {
+        saved = await props.runtime.authorRecovery.save({
+          projectId: scopedProjectId,
+          kind: BULK_SETTING_RECOVERY_KIND,
+          schemaVersion: LOCAL_BULK_SETTING_RECOVERY_SCHEMA_VERSION,
+          payloadJson,
+          expectedRevision: recoveryRevision.current,
+          now: new Date().toISOString(),
+        });
+      } catch (cause: unknown) {
+        const observed = await props.runtime.authorRecovery.find(
+          scopedProjectId,
+          BULK_SETTING_RECOVERY_KIND,
+        );
+        if (
+          observed?.schemaVersion !== LOCAL_BULK_SETTING_RECOVERY_SCHEMA_VERSION ||
+          observed.payloadJson !== payloadJson
+        ) {
+          throw cause;
+        }
+        saved = observed;
+      }
+      if (recoveryProjectScope.current === scopedProjectId) {
+        recoveryRevision.current = saved.revision;
+        lastPersistedPayload.current = saved.payloadJson;
+      }
+    },
+    [props.projectId, props.runtime.authorRecovery],
+  );
+
+  useEffect(() => {
+    if (
+      !recoveryLoaded ||
+      recoveryUnavailable ||
+      suppressRecoveryWrites.current ||
+      batchId === null ||
+      drafts.length === 0
+    ) {
+      return;
+    }
+    const snapshot: BulkSettingRecoverySnapshot = {
+      schemaVersion: LOCAL_BULK_SETTING_RECOVERY_SCHEMA_VERSION,
+      projectId: props.projectId,
+      batchId,
+      source,
+      sourceLength,
+      drafts,
+    };
+    if (JSON.stringify(snapshot) === lastPersistedPayload.current) return;
+    const write = recoveryWriteQueue.current
+      .catch(() => undefined)
+      .then(() => persistRecoverySnapshot(snapshot));
+    recoveryWriteQueue.current = write;
+    void write.catch((cause: unknown) => {
+      if (recoveryProjectScope.current !== snapshot.projectId) return;
+      const projected = projectOrdinaryUiError(cause);
+      setRecoveryUnavailable(true);
+      setNotice({
+        title: "无法更新本地恢复记录",
+        description: `${projected.description} 为保护这些内容，本次不会继续保存。`,
+      });
+    });
+  }, [
+    batchId,
+    drafts,
+    persistRecoverySnapshot,
+    props.projectId,
+    recoveryLoaded,
+    recoveryUnavailable,
+    source,
+    sourceLength,
+  ]);
+
+  const pendingDrafts = drafts.filter(({ discarded, saved }) => !discarded && !saved);
+  const hasInvalidDraft = pendingDrafts.some(
+    ({ contentText, selectedCategory }) =>
+      contentText.trim().length === 0 || selectedCategory === "",
+  );
+  const canSave =
+    !props.readonly &&
+    recoveryLoaded &&
+    !recoveryUnavailable &&
+    !busy &&
+    batchId !== null &&
+    pendingDrafts.length > 0 &&
+    !hasInvalidDraft;
+  const hasRecoverableBatch = batchId !== null && drafts.length > 0;
+
+  async function parseBatch(): Promise<void> {
+    setNotice(null);
+    setCompletionCount(null);
+    setBusy(true);
+    try {
+      const parsed = parseBulkNaturalLanguageSettings(source);
+      const nextBatchId = String(props.runtime.ids.next());
+      const nextDrafts: readonly BulkSettingReviewDraft[] = parsed.map(
+        (draft): BulkSettingReviewDraft => ({
+          ...draft,
+          selectedCategory: draft.category ?? "",
+          contentText: draft.sourceText,
+          discarded: false,
+          saved: false,
+        }),
+      );
+      const snapshot: BulkSettingRecoverySnapshot = {
+        schemaVersion: LOCAL_BULK_SETTING_RECOVERY_SCHEMA_VERSION,
+        projectId: props.projectId,
+        batchId: nextBatchId,
+        source,
+        sourceLength: source.length,
+        drafts: nextDrafts,
+      };
+      await persistRecoverySnapshot(snapshot);
+      persistedDraftIds.current.clear();
+      setSourceLength(source.length);
+      setBatchId(nextBatchId);
+      setDrafts(nextDrafts);
+    } catch (cause: unknown) {
+      const projected = projectOrdinaryUiError(cause);
+      setBatchId(null);
+      setDrafts([]);
+      setNotice({
+        title: "没有保存这批待确认内容",
+        description: projected.description,
+      });
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function removeRecoveryBatch(expectedBatchId: string): Promise<void> {
+    await recoveryWriteQueue.current;
+    const record = await props.runtime.authorRecovery.find(
+      props.projectId,
+      BULK_SETTING_RECOVERY_KIND,
+    );
+    if (record === null) return;
+    if (record.schemaVersion !== LOCAL_BULK_SETTING_RECOVERY_SCHEMA_VERSION) {
+      throw new Error("unsupported recovery schema");
+    }
+    const snapshot = parseBulkSettingRecoveryPayload(props.projectId, record.payloadJson);
+    if (snapshot.batchId !== expectedBatchId) throw new Error("recovery batch changed");
+    try {
+      await props.runtime.authorRecovery.delete(
+        props.projectId,
+        BULK_SETTING_RECOVERY_KIND,
+        record.revision,
+      );
+    } catch (cause: unknown) {
+      if (
+        (await props.runtime.authorRecovery.find(props.projectId, BULK_SETTING_RECOVERY_KIND)) !==
+        null
+      ) {
+        throw cause;
+      }
+    }
+    recoveryRevision.current = null;
+    lastPersistedPayload.current = null;
+  }
+
+  async function discardRecoveryBatch(): Promise<void> {
+    if (batchId === null || busy) return;
+    setBusy(true);
+    setNotice(null);
+    suppressRecoveryWrites.current = true;
+    try {
+      await removeRecoveryBatch(batchId);
+      persistedDraftIds.current.clear();
+      setSource("");
+      setSourceLength(0);
+      setBatchId(null);
+      setDrafts([]);
+      setCompletionCount(null);
+      suppressRecoveryWrites.current = false;
+    } catch (cause: unknown) {
+      suppressRecoveryWrites.current = false;
+      const projected = projectOrdinaryUiError(cause);
+      setNotice({
+        title: "这批内容仍被保留",
+        description: `${projected.description} 没有删除或覆盖恢复记录，请稍后重试。`,
+      });
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  function updateDraft(
+    id: string,
+    update: (draft: BulkSettingReviewDraft) => BulkSettingReviewDraft,
+  ): void {
+    setDrafts((current) => current.map((draft) => (draft.id === id ? update(draft) : draft)));
+  }
+
+  async function findPersistedBulkDraftIds(batchIdentity: string): Promise<Set<string>> {
+    const projectId = parseUuidV7(props.projectId);
+    if (!projectId.ok) throw projectId.error;
+    const listed = await props.runtime.story.facts.listByProjectId(projectId.value);
+    if (!listed.ok) throw listed.error;
+    const persisted = new Set<string>();
+    for (const fact of listed.value) {
+      const structured = storyObject(fact.toSnapshot().structuredValue);
+      if (
+        structured.schemaVersion === LOCAL_BULK_SETTING_DRAFT_SCHEMA_VERSION &&
+        structured.batchId === batchIdentity &&
+        (structured.projectId === undefined || structured.projectId === props.projectId) &&
+        typeof structured.draftId === "string"
+      ) {
+        persisted.add(structured.draftId);
+      }
+    }
+    return persisted;
+  }
+
+  async function saveBatch(): Promise<void> {
+    if (!canSave || saveInFlight.current) return;
+    const batchIdAtSave = batchId;
+    const sourceLengthAtSave = sourceLength;
+    let savedCount = persistedDraftIds.current.size;
+    let writeAttempted = false;
+    saveInFlight.current = true;
+    setBusy(true);
+    setNotice(null);
+    try {
+      await recoveryWriteQueue.current;
+      const persistedBeforeSave = await findPersistedBulkDraftIds(batchIdAtSave);
+      persistedDraftIds.current = persistedBeforeSave;
+      let reconciledDrafts = drafts.map((draft) => ({
+        ...draft,
+        saved: !draft.discarded && persistedBeforeSave.has(draft.id),
+      }));
+      setDrafts(reconciledDrafts);
+      savedCount = persistedBeforeSave.size;
+      const draftsAtSave = reconciledDrafts.filter(
+        ({ discarded, saved: alreadySaved }) => !discarded && !alreadySaved,
+      );
+      for (const draft of draftsAtSave) {
+        if (draft.selectedCategory === "") continue;
+        writeAttempted = true;
+        let failure: unknown = null;
+        try {
+          const result = await props.runtime.story.factService.stageUserDraftFact({
+            projectId: props.projectId,
+            factType: draft.selectedCategory,
+            contentText: draft.contentText.trim(),
+            structuredValue: {
+              schemaVersion: LOCAL_BULK_SETTING_DRAFT_SCHEMA_VERSION,
+              projectId: props.projectId,
+              batchId: batchIdAtSave,
+              draftId: draft.id,
+              sourceKind: draft.sourceKind,
+              confirmation: draft.confirmation,
+              sourceText: draft.sourceText,
+              sourceRange: {
+                startOffset: draft.startOffset,
+                endOffset: draft.endOffset,
+                sourceLength: sourceLengthAtSave,
+                unit: "utf16_code_unit",
+              },
+              originalCategory: draft.category,
+              selectedCategory: draft.selectedCategory,
+            },
+            actorId: props.runtime.story.actorId,
+          });
+          if (!result.ok) failure = result.error;
+        } catch (cause: unknown) {
+          failure = cause;
+        }
+        if (failure !== null) {
+          const persistedAfterFailure = await findPersistedBulkDraftIds(batchIdAtSave);
+          if (!persistedAfterFailure.has(draft.id)) {
+            if (failure instanceof Error) throw failure;
+            throw new Error("保存待确认设定失败。", { cause: failure });
+          }
+          persistedDraftIds.current = persistedAfterFailure;
+        } else {
+          persistedDraftIds.current.add(draft.id);
+        }
+        savedCount = persistedDraftIds.current.size;
+        reconciledDrafts = reconciledDrafts.map((current) =>
+          current.id === draft.id ? { ...current, saved: true } : current,
+        );
+        setDrafts(reconciledDrafts);
+      }
+      await props.onChanged();
+      setCompletionCount(persistedDraftIds.current.size);
+      suppressRecoveryWrites.current = true;
+      await removeRecoveryBatch(batchIdAtSave);
+      setSource("");
+      setSourceLength(0);
+      setBatchId(null);
+      setDrafts([]);
+      setOpen(false);
+      suppressRecoveryWrites.current = false;
+    } catch (cause: unknown) {
+      suppressRecoveryWrites.current = false;
+      if (savedCount > 0) {
+        try {
+          await props.onChanged();
+        } catch {
+          // The successfully staged drafts remain authoritative even when the
+          // surrounding page cannot refresh. A later reload can read them.
+        }
+      }
+      const projected = projectOrdinaryUiError(cause);
+      setNotice({
+        title: "部分设定还没有保存",
+        description:
+          savedCount > 0
+            ? `${String(savedCount)} 条已安全保存，其余内容仍留在这里。${projected.description}`
+            : writeAttempted
+              ? `保存结果需要核对，内容和批次身份仍留在本机。重新打开后可以继续；不会自动重复创建。${projected.description}`
+              : `${projected.description} 没有写入任何设定，请修正后重试。`,
+      });
+    } finally {
+      saveInFlight.current = false;
+      setBusy(false);
+    }
+  }
+
+  return (
+    <>
+      <Button
+        variant="secondary"
+        disabled={props.readonly || !recoveryLoaded}
+        onClick={() => {
+          setCompletionCount(null);
+          setOpen(true);
+        }}
+      >
+        {recoveryUnavailable
+          ? "查看无法恢复的批量记录"
+          : !recoveryLoaded
+            ? "正在读取未完成内容…"
+            : hasRecoverableBatch
+              ? "继续未完成的批量整理"
+              : "批量整理设定"}
+      </Button>
+      {recoveryUnavailable && !open && (
+        <span className="story-governance-meta" role="status">
+          本地恢复记录暂不可用，原记录已保留且不会被覆盖。
+        </span>
+      )}
+      {hasRecoverableBatch && !open && (
+        <span className="story-governance-meta" role="status">
+          有一批内容尚未完成，原文和逐条修改已保存在本机。
+        </span>
+      )}
+      {completionCount !== null && (
+        <span className="story-governance-meta" role="status" aria-live="polite">
+          {String(completionCount)} 条设定已保存为待确认内容
+        </span>
+      )}
+      <Drawer
+        open={open}
+        dismissible={!busy}
+        onOpenChange={(nextOpen) => {
+          if (!busy) setOpen(nextOpen);
+        }}
+        title="批量整理设定"
+        description="内容只在本机按标点拆分。请逐条核对原文、类型和文字；保存后仍需在待确认区决定是否采用。"
+        footer={
+          <div className="story-governance-actions">
+            <Button variant="secondary" disabled={busy} onClick={() => setOpen(false)}>
+              取消
+            </Button>
+            <Button disabled={!canSave} onClick={() => void saveBatch()}>
+              {busy ? "正在保存…" : "保存为待确认设定"}
+            </Button>
+          </div>
+        }
+      >
+        <div className="story-settings-drawer-content">
+          {notice !== null && (
+            <InlineAlert
+              tone="error"
+              title={notice.title}
+              description={notice.description}
+              onDismiss={() => setNotice(null)}
+            />
+          )}
+          <FormField
+            label="粘贴多条设定"
+            hint="支持句号、问号、叹号、分号或换行；最多 2,000 个字符。"
+            required
+          >
+            {(fieldProps) => (
+              <Textarea
+                {...fieldProps}
+                rows={7}
+                maxLength={2_000}
+                value={source}
+                disabled={busy || recoveryUnavailable || hasRecoverableBatch}
+                onChange={(event) => {
+                  setSource(event.currentTarget.value);
+                  setNotice(null);
+                  setCompletionCount(null);
+                }}
+              />
+            )}
+          </FormField>
+          {hasRecoverableBatch && (
+            <InlineAlert
+              tone="info"
+              title="正在继续上次的批量整理"
+              description="为防止原文和逐条修改被覆盖，请先完成保存，或明确放弃整批内容后重新开始。"
+            />
+          )}
+          {hasRecoverableBatch && (
+            <Button
+              variant="ghost"
+              disabled={busy || recoveryUnavailable}
+              onClick={() => void discardRecoveryBatch()}
+            >
+              放弃这批内容并重新开始
+            </Button>
+          )}
+          <Button
+            variant="secondary"
+            disabled={
+              busy ||
+              !recoveryLoaded ||
+              recoveryUnavailable ||
+              hasRecoverableBatch ||
+              source.trim().length === 0
+            }
+            onClick={() => void parseBatch()}
+          >
+            拆分为待确认项
+          </Button>
+          {drafts.length > 0 && (
+            <div className="story-governance-grid" aria-label="批量设定审阅列表">
+              {drafts.map((draft, index) => {
+                const position = index + 1;
+                const inactive = draft.discarded || draft.saved;
+                return (
+                  <Card key={draft.id} role="group" aria-label={`第 ${String(position)} 条设定`}>
+                    <CardHeader>
+                      <div className="card-heading-row">
+                        <div>
+                          <CardTitle>第 {String(position)} 条设定</CardTitle>
+                          <CardDescription>先核对原文位置，再决定类型和保存内容。</CardDescription>
+                        </div>
+                        <Badge
+                          tone={draft.discarded ? "neutral" : draft.saved ? "success" : "warning"}
+                        >
+                          {draft.discarded ? "本次不保存" : draft.saved ? "已保存" : "待确认"}
+                        </Badge>
+                      </div>
+                    </CardHeader>
+                    <CardContent>
+                      <p className="story-governance-meta">原文依据</p>
+                      <blockquote className="story-source-quote">{draft.sourceText}</blockquote>
+                      <p className="story-governance-meta">
+                        原文位置：第 {String(draft.startOffset + 1)} 至 {String(draft.endOffset)}{" "}
+                        个字符
+                      </p>
+                      <p className="story-governance-meta">
+                        完整输入共 {String(sourceLength)} 个字符，位置按通用文字编码单位记录。
+                      </p>
+                      {draft.selectedCategory === "" && !draft.discarded && (
+                        <InlineAlert
+                          tone="warning"
+                          title="需要选择设定类型"
+                          description={
+                            draft.missingInformation ??
+                            "本机规则没有擅自判断，请选择合适的类型或放弃这一条。"
+                          }
+                        />
+                      )}
+                      <FormField label={`第 ${String(position)} 条设定类型`} required>
+                        {(fieldProps) => (
+                          <Select
+                            {...fieldProps}
+                            options={BULK_SETTING_TYPE_OPTIONS}
+                            placeholder="请选择类型"
+                            value={draft.selectedCategory}
+                            disabled={busy || inactive}
+                            invalid={!draft.discarded && draft.selectedCategory === ""}
+                            onChange={(event) => {
+                              const selected = event.currentTarget
+                                .value as BulkNaturalLanguageSettingCategory;
+                              updateDraft(draft.id, (current) => ({
+                                ...current,
+                                selectedCategory: selected,
+                              }));
+                            }}
+                          />
+                        )}
+                      </FormField>
+                      <FormField label={`第 ${String(position)} 条设定内容`} required>
+                        {(fieldProps) => (
+                          <Textarea
+                            {...fieldProps}
+                            rows={3}
+                            maxLength={1_000}
+                            value={draft.contentText}
+                            disabled={busy || inactive}
+                            invalid={!draft.discarded && draft.contentText.trim().length === 0}
+                            onChange={(event) => {
+                              const contentText = event.currentTarget.value;
+                              updateDraft(draft.id, (current) => ({ ...current, contentText }));
+                            }}
+                          />
+                        )}
+                      </FormField>
+                    </CardContent>
+                    <CardFooter>
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        disabled={busy || draft.saved}
+                        onClick={() =>
+                          updateDraft(draft.id, (current) => ({
+                            ...current,
+                            discarded: !current.discarded,
+                          }))
+                        }
+                      >
+                        {draft.discarded
+                          ? `恢复第 ${String(position)} 条`
+                          : `放弃第 ${String(position)} 条`}
+                      </Button>
+                    </CardFooter>
+                  </Card>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      </Drawer>
+    </>
+  );
+}
+
 export function StorySettingsTools(props: StorySettingsToolsProps) {
   const [plainLanguageOpen, setPlainLanguageOpen] = useState(false);
   const [plainLanguage, setPlainLanguage] = useState("");
@@ -135,6 +879,7 @@ export function StorySettingsTools(props: StorySettingsToolsProps) {
   const importOperationId = useRef<string | null>(null);
   const receiptInspectionSequence = useRef(0);
   const manualFormFrame = useRef<number | null>(null);
+  const plainLanguageInput = useRef<HTMLTextAreaElement>(null);
   const plainLanguageTriggerId = `story-settings-plain-language-${props.projectId}`;
 
   const characterRecords = useMemo(
@@ -235,6 +980,14 @@ export function StorySettingsTools(props: StorySettingsToolsProps) {
     },
     [],
   );
+
+  useEffect(() => {
+    if (!plainLanguageOpen || plainCandidate?.kind !== "manual") return;
+    const frame = window.requestAnimationFrame(() => {
+      plainLanguageInput.current?.focus({ preventScroll: true });
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [plainCandidate, plainLanguageOpen]);
 
   const conflicts = useMemo<readonly StorySettingsConflictEntry[]>(() => {
     const candidate = preflight?.candidate;
@@ -890,10 +1643,22 @@ export function StorySettingsTools(props: StorySettingsToolsProps) {
           <FormField
             label="描述人物、关系或规则"
             hint="例如：顾顾和丹丹是情侣关系，在初中就认识了。"
+            error={
+              plainCandidate?.kind === "manual" ? (
+                <>
+                  <strong>需要你选择设定类型</strong>
+                  <span>
+                    {plainCandidate.missingInformation}
+                    原句已保留，可以继续使用结构化手动表单。
+                  </span>
+                </>
+              ) : undefined
+            }
           >
             {(fieldProps) => (
               <Textarea
                 {...fieldProps}
+                ref={plainLanguageInput}
                 rows={5}
                 maxLength={2_000}
                 value={plainLanguage}
@@ -912,7 +1677,9 @@ export function StorySettingsTools(props: StorySettingsToolsProps) {
           >
             整理为待确认设定
           </Button>
-          {plainCandidate !== null && <PlainCandidatePreview candidate={plainCandidate} />}
+          {plainCandidate !== null && plainCandidate.kind !== "manual" && (
+            <PlainCandidatePreview candidate={plainCandidate} />
+          )}
           {plainReceipt?.status === "committed" && (
             <InlineAlert
               tone="info"

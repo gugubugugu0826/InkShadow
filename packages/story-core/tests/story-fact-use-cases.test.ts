@@ -91,6 +91,140 @@ describe("StoryFactApplicationService", () => {
     });
   });
 
+  it("keeps bulk-draft provenance after an author revises and confirms its content", async () => {
+    const { service, store } = harness();
+    const structuredValue = {
+      schemaVersion: "inkshadow.local-bulk-setting-draft.v1",
+      batchId: "bulk-batch-1",
+      draftId: "local-setting-1-0",
+      sourceKind: "local_text",
+      sourceText: "雾里的回声令人不安。",
+      sourceRange: {
+        startOffset: 0,
+        endOffset: 11,
+        sourceLength: 24,
+        unit: "utf16_code_unit",
+      },
+    };
+    const draft = unwrap(
+      await service.stageUserDraftFact({
+        projectId: PROJECT_ID,
+        factType: "world_rule",
+        contentText: "雾里的回声令人不安。",
+        structuredValue,
+        actorId: ACTOR_ID,
+      }),
+    );
+    const source = draft.toSnapshot().source;
+
+    const edited = unwrap(
+      await service.editAsUser({
+        factId: draft.id,
+        contentText: "雾里的回声会引来守潮人。",
+        actorId: ACTOR_ID,
+        humanConfirmed: true,
+        expectedRevision: draft.revision,
+      }),
+    );
+    expect(edited.toSnapshot()).toMatchObject({
+      contentText: "雾里的回声会引来守潮人。",
+      structuredValue,
+      source,
+      status: "formal",
+      origin: "user",
+      userConfirmed: true,
+      needsReview: false,
+      revision: 2,
+    });
+    const reopened = unwrap(await store.findById(parse(draft.id)));
+    expect(reopened?.toSnapshot().structuredValue).toEqual(structuredValue);
+    expect(
+      await service.editAsUser({
+        factId: draft.id,
+        contentText: "正式结构不能再次按纯文字改写。",
+        actorId: ACTOR_ID,
+        humanConfirmed: true,
+        expectedRevision: edited.revision,
+      }),
+    ).toMatchObject({ ok: false, error: { code: "STORY_FACT_INVALID_TRANSITION" } });
+  });
+
+  it("keeps project-seed provenance after an author revises and confirms a professional draft", async () => {
+    const { service, store } = harness();
+    const structuredValue = {
+      schemaVersion: "inkshadow.professional-setup-fact-draft.v1",
+      sourceKind: "project_seed",
+      projectSeed: {
+        seedId: "professional-seed-1",
+        revision: 1,
+        journeyKind: "professional",
+      },
+      field: {
+        fieldName: "characters",
+        inputKey: "protagonist",
+        origin: "professional_setup.protagonist",
+      },
+      originalInput: "林深、雾语；林深是守潮人",
+      sourceSegment: "林深是守潮人",
+      derivation: "local_deterministic_split",
+    };
+    const draft = unwrap(
+      await service.stageUserDraftFact({
+        projectId: PROJECT_ID,
+        factType: "character_identity",
+        contentText: "人物身份：林深是守潮人",
+        structuredValue,
+        actorId: ACTOR_ID,
+      }),
+    );
+
+    const edited = unwrap(
+      await service.editAsUser({
+        factId: draft.id,
+        contentText: "人物身份：林深是望潮崖守潮人",
+        actorId: ACTOR_ID,
+        humanConfirmed: true,
+        expectedRevision: draft.revision,
+      }),
+    );
+    expect(edited.toSnapshot()).toMatchObject({
+      contentText: "人物身份：林深是望潮崖守潮人",
+      structuredValue,
+      status: "formal",
+      userConfirmed: true,
+      needsReview: false,
+      revision: 2,
+    });
+    const reopened = unwrap(await store.findById(parse(draft.id)));
+    expect(reopened?.toSnapshot().structuredValue).toEqual(structuredValue);
+  });
+
+  it("rejects plain-text edits for an unknown structured author draft schema", async () => {
+    const { service } = harness();
+    const draft = unwrap(
+      await service.stageUserDraftFact({
+        projectId: PROJECT_ID,
+        factType: "character_identity",
+        contentText: "林深是守潮人。",
+        structuredValue: {
+          schemaVersion: "inkshadow.semantic-character-profile.v1",
+          identity: { name: "林深", role: "守潮人" },
+        },
+        actorId: ACTOR_ID,
+      }),
+    );
+
+    expect(
+      await service.editAsUser({
+        factId: draft.id,
+        contentText: "林深是望潮崖守潮人。",
+        actorId: ACTOR_ID,
+        humanConfirmed: true,
+        expectedRevision: draft.revision,
+      }),
+    ).toMatchObject({ ok: false, error: { code: "STORY_FACT_INVALID_TRANSITION" } });
+  });
+
   it("keeps critical AI extraction unconfirmed until an explicit user decision", async () => {
     const { service } = harness();
     const staged = unwrap(

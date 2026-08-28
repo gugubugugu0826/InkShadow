@@ -349,6 +349,7 @@ export async function executeModelHubTextTask(
   let generatedCostMicros: string | null = null;
   let successSettlementStarted = false;
   let recoveredNativeDispatchReceipt = false;
+  let observedVisibleContentLength: number | null = null;
   const nativeReceiptObservation = { postReceiptLocalFailure: false };
   const nativeInvocationDispatchLedger =
     dependencies.modelGateway.supportsNativeInvocationDispatchLedger === true;
@@ -424,6 +425,10 @@ export async function executeModelHubTextTask(
           ? modelProviderVisibleProsePolicy(current.target.connection.providerKind)
           : null;
     const nativeConfig = modelHubNativeEndpointConfig(current.target.connection);
+    const observeVisibleDelta = (accumulatedText: string) => {
+      observedVisibleContentLength = Array.from(accumulatedText).length;
+      input.onDelta?.(accumulatedText);
+    };
     const generated = await dependencies.modelGateway.generate({
       generationId,
       config: Object.freeze({ ...nativeConfig, retryLimit: executionPolicy.providerRetryLimit }),
@@ -441,7 +446,7 @@ export async function executeModelHubTextTask(
       ...(executionPolicy.transportResponseFormat === "text"
         ? {}
         : { responseFormat: executionPolicy.transportResponseFormat }),
-      ...(input.onDelta === undefined ? {} : { onDelta: input.onDelta }),
+      onDelta: observeVisibleDelta,
       ...(nativeInvocationDispatchLedger
         ? {
             invocationDispatchLedger: {
@@ -583,6 +588,7 @@ export async function executeModelHubTextTask(
       usedFallback ? 2 : 1,
       target.maximumOutputTokens,
       dispatched,
+      observedVisibleContentLength,
     );
     const ambiguous =
       isRecoveredNativeDispatchHandshakeAmbiguous(
@@ -1413,9 +1419,15 @@ function safeExecutionFailureMetadata(
   attempt: number,
   requestedMaxOutputTokens: number,
   dispatched: boolean,
+  observedVisibleContentLength: number | null,
 ): SafeAiFailureMetadata {
   const diagnostics = isRecord(cause) && isRecord(cause.diagnostics) ? cause.diagnostics : null;
   const httpStatus = safeFailureInteger(diagnostics?.httpStatus, 100, 599);
+  const diagnosticVisibleContentLength = safeFailureInteger(
+    diagnostics?.visibleContentLength,
+    0,
+    100_000_000,
+  );
   return Object.freeze({
     requestId: safeFailureString(diagnostics?.requestId),
     stage: executionFailureStage(normalized.code, dispatched, httpStatus),
@@ -1425,7 +1437,7 @@ function safeExecutionFailureMetadata(
         : normalized.retryable,
     httpStatus,
     finishReason: safeFailureString(diagnostics?.finishReason),
-    visibleContentLength: safeFailureInteger(diagnostics?.visibleContentLength, 0, 100_000_000),
+    visibleContentLength: observedVisibleContentLength ?? diagnosticVisibleContentLength,
     reasoningPresent:
       typeof diagnostics?.reasoningPresent === "boolean" ? diagnostics.reasoningPresent : null,
     stream: typeof diagnostics?.stream === "boolean" ? diagnostics.stream : null,

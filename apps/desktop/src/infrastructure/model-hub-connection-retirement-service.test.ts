@@ -122,6 +122,8 @@ describe("retireModelHubConnection", () => {
       enabled: false,
       revision: created.revision + 1,
       credentialRef: created.credentialRef,
+      connectionStatus: "disabled",
+      lastErrorCode: "MODEL_HUB_CONNECTION_RETIREMENT_INCOMPLETE",
     });
     if (disabled === null) throw new Error("Expected the disabled connection.");
 

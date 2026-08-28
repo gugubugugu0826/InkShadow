@@ -17,12 +17,14 @@ import {
   type CandidateApplicationStrategy,
   type CandidateTextDiff,
 } from "@inkshadow/application";
-import type {
-  CandidateQualityGateResult,
-  ContinuationDestinationId,
-  ContinuationOutputProfileId,
-  ContextEvidenceSourceType,
-  ContextLayer,
+import {
+  detectCandidateStableOverlap,
+  type CandidateStableOverlapResult,
+  type CandidateQualityGateResult,
+  type ContinuationDestinationId,
+  type ContinuationOutputProfileId,
+  type ContextEvidenceSourceType,
+  type ContextLayer,
 } from "@inkshadow/ai-core";
 import type {
   AiCandidate,
@@ -917,6 +919,7 @@ export function EditorPage() {
     readonly currentContent: string;
   } | null>(null);
   const [candidateCopySaved, setCandidateCopySaved] = useState(false);
+  const [candidateOverlapAcknowledged, setCandidateOverlapAcknowledged] = useState(false);
   const [candidateReviewSelection, setCandidateReviewSelection] = useState<EditorSelection>({
     start: 0,
     end: 0,
@@ -4155,6 +4158,7 @@ export function EditorPage() {
     setCandidateRevisionSaved(false);
     setCandidateReviewConflict(null);
     setCandidateCopySaved(false);
+    setCandidateOverlapAcknowledged(false);
     setCandidateDiff(null);
     setCandidateReviewDraft(candidate.content);
     setCandidateReviewComparedContent(candidate.content);
@@ -4324,6 +4328,29 @@ export function EditorPage() {
     candidateOverride: AiCandidate | null = candidate,
     completionNotice: string | null = null,
   ): Promise<boolean> {
+    const acceptanceContent =
+      candidateOverride?.id === candidate?.id && candidateReviewDraft.length > 0
+        ? candidateReviewDraft
+        : (candidateOverride?.content ?? "");
+    const overlapBaseline =
+      candidateOverride?.baseVersionId === null || candidateOverride?.baseVersionId === undefined
+        ? undefined
+        : versions.find((version) => version.id === candidateOverride.baseVersionId);
+    const overlap =
+      candidateOverride?.applicationIntent.task === "continuation" && overlapBaseline !== undefined
+        ? detectCandidateStableOverlap(overlapBaseline.toSnapshot().content, acceptanceContent)
+        : null;
+    if (
+      overlap?.risk === "high" &&
+      strategy.kind !== "insert_at_cursor_omitting_exact_prefix" &&
+      !candidateOverlapAcknowledged
+    ) {
+      setCandidateReviewError(
+        "这份续写的开头与当前稳定正文大段重合。请先查看本机比较证据，再明确选择保留完整结果或移除经过逐字验证的重复部分。",
+      );
+      setCandidateReviewOpen(true);
+      return false;
+    }
     if (
       authorityWriteBlockedRef.current ||
       candidateOverride?.status !== "ready" ||
@@ -4475,7 +4502,10 @@ export function EditorPage() {
           ? "partially_accepted"
           : "accepted",
       candidateId: result.value.candidate.id,
-      applicationStrategy: strategy.kind,
+      applicationStrategy:
+        strategy.kind === "insert_at_cursor_omitting_exact_prefix"
+          ? "insert_at_cursor"
+          : strategy.kind,
       acceptedChangeCount,
       rejectedChangeCount,
     });
@@ -4643,7 +4673,10 @@ export function EditorPage() {
         selectionRef.current,
         previousContent.length,
       );
-      const selectionAfter = normalizeEditorSelection(selectionBefore, nextContent.length);
+      const selectionAfter = Object.freeze({
+        start: nextContent.length,
+        end: nextContent.length,
+      });
       recordEdit(
         createEditorEditFromTransition(
           previousContent,
@@ -4970,6 +5003,8 @@ export function EditorPage() {
   const candidateReviewDraftValid = candidateReviewDraft.length > 0;
   const candidateIntent = candidate?.applicationIntent ?? null;
   const candidateIsContinuation = candidateIntent?.task === "continuation";
+  const candidateContinuationCursor =
+    candidateIntent?.task === "continuation" ? candidateIntent.startUtf16 : null;
   const candidateIsSelectionRewrite = candidateIntent?.task === "selection_rewrite";
   const candidateIsWholeChapterRewrite = candidateIntent?.task === "whole_chapter_rewrite";
   const candidateAllowsPartialDecisions = candidateIntent?.task === "legacy_full_document";
@@ -4977,7 +5012,16 @@ export function EditorPage() {
     candidate?.baseVersionId === null || candidate?.baseVersionId === undefined
       ? undefined
       : versions.find((version) => version.id === candidate.baseVersionId);
-  const candidateApplicationBlocked =
+  const candidateStableOverlap: CandidateStableOverlapResult | null =
+    candidateIsContinuation && candidateBaseVersion !== undefined && candidateReviewDraftValid
+      ? detectCandidateStableOverlap(
+          candidateBaseVersion.toSnapshot().content,
+          candidateReviewDraft,
+        )
+      : null;
+  const candidateOverlapRequiresAcknowledgement =
+    candidateStableOverlap?.risk === "high" && !candidateOverlapAcknowledged;
+  const candidateAuthorityApplicationBlocked =
     readonly ||
     (candidate !== null &&
       (candidateBaseVersion === undefined ||
@@ -4986,6 +5030,8 @@ export function EditorPage() {
           candidateBaseVersion.toSnapshot(),
           candidateReviewDraft,
         ) === null));
+  const candidateApplicationBlocked =
+    candidateAuthorityApplicationBlocked || candidateOverlapRequiresAcknowledgement;
   const candidatePartialDecisionComplete =
     candidateReviewDiffCurrent &&
     candidateDiff !== null &&
@@ -6939,6 +6985,7 @@ export function EditorPage() {
                   setCandidateReviewDraft(event.currentTarget.value);
                   setCandidateDiffDecisions({});
                   setCandidateRevisionSaved(false);
+                  setCandidateOverlapAcknowledged(false);
                 }}
               />
               <div className="candidate-review-dialog__editor-actions">
@@ -7018,6 +7065,82 @@ export function EditorPage() {
               title={`${candidateSuggestionLabel}比较提示`}
               description={candidateReviewError}
             />
+          )}
+          {candidateStableOverlap?.risk === "high" && candidate !== null && (
+            <section
+              className="candidate-review-dialog__overlap"
+              aria-label="续写与当前正文重合检查"
+            >
+              <InlineAlert
+                tone="warning"
+                title={
+                  candidateStableOverlap.kind === "exact_prefix"
+                    ? "续写开头完整重复了当前正文"
+                    : "续写开头与当前正文高度相似"
+                }
+                description={
+                  candidateStableOverlap.kind === "exact_prefix"
+                    ? `本机逐字确认，续写开头包含当前稳定正文的完整内容（${candidateStableOverlap.exactPrefixCharacters.toLocaleString("zh-CN")} 字符）。直接使用会造成大段重复；正文目前没有变化。`
+                    : `本机比较了开头 ${candidateStableOverlap.comparedCharacters.toLocaleString("zh-CN")} 个字符，相似度约 ${String(Math.round(candidateStableOverlap.similarity * 100))}%。这只是确定性的本地比较，没有再次调用模型，也不会自动裁剪近似内容。`
+                }
+              />
+              {candidateStableOverlap.kind === "exact_prefix" &&
+                candidateStableOverlap.removableRangeUtf16 !== null &&
+                candidateContinuationCursor !== null &&
+                candidateReviewDraft === candidate.content && (
+                  <div className="candidate-review-dialog__overlap-comparison">
+                    <section>
+                      <h3>处理前：完整原始结果</h3>
+                      <pre>{boundedEditorPreview(candidateReviewDraft)}</pre>
+                    </section>
+                    <section>
+                      <h3>处理后：只保留新增部分</h3>
+                      <pre>
+                        {boundedEditorPreview(
+                          candidateReviewDraft.slice(
+                            0,
+                            candidateStableOverlap.removableRangeUtf16.start,
+                          ) +
+                            candidateReviewDraft.slice(
+                              candidateStableOverlap.removableRangeUtf16.end,
+                            ),
+                        )}
+                      </pre>
+                    </section>
+                    <Button
+                      variant="secondary"
+                      loading={candidateBusy}
+                      disabled={
+                        candidateBusy ||
+                        candidateReviewConflict !== null ||
+                        candidateAuthorityApplicationBlocked
+                      }
+                      onClick={() =>
+                        void acceptCandidate({
+                          kind: "insert_at_cursor_omitting_exact_prefix",
+                          cursorUtf16: candidateContinuationCursor,
+                          omittedCandidateRange: candidateStableOverlap.removableRangeUtf16 ?? {
+                            start: 0,
+                            end: 0,
+                          },
+                        })
+                      }
+                    >
+                      移除重复部分后使用并创建版本
+                    </Button>
+                  </div>
+                )}
+              <label className="checkbox-row">
+                <input
+                  type="checkbox"
+                  aria-label="我已查看重复证据，仍要使用完整结果"
+                  checked={candidateOverlapAcknowledged}
+                  onChange={(event) => setCandidateOverlapAcknowledged(event.currentTarget.checked)}
+                />
+                <span>我已查看重复证据，仍要使用完整结果</span>
+              </label>
+              <p>勾选只确认这一次接受；候选原文和检查证据不会被静默改写。</p>
+            </section>
           )}
           {candidateDiff !== null && candidateReviewDiffCurrent && (
             <EditorAiSuggestionDiffViewer

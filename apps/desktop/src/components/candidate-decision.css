@@ -139,6 +139,55 @@
   font-size: var(--font-caption-size);
 }
 
+.candidate-review-dialog__overlap {
+  display: grid;
+  min-width: 0;
+  gap: var(--space-3);
+  padding: var(--space-3);
+  border: 0.0625rem solid var(--warning-text);
+  border-radius: var(--radius-md);
+  background: var(--warning-soft);
+}
+
+.candidate-review-dialog__overlap > p,
+.candidate-review-dialog__overlap-comparison h3,
+.candidate-review-dialog__overlap-comparison pre {
+  margin: 0;
+}
+
+.candidate-review-dialog__overlap > p {
+  color: var(--text-secondary);
+  font-size: var(--font-caption-size);
+}
+
+.candidate-review-dialog__overlap-comparison {
+  display: grid;
+  min-width: 0;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--space-2);
+}
+
+.candidate-review-dialog__overlap-comparison > section {
+  min-width: 0;
+  padding: var(--space-3);
+  border: 0.0625rem solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  background: var(--bg-surface);
+}
+
+.candidate-review-dialog__overlap-comparison pre {
+  max-height: 14rem;
+  margin-top: var(--space-2);
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.candidate-review-dialog__overlap-comparison > .ink-button {
+  grid-column: 1 / -1;
+  justify-self: start;
+}
+
 .candidate-review-dialog__placement p {
   color: var(--text-secondary);
   font-size: var(--font-caption-size);
@@ -152,7 +201,8 @@
 }
 
 @media (max-width: 59.9375rem) {
-  .candidate-review-dialog__three-way {
+  .candidate-review-dialog__three-way,
+  .candidate-review-dialog__overlap-comparison {
     grid-template-columns: minmax(0, 1fr);
   }
 }

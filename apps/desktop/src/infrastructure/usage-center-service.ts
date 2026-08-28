@@ -3,7 +3,15 @@ import type { SqlExecutor, SqlPrimitive } from "@inkshadow/data";
 import { OPENING_INVOCATION_USAGE_STATUS_SQL } from "./opening-invocation-terminal";
 
 export type UsageEventStatus =
-  "queued" | "running" | "succeeded" | "failed" | "cancelled" | "ambiguous" | "not_dispatched";
+  | "queued"
+  | "running"
+  | "succeeded"
+  | "partial"
+  | "failed"
+  | "cancelled"
+  | "pre_dispatch_cancelled"
+  | "ambiguous"
+  | "not_dispatched";
 export type UsagePrivacyPolicy =
   "cloud_allowed" | "local_preferred" | "local_only" | "not_recorded";
 export type UsageDataDestination = "local" | "remote" | "not_recorded";
@@ -36,6 +44,10 @@ export interface UsageCenterEvent {
   readonly providerLabel: string;
   readonly modelId: string;
   readonly status: UsageEventStatus;
+  readonly invocationId: string | null;
+  readonly visibleContentLength: number | null;
+  readonly sendCount: number | null;
+  readonly automaticRetryCount: number | null;
   readonly inputTokens: number | null;
   readonly outputTokens: number | null;
   readonly cachedInputTokens: number | null;
@@ -56,6 +68,7 @@ export interface UsageCostTotal {
 export interface UsageAggregate {
   readonly invocationCount: number;
   readonly successCount: number;
+  readonly partialCount: number;
   readonly failureCount: number;
   readonly cancelledCount: number;
   readonly activeCount: number;
@@ -126,6 +139,10 @@ interface UsageEventRow {
   provider_label: string;
   model_id: string;
   status: string;
+  invocation_id: string | null;
+  visible_content_length: number | null;
+  send_count: number | null;
+  automatic_retry_count: number | null;
   input_tokens: number | null;
   output_tokens: number | null;
   cached_input_tokens: number | null;
@@ -159,10 +176,10 @@ const MICROS_PATTERN = /^\d{1,19}$/u;
 
 /**
  * Reads the two durable local usage ledgers without storing prompts,正文 or
- * provider credentials. Continuations are authoritative in
- * ai_generation_attempt_usage, where a project link is available. They are
- * excluded from model_invocation_facts so one provider dispatch is not counted
- * twice. All other Model Hub tasks use the universal invocation ledger.
+ * provider credentials. A Model Hub invocation is excluded only when a
+ * durable direct or execution-trace link proves that the generation usage row
+ * describes the same provider dispatch. Task names alone are not identity:
+ * unlinked continuation receipts must remain visible as independent records.
  */
 export class SqliteUsageCenterService implements UsageCenterReader {
   public constructor(private readonly executor: Pick<SqlExecutor, "select">) {}
@@ -335,22 +352,194 @@ function buildTimeBoundUsageQuery(query: ValidatedUsageCenterQuery): {
   const where = clauses.length === 0 ? "" : `WHERE ${clauses.join(" AND ")}`;
   values.push(MAXIMUM_USAGE_EVENTS_PER_READ + 1);
   return {
-    sql: `${USAGE_EVENTS_CTE} SELECT event.event_id,event.source,event.occurred_at,event.project_id,event.project_name,event.chapter_id,event.chapter_name,event.task,event.provider_id,event.provider_label,event.model_id,event.status,event.input_tokens,event.output_tokens,event.cached_input_tokens,event.cost_micros,event.currency,event.cost_source,event.privacy_policy,event.data_destination,event.error_code FROM usage_events AS event ${where} ORDER BY event.occurred_at DESC,event.event_id ASC LIMIT ?`,
+    sql: `${USAGE_EVENTS_CTE} SELECT event.event_id,event.source,event.occurred_at,event.project_id,event.project_name,event.chapter_id,event.chapter_name,event.task,event.provider_id,event.provider_label,event.model_id,event.status,event.invocation_id,event.visible_content_length,event.send_count,event.automatic_retry_count,event.input_tokens,event.output_tokens,event.cached_input_tokens,event.cost_micros,event.currency,event.cost_source,event.privacy_policy,event.data_destination,event.error_code FROM usage_events AS event ${where} ORDER BY event.occurred_at DESC,event.event_id ASC LIMIT ?`,
     values,
   };
 }
 
-const USAGE_EVENTS_CTE =
-  // 生成尝试字段投影；字段顺序是 UNION 账本的权威列契约。
-  "WITH usage_events AS(SELECT 'generation:'||usage.run_id||':'||CAST(usage.attempt AS TEXT) AS event_id,'generation_attempt' AS source,usage.reported_at AS occurred_at,run.project_id AS project_id,project.name AS project_name,run.chapter_id AS chapter_id,chapter.title AS chapter_name,COALESCE(exact_invocation.task,CASE WHEN json_extract(background_task.metadata_json,'$.modelTask') IN('prose_generation','continuation') THEN json_extract(background_task.metadata_json,'$.modelTask') ELSE 'continuation' END) AS task,run.provider_id AS provider_id,COALESCE(hub_connection.display_name,'历史 AI 服务') AS provider_label,run.model_id AS model_id,CASE WHEN usage.attempt<run.attempt THEN 'failed' WHEN run.state IN('candidate_ready','completed') THEN 'succeeded' WHEN run.state IN('failed_retryable','failed_final','blocked') THEN 'failed' WHEN run.state='cancelled' THEN 'cancelled' WHEN run.state IN('retrieving','generating','validating') THEN 'running' ELSE 'queued' END AS status,usage.input_tokens AS input_tokens,usage.output_tokens AS output_tokens,usage.cached_input_tokens AS cached_input_tokens,usage.usage_priced_estimate_micros AS cost_micros,usage.currency AS currency,CASE WHEN usage.usage_source='provider_reported' THEN 'provider_usage_estimate' WHEN usage.usage_source='local_demo' THEN 'local_demo_zero' ELSE 'unknown' END AS cost_source,CASE WHEN usage.privacy_snapshot_version=1 AND usage.privacy_policy IN('local_only','local_preferred','cloud_allowed') THEN usage.privacy_policy ELSE 'not_recorded' END AS privacy_policy,CASE WHEN usage.privacy_snapshot_version=1 AND usage.data_destination IN('local','remote') THEN usage.data_destination ELSE 'not_recorded' END AS data_destination,CASE WHEN usage.attempt=run.attempt THEN run.failure_code ELSE 'AI_GENERATION_RETRY_ATTEMPT_FAILED' END AS error_code " +
-  // 生成链关联；优先恢复同一调用标识，再兼容旧任务元数据。
-  "FROM ai_generation_attempt_usage AS usage JOIN ai_generation_runs AS run ON run.id=usage.run_id JOIN projects AS project ON project.id=run.project_id JOIN chapters AS chapter ON chapter.id=run.chapter_id LEFT JOIN background_tasks AS background_task ON background_task.id=run.task_id LEFT JOIN model_invocation_facts AS exact_invocation ON exact_invocation.id=COALESCE(usage.model_invocation_id,(SELECT generation_model_link.model_invocation_id FROM context_compilation_execution_links AS generation_execution JOIN context_compilation_model_invocation_links AS generation_model_link ON generation_model_link.trace_id=generation_execution.trace_id WHERE generation_execution.generation_run_id=run.id ORDER BY generation_model_link.linked_at DESC,generation_model_link.model_invocation_id ASC LIMIT 1)) LEFT JOIN ai_generation_route_selections AS route ON route.run_id=run.id LEFT JOIN model_provider_connections AS hub_connection ON hub_connection.id=run.provider_id LEFT JOIN model_profiles AS legacy_profile ON legacy_profile.provider_id=run.provider_id " +
-  // 独立 Model Hub 调用字段投影；状态表达式与调用事实保持一致。
-  "UNION ALL SELECT 'hub:'||invocation.id AS event_id,'model_hub_invocation' AS source,COALESCE(invocation.completed_at,invocation.started_at,invocation.created_at) AS occurred_at,trace.project_id AS project_id,project.name AS project_name,trace.chapter_id AS chapter_id,chapter.title AS chapter_name,invocation.task AS task,invocation.connection_id AS provider_id,COALESCE(connection.display_name,'历史 AI 服务') AS provider_label,invocation.model_id_snapshot AS model_id, " +
-  OPENING_INVOCATION_USAGE_STATUS_SQL +
-  " AS status,invocation.input_tokens AS input_tokens,invocation.output_tokens AS output_tokens,invocation.cached_input_tokens AS cached_input_tokens,invocation.estimated_cost_micros AS cost_micros,invocation.currency AS currency,CASE WHEN invocation.estimated_cost_micros IS NOT NULL THEN 'model_hub_usage_estimate' ELSE 'unknown' END AS cost_source,invocation.privacy_policy AS privacy_policy,invocation.data_destination AS data_destination,invocation.error_code AS error_code " +
-  // 独立调用关联与精确去重；生成链已计入时不得再次计费。
-  "FROM model_invocation_facts AS invocation LEFT JOIN model_provider_connections AS connection ON connection.id=invocation.connection_id LEFT JOIN context_compilation_model_invocation_links AS invocation_link ON invocation_link.model_invocation_id=invocation.id LEFT JOIN context_compilation_runs AS trace ON trace.id=invocation_link.trace_id LEFT JOIN projects AS project ON project.id=trace.project_id LEFT JOIN chapters AS chapter ON chapter.id=trace.chapter_id WHERE invocation.task<>'continuation' AND NOT EXISTS(SELECT 1 FROM ai_generation_attempt_usage AS generation_usage WHERE generation_usage.model_invocation_id=invocation.id) AND NOT EXISTS(SELECT 1 FROM context_compilation_model_invocation_links AS generation_model_link JOIN context_compilation_execution_links AS generation_execution ON generation_execution.trace_id=generation_model_link.trace_id WHERE generation_model_link.model_invocation_id=invocation.id AND generation_execution.generation_run_id IS NOT NULL))";
+const USAGE_INVOCATION_STATUS_SQL = `CASE
+      WHEN invocation.task IN (
+        'idea_discussion', 'book_start_guidance', 'prose_generation',
+        'continuation', 'rewrite', 'polish'
+      )
+        AND invocation.status = 'failed'
+        AND invocation.error_code = 'MODEL_OUTPUT_TRUNCATED'
+        AND invocation.visible_content_length > 0
+      THEN 'partial'
+      WHEN invocation.task = 'book_start_guidance'
+        AND invocation.status = 'cancelled'
+        AND invocation.provider_dispatch_started_at IS NULL
+      THEN 'pre_dispatch_cancelled'
+      ELSE ${OPENING_INVOCATION_USAGE_STATUS_SQL}
+    END`;
+
+// 字段顺序是两个本地账本 UNION 后的权威列契约。
+const USAGE_EVENTS_CTE = `WITH usage_events AS (
+    SELECT
+      'generation:' || usage.run_id || ':' || CAST(usage.attempt AS TEXT) AS event_id,
+      'generation_attempt' AS source,
+      usage.reported_at AS occurred_at,
+      run.project_id AS project_id,
+      project.name AS project_name,
+      run.chapter_id AS chapter_id,
+      chapter.title AS chapter_name,
+      COALESCE(
+        exact_invocation.task,
+        CASE
+          WHEN json_extract(background_task.metadata_json, '$.modelTask')
+            IN ('prose_generation', 'continuation')
+          THEN json_extract(background_task.metadata_json, '$.modelTask')
+          ELSE 'continuation'
+        END
+      ) AS task,
+      run.provider_id AS provider_id,
+      COALESCE(hub_connection.display_name, '历史 AI 服务') AS provider_label,
+      run.model_id AS model_id,
+      CASE
+        WHEN usage.attempt < run.attempt THEN 'failed'
+        WHEN candidate.incomplete = 1
+          AND length(candidate.content) > 0
+          AND candidate.status <> 'streaming'
+        THEN 'partial'
+        WHEN run.state IN ('candidate_ready', 'completed') THEN 'succeeded'
+        WHEN run.state IN ('failed_retryable', 'failed_final', 'blocked') THEN 'failed'
+        WHEN run.state = 'cancelled' THEN 'cancelled'
+        WHEN run.state IN ('retrieving', 'generating', 'validating') THEN 'running'
+        ELSE 'queued'
+      END AS status,
+      exact_invocation.id AS invocation_id,
+      COALESCE(
+        exact_invocation.visible_content_length,
+        CASE WHEN candidate.id IS NULL THEN NULL ELSE length(candidate.content) END
+      ) AS visible_content_length,
+      CASE
+        WHEN exact_invocation.id IS NULL THEN NULL
+        WHEN exact_invocation.provider_dispatch_started_at IS NOT NULL THEN 1
+        WHEN exact_invocation.status IN ('queued', 'running', 'cancelled')
+          OR exact_invocation.failure_stage = 'request_preparation'
+        THEN 0
+        ELSE NULL
+      END AS send_count,
+      CASE WHEN exact_invocation.id IS NULL THEN NULL ELSE 0 END AS automatic_retry_count,
+      usage.input_tokens AS input_tokens,
+      usage.output_tokens AS output_tokens,
+      usage.cached_input_tokens AS cached_input_tokens,
+      usage.usage_priced_estimate_micros AS cost_micros,
+      usage.currency AS currency,
+      CASE
+        WHEN usage.usage_source = 'provider_reported' THEN 'provider_usage_estimate'
+        WHEN usage.usage_source = 'local_demo' THEN 'local_demo_zero'
+        ELSE 'unknown'
+      END AS cost_source,
+      CASE
+        WHEN usage.privacy_snapshot_version = 1
+          AND usage.privacy_policy IN ('local_only', 'local_preferred', 'cloud_allowed')
+        THEN usage.privacy_policy
+        ELSE 'not_recorded'
+      END AS privacy_policy,
+      CASE
+        WHEN usage.privacy_snapshot_version = 1
+          AND usage.data_destination IN ('local', 'remote')
+        THEN usage.data_destination
+        ELSE 'not_recorded'
+      END AS data_destination,
+      CASE
+        WHEN usage.attempt = run.attempt THEN run.failure_code
+        ELSE 'AI_GENERATION_RETRY_ATTEMPT_FAILED'
+      END AS error_code
+    FROM ai_generation_attempt_usage AS usage
+    JOIN ai_generation_runs AS run ON run.id = usage.run_id
+    JOIN projects AS project ON project.id = run.project_id
+    JOIN chapters AS chapter ON chapter.id = run.chapter_id
+    LEFT JOIN ai_candidates AS candidate ON candidate.id = run.candidate_id
+    LEFT JOIN background_tasks AS background_task ON background_task.id = run.task_id
+    LEFT JOIN model_invocation_facts AS exact_invocation
+      ON exact_invocation.id = COALESCE(
+        usage.model_invocation_id,
+        (
+          SELECT generation_model_link.model_invocation_id
+          FROM context_compilation_execution_links AS generation_execution
+          JOIN context_compilation_model_invocation_links AS generation_model_link
+            ON generation_model_link.trace_id = generation_execution.trace_id
+          WHERE generation_execution.generation_run_id = run.id
+          ORDER BY
+            generation_model_link.linked_at DESC,
+            generation_model_link.model_invocation_id ASC
+          LIMIT 1
+        )
+      )
+    LEFT JOIN ai_generation_route_selections AS route ON route.run_id = run.id
+    LEFT JOIN model_provider_connections AS hub_connection
+      ON hub_connection.id = run.provider_id
+    LEFT JOIN model_profiles AS legacy_profile ON legacy_profile.provider_id = run.provider_id
+    UNION ALL
+    SELECT
+      'hub:' || invocation.id AS event_id,
+      'model_hub_invocation' AS source,
+      COALESCE(invocation.completed_at, invocation.started_at, invocation.created_at) AS occurred_at,
+      trace.project_id AS project_id,
+      project.name AS project_name,
+      trace.chapter_id AS chapter_id,
+      chapter.title AS chapter_name,
+      invocation.task AS task,
+      invocation.connection_id AS provider_id,
+      COALESCE(connection.display_name, '历史 AI 服务') AS provider_label,
+      invocation.model_id_snapshot AS model_id,
+      ${USAGE_INVOCATION_STATUS_SQL} AS status,
+      invocation.id AS invocation_id,
+      invocation.visible_content_length AS visible_content_length,
+      CASE
+        WHEN invocation.provider_dispatch_started_at IS NOT NULL THEN 1
+        WHEN invocation.status IN ('queued', 'running', 'cancelled')
+          OR invocation.failure_stage = 'request_preparation'
+        THEN 0
+        ELSE NULL
+      END AS send_count,
+      CASE
+        WHEN invocation.task IN (
+          'capability_probe', 'idea_discussion', 'book_start_guidance',
+          'prose_generation', 'continuation', 'rewrite', 'polish',
+          'outline_planning', 'scene_breakdown', 'chapter_summary',
+          'long_memory_compression', 'character_extraction', 'world_extraction',
+          'contradiction_check', 'pov_check', 'character_voice_check',
+          'content_quality_check', 'what_if_simulation', 'translation'
+        )
+        THEN 0
+        ELSE NULL
+      END AS automatic_retry_count,
+      invocation.input_tokens AS input_tokens,
+      invocation.output_tokens AS output_tokens,
+      invocation.cached_input_tokens AS cached_input_tokens,
+      invocation.estimated_cost_micros AS cost_micros,
+      invocation.currency AS currency,
+      CASE
+        WHEN invocation.estimated_cost_micros IS NOT NULL THEN 'model_hub_usage_estimate'
+        ELSE 'unknown'
+      END AS cost_source,
+      invocation.privacy_policy AS privacy_policy,
+      invocation.data_destination AS data_destination,
+      invocation.error_code AS error_code
+    FROM model_invocation_facts AS invocation
+    LEFT JOIN model_provider_connections AS connection ON connection.id = invocation.connection_id
+    LEFT JOIN context_compilation_model_invocation_links AS invocation_link
+      ON invocation_link.model_invocation_id = invocation.id
+    LEFT JOIN context_compilation_runs AS trace ON trace.id = invocation_link.trace_id
+    LEFT JOIN projects AS project ON project.id = trace.project_id
+    LEFT JOIN chapters AS chapter ON chapter.id = trace.chapter_id
+    WHERE NOT EXISTS (
+        SELECT 1
+        FROM ai_generation_attempt_usage AS generation_usage
+        WHERE generation_usage.model_invocation_id = invocation.id
+      )
+      AND NOT EXISTS (
+        SELECT 1
+        FROM context_compilation_model_invocation_links AS generation_model_link
+        JOIN context_compilation_execution_links AS generation_execution
+          ON generation_execution.trace_id = generation_model_link.trace_id
+        WHERE generation_model_link.model_invocation_id = invocation.id
+          AND generation_execution.generation_run_id IS NOT NULL
+      )
+  )`;
 
 function hydrateUsageEvent(row: UsageEventRow): UsageCenterEvent {
   const source =
@@ -366,8 +555,25 @@ function hydrateUsageEvent(row: UsageEventRow): UsageCenterEvent {
   const privacyPolicy = parsePrivacyPolicy(row.privacy_policy);
   const dataDestination = parseDataDestination(row.data_destination);
   const costSource = parseCostSource(row.cost_source);
+  const invocationId = validateNullableLedgerText(row.invocation_id, "调用标识", 512);
+  const visibleContentLength = validateNullableCount(
+    row.visible_content_length,
+    "可见字符数",
+    100_000_000,
+  );
+  const sendCount = validateNullableCount(row.send_count, "发送次数", 1);
+  const automaticRetryCount = validateNullableCount(row.automatic_retry_count, "自动重试次数", 100);
   const costMicros = validateNullableMicros(row.cost_micros, "模型使用费用");
   const currency = validateNullableCurrency(row.currency);
+  if (status === "partial" && (visibleContentLength === null || visibleContentLength < 1)) {
+    throw corruptLedger("已保留部分结果的记录缺少可见字符数。");
+  }
+  if (status === "pre_dispatch_cancelled" && sendCount !== 0) {
+    throw corruptLedger("发送前安全终止记录的发送次数无效。");
+  }
+  if (invocationId === null && (sendCount !== null || automaticRetryCount !== null)) {
+    throw corruptLedger("没有调用标识的记录不能声明发送或自动重试次数。");
+  }
   if ((costMicros === null) !== (currency === null) && costSource !== "unknown") {
     throw corruptLedger("模型使用费用与币种记录不完整。");
   }
@@ -390,6 +596,10 @@ function hydrateUsageEvent(row: UsageEventRow): UsageCenterEvent {
     providerLabel: validateRequiredText(row.provider_label, "供应商名称", 160),
     modelId: validateRequiredText(row.model_id, "模型", 512),
     status,
+    invocationId,
+    visibleContentLength,
+    sendCount,
+    automaticRetryCount,
     inputTokens: validateNullableTokenCount(row.input_tokens),
     outputTokens: validateNullableTokenCount(row.output_tokens),
     cachedInputTokens: validateNullableTokenCount(row.cached_input_tokens),
@@ -467,6 +677,7 @@ function uniqueOptions(options: readonly UsageFilterOption[]): readonly UsageFil
 
 function aggregateUsage(events: readonly UsageCenterEvent[]): UsageAggregate {
   let successCount = 0;
+  let partialCount = 0;
   let failureCount = 0;
   let cancelledCount = 0;
   let activeCount = 0;
@@ -482,8 +693,15 @@ function aggregateUsage(events: readonly UsageCenterEvent[]): UsageAggregate {
 
   for (const event of events) {
     if (event.status === "succeeded") successCount += 1;
-    else if (event.status === "failed" || event.status === "ambiguous") failureCount += 1;
-    else if (event.status === "cancelled" || event.status === "not_dispatched") cancelledCount += 1;
+    else if (event.status === "partial") partialCount += 1;
+    else if (
+      event.status === "failed" ||
+      event.status === "ambiguous" ||
+      event.status === "not_dispatched"
+    )
+      failureCount += 1;
+    else if (event.status === "cancelled" || event.status === "pre_dispatch_cancelled")
+      cancelledCount += 1;
     else activeCount += 1;
 
     if (event.dataDestination === "local") localCount += 1;
@@ -515,6 +733,7 @@ function aggregateUsage(events: readonly UsageCenterEvent[]): UsageAggregate {
   return Object.freeze({
     invocationCount: events.length,
     successCount,
+    partialCount,
     failureCount,
     cancelledCount,
     activeCount,
@@ -608,8 +827,10 @@ function parseStatus(value: string): UsageEventStatus {
       "queued",
       "running",
       "succeeded",
+      "partial",
       "failed",
       "cancelled",
+      "pre_dispatch_cancelled",
       "ambiguous",
       "not_dispatched",
     ].includes(value)
@@ -653,6 +874,26 @@ function validateTimestamp(value: string): string {
 
 function validateRequiredText(value: string, field: string, maximumLength: number): string {
   if (value.length === 0 || value.length > maximumLength || !SAFE_IDENTIFIER_PATTERN.test(value)) {
+    throw corruptLedger(`${field}记录无效。`);
+  }
+  return value;
+}
+
+function validateNullableLedgerText(
+  value: string | null,
+  field: string,
+  maximumLength: number,
+): string | null {
+  return value === null ? null : validateRequiredText(value, field, maximumLength);
+}
+
+function validateNullableCount(
+  value: number | null,
+  field: string,
+  maximum: number,
+): number | null {
+  if (value === null) return null;
+  if (!Number.isSafeInteger(value) || value < 0 || value > maximum) {
     throw corruptLedger(`${field}记录无效。`);
   }
   return value;

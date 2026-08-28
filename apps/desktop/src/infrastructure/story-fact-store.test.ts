@@ -275,6 +275,29 @@ describe("BrowserDevelopmentStoryFactStore", () => {
     );
     expect((await store.save(forgedTextEdit, 1)).ok).toBe(false);
     expect(unwrap(await store.listRevisions(first.id))).toHaveLength(1);
+
+    const unknownDraft = createUnknownStructuredDraft(26);
+    expect((await store.create(unknownDraft)).ok).toBe(true);
+    const unknownSnapshot = unknownDraft.toSnapshot();
+    const confirmedActor = unwrap(parseUuidV7(ACTOR_ID));
+    const forgedUnknownDraftEdit = unwrap(
+      StoryFact.rehydrate({
+        ...unknownSnapshot,
+        contentText: "林深是望潮崖守潮人。",
+        confidence: 1,
+        status: "formal",
+        origin: "user",
+        userConfirmed: true,
+        needsReview: false,
+        confirmedByActorId: confirmedActor,
+        confirmedAt: forgedTimestamp,
+        revision: unknownSnapshot.revision + 1,
+        updatedAt: forgedTimestamp,
+      }),
+    );
+    expect((await store.save(forgedUnknownDraftEdit, unknownDraft.revision)).ok).toBe(false);
+    expect(unwrap(await store.listRevisions(unknownDraft.id))).toHaveLength(1);
+
     const secondDeleted = unwrap(
       second.deprecate({ humanConfirmed: true, expectedRevision: 1, now: T1 }),
     );
@@ -719,6 +742,32 @@ function createStructuredFormalFact(suffix: number, eventId: string): StoryFact 
     }),
   );
 }
+
+function createUnknownStructuredDraft(suffix: number): StoryFact {
+  return unwrap(
+    StoryFact.create({
+      id: "019f9f4a-b3c7-7350-9226-" + String(suffix).padStart(12, "0"),
+      projectId: PROJECT_ID,
+      factType: "character_identity",
+      contentText: "林深是守潮人。",
+      structuredValue: {
+        schemaVersion: "inkshadow.semantic-character-profile.v1",
+        identity: { name: "林深", role: "守潮人" },
+      },
+      source: {
+        kind: "user_statement",
+        reference: "user-statement:draft:" + ACTOR_ID + ":" + String(suffix),
+      },
+      confidence: 1,
+      status: "unconfirmed",
+      origin: "user",
+      needsReview: true,
+      humanConfirmed: false,
+      now: T0,
+    }),
+  );
+}
+
 function createFormalFact(suffix: number, contentText: string): StoryFact {
   return unwrap(
     StoryFact.create({

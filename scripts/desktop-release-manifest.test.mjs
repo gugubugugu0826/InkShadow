@@ -613,6 +613,22 @@ test("artifact fingerprint excludes only the root release manifest", async () =>
   }
 });
 
+test("Vite and release attestation share one aggregate frontend budget", async () => {
+  const [viteConfiguration, releaseChecker] = await Promise.all([
+    readFile(path.join(workspaceRoot, "apps", "desktop", "vite.config.ts"), "utf8"),
+    readFile(path.join(workspaceRoot, "scripts", "check-desktop-release.mjs"), "utf8"),
+  ]);
+  const viteBudget = viteConfiguration.match(/TOTAL_FRONTEND_BUDGET_BYTES\s*=\s*([^;]+);/u)?.[1];
+  const attestationBudget = releaseChecker.match(/totalFrontend:\s*([^,\n]+),/u)?.[1];
+  assert.ok(viteBudget, "Vite aggregate frontend budget is missing");
+  assert.ok(attestationBudget, "release attestation aggregate frontend budget is missing");
+  assert.equal(
+    attestationBudget.replaceAll(/\s+/gu, ""),
+    viteBudget.replaceAll(/\s+/gu, ""),
+    "the build and release attestation must reject the same aggregate payload",
+  );
+});
+
 test("release configuration requires exact clean-checkout build commands", async () => {
   const releaseWorkspace = await createReleaseCheckerRepository();
   const ciPath = path.join(releaseWorkspace.root, ".github", "workflows", "ci.yml");

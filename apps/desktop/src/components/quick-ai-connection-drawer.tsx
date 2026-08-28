@@ -152,8 +152,11 @@ function OpenQuickAiConnectionDrawer({
         runtime.credentials.discoverModelCredentials?.(
           connections
             .filter(
-              ({ authenticationMode, credentialRef }) =>
-                authenticationMode !== "none" && credentialRef !== null,
+              ({ authenticationMode, connectionStatus, credentialRef, enabled }) =>
+                enabled &&
+                connectionStatus !== "disabled" &&
+                authenticationMode !== "none" &&
+                credentialRef !== null,
             )
             .map((connection) => modelHubCredentialProviderId(connection)),
         ),
@@ -189,9 +192,12 @@ function OpenQuickAiConnectionDrawer({
     void runtime.modelHub
       .listConnections()
       .then(async (connections) => {
+        const activeConnections = connections.filter(
+          ({ connectionStatus, enabled }) => enabled && connectionStatus !== "disabled",
+        );
         const connection =
-          connections.find(({ id }) => id === provider) ??
-          connections.find(({ providerKind }) => providerKind === provider);
+          activeConnections.find(({ id }) => id === provider) ??
+          activeConnections.find(({ providerKind }) => providerKind === provider);
         if (connection === undefined) {
           return {
             connection: null,

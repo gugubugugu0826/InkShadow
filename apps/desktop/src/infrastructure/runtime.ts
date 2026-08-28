@@ -68,6 +68,7 @@ import {
 } from "@inkshadow/domain";
 import {
   CloudDeletionJournalSqliteStore,
+  AuthorRecoverySqliteStore,
   DatabaseMaintenanceService,
   GovernedCreativeExtensionSqliteStore,
   MultiAgentReviewSqliteStore,
@@ -83,6 +84,7 @@ import {
   type NativePathTicket,
   type NativePathTicketReceipt,
   type SqlExecutor,
+  type AuthorRecoveryStore,
 } from "@inkshadow/data";
 import type { AccessSqliteStore } from "@inkshadow/data/access-sqlite-store";
 import type { ProjectKeySqliteStore } from "@inkshadow/data/project-key-sqlite-store";
@@ -163,6 +165,7 @@ import {
   type CreativeJourneyStore,
 } from "./creative-journey-store";
 import { BrowserProjectSeedStore, backfillLegacyProjectSeeds } from "./project-seed-local-store";
+import { BrowserDevelopmentAuthorRecoveryStore } from "./author-recovery-browser-store";
 import { selectProjectSeedContextCandidates } from "./project-seed-context-adapter";
 import {
   BrowserDevelopmentContextCompilationTraceStore,
@@ -735,6 +738,7 @@ export interface DesktopRuntime {
   readonly rerank: ModelHubRerankService;
   readonly creativeJourneys: CreativeJourneyStore;
   readonly projectSeeds: ProjectSeedStore;
+  readonly authorRecovery: AuthorRecoveryStore;
   readonly storySettingsImport: StorySettingsImportService | null;
   readonly contextTraces: ContextCompilationTraceStore;
   readonly contextTraceOutputs: ContextTraceOutputCommitUnitOfWork;
@@ -892,14 +896,32 @@ export class TauriNativeModelGatewayClient implements NativeModelGatewayClient {
       );
     }
     try {
-      const result = await invoke<NativeEmbeddingResult>("embed_native_model", {
+      const result = await invoke<
+        NativeEmbeddingResult &
+          Readonly<{ invocationDispatchReceipt?: NativeModelInvocationDispatchReceipt | null }>
+      >("embed_native_model", {
         request: {
           config: input.config,
           model: input.model,
           inputs: input.inputs,
           dispatchScope: input.dispatchScope,
+          ...(input.invocationDispatchLedger === undefined
+            ? {}
+            : { invocationDispatchLedger: input.invocationDispatchLedger }),
         },
       });
+      if (input.invocationDispatchLedger !== undefined) {
+        const receipt = validateNativeInvocationDispatchReceipt(
+          result.invocationDispatchReceipt,
+          input.invocationDispatchLedger,
+        );
+        await input.onInvocationDispatchAccepted?.(receipt);
+      } else if (result.invocationDispatchReceipt != null) {
+        throw new ModelCenterError(
+          "MODEL_INVOCATION_DISPATCH_RECEIPT_INVALID",
+          "Native embedding returned an unexpected invocation receipt.",
+        );
+      }
       return validateNativeEmbeddingResult(result, input);
     } catch (cause) {
       throw normalizeNativeModelGatewayError(cause);
@@ -1297,6 +1319,7 @@ function buildRuntime(
   repositories: RuntimeRepositories,
   creativeJourneys: CreativeJourneyStore,
   projectSeeds: ProjectSeedStore,
+  authorRecovery: AuthorRecoveryStore,
   close: () => Promise<void>,
   maintenance: RuntimeMaintenance | null,
   createTaskCenter: (clock: Clock) => TaskCenterStore,
@@ -1903,6 +1926,7 @@ function buildRuntime(
     repositories,
     creativeJourneys,
     projectSeeds,
+    authorRecovery,
     storySettingsImport:
       cloudExecutor === null
         ? null
@@ -2430,6 +2454,7 @@ export async function createDesktopRuntime(): Promise<DesktopRuntime> {
       repositories,
       new SqliteCreativeJourneyStore(executor),
       new ProjectSeedSqliteStore(executor),
+      new AuthorRecoverySqliteStore(executor),
       () => executor.close(),
       createTauriRuntimeMaintenance(executor),
       (clock) => new TauriTaskCenterStore(executor, clock),
@@ -2684,6 +2709,7 @@ export function createDevelopmentRuntime(storage: Storage): DesktopRuntime {
     repositories,
     new BrowserCreativeJourneyStore(storage),
     new BrowserProjectSeedStore(storage),
+    new BrowserDevelopmentAuthorRecoveryStore(storage),
     () => Promise.resolve(),
     null,
     (clock) => new BrowserDevelopmentTaskCenterStore(repositories.taskCenterPersistence, clock),
@@ -5142,7 +5168,9 @@ function invalidNativeRerankResponse(): ModelCenterError {
 
 function validateNativeInvocationDispatchReceipt(
   value: unknown,
-  expected: NativeModelGenerationInput["invocationDispatchLedger"],
+  expected:
+    | NativeModelGenerationInput["invocationDispatchLedger"]
+    | NativeEmbeddingInput["invocationDispatchLedger"],
 ): NativeModelInvocationDispatchReceipt {
   if (
     expected === undefined ||

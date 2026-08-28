@@ -219,6 +219,7 @@ pub(crate) fn valid_model_invocation_dispatch_task(task: &str) -> bool {
             | "content_quality_check"
             | "what_if_simulation"
             | "translation"
+            | "embedding"
             | "capability_probe"
     )
 }
@@ -273,7 +274,7 @@ impl NativeSqliteState {
         self
     }
 
-    /// Commits a content-free text-invocation dispatch receipt at the native
+    /// Commits a content-free model-invocation dispatch receipt at the native
     /// network boundary. Validation, credential loading and project privacy
     /// leasing happen before this write; provider I/O happens only after it
     /// succeeds.
@@ -4029,7 +4030,7 @@ mod tests {
             diagnostic
                 .get("expectedVersion")
                 .and_then(JsonValue::as_i64),
-            Some(84)
+            Some(85)
         );
         assert_eq!(
             diagnostic
@@ -4059,7 +4060,7 @@ mod tests {
         );
         assert_eq!(
             diagnostic.get("actualVersion").and_then(JsonValue::as_i64),
-            Some(84)
+            Some(85)
         );
         assert_eq!(
             diagnostic

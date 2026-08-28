@@ -56,6 +56,20 @@ export type NaturalLanguageSettingCandidate =
       suggestions: readonly string[];
     }>;
 
+export type BulkNaturalLanguageSettingCategory =
+  "character_identity" | "relationship" | "location" | "world_rule" | "writing_rule";
+
+export interface BulkNaturalLanguageSettingDraft {
+  readonly id: string;
+  readonly sourceText: string;
+  readonly startOffset: number;
+  readonly endOffset: number;
+  readonly category: BulkNaturalLanguageSettingCategory | null;
+  readonly confirmation: "pending";
+  readonly sourceKind: "local_text";
+  readonly missingInformation: string | null;
+}
+
 export interface LegacyGuidedOpeningRepairItem {
   readonly id: string;
   readonly kind: "character_record" | "writing_rule_record" | "incomplete_relationship";
@@ -180,6 +194,97 @@ export function parseNaturalLanguageSetting(value: string): NaturalLanguageSetti
     missingInformation: "缺少明确的人物、身份、年龄、关系两端或规则约束。",
     suggestions: Object.freeze(["请选择人物、关系、世界规则或写作偏好，再用结构化表单确认。"]),
   });
+}
+
+/**
+ * Splits a local author-supplied paragraph into evidence-bound review drafts.
+ * This parser is deliberately deterministic and never calls a model. An
+ * uncertain sentence remains uncategorized so the author can classify or
+ * discard it instead of receiving a guessed fact.
+ */
+export function parseBulkNaturalLanguageSettings(
+  value: string,
+): readonly BulkNaturalLanguageSettingDraft[] {
+  validateBulkNaturalLanguageInput(value);
+  const drafts: BulkNaturalLanguageSettingDraft[] = [];
+  const boundaryPattern = /[。！？!?；;\r\n]+/gu;
+  let segmentStart = 0;
+  let match: RegExpExecArray | null;
+  while ((match = boundaryPattern.exec(value)) !== null) {
+    appendBulkDraft(drafts, value, segmentStart, match.index + match[0].length);
+    segmentStart = match.index + match[0].length;
+  }
+  appendBulkDraft(drafts, value, segmentStart, value.length);
+  if (drafts.length === 0) {
+    throw new Error("没有找到可整理的设定句段。");
+  }
+  return Object.freeze(drafts);
+}
+
+function appendBulkDraft(
+  drafts: BulkNaturalLanguageSettingDraft[],
+  source: string,
+  rawStart: number,
+  rawEnd: number,
+): void {
+  let startOffset = rawStart;
+  let endOffset = rawEnd;
+  while (startOffset < endOffset && /\s/u.test(source[startOffset] ?? "")) startOffset += 1;
+  while (endOffset > startOffset && /\s/u.test(source[endOffset - 1] ?? "")) endOffset -= 1;
+  if (endOffset <= startOffset) return;
+  const sourceText = source.slice(startOffset, endOffset);
+  const candidate = parseNaturalLanguageSetting(sourceText);
+  const category = bulkCategory(sourceText, candidate);
+  drafts.push(
+    Object.freeze({
+      id: "local-setting-" + String(drafts.length + 1) + "-" + String(startOffset),
+      sourceText,
+      startOffset,
+      endOffset,
+      category,
+      confirmation: "pending",
+      sourceKind: "local_text",
+      missingInformation:
+        category === null ? "本机规则无法判断这条设定的类型，请选择类型、修改原句或放弃。" : null,
+    }),
+  );
+}
+
+function bulkCategory(
+  sourceText: string,
+  candidate: NaturalLanguageSettingCandidate,
+): BulkNaturalLanguageSettingCategory | null {
+  if (isWritingConstraint(sourceText)) return "writing_rule";
+  if (candidate.kind === "relationship") return "relationship";
+  if (candidate.kind === "character_profile" || candidate.kind === "character_voice") {
+    return "character_identity";
+  }
+  if (candidate.kind === "world_rule") return "world_rule";
+  if (
+    /(?:故事|情节|事件)?(?:发生|开始|结束)在/u.test(sourceText) ||
+    /(?:地点|场景|城市|村庄|港口|学校|王城|旧城).{0,20}(?:是|位于|坐落|处在)/u.test(sourceText) ||
+    /(?:位于|坐落于|地处)[^。！？]{1,80}$/u.test(sourceText.replace(/[。！？!?]+$/u, ""))
+  ) {
+    return "location";
+  }
+  return null;
+}
+
+function isWritingConstraint(value: string): boolean {
+  return (
+    /(?:写作|正文|章节|叙事|文风).*(?:不要|避免|禁止|必须|不能)/u.test(value) ||
+    /(?:不要|避免|禁止|必须|不能).*(?:视角|描写|叙事|文风|旁白)/u.test(value)
+  );
+}
+
+function validateBulkNaturalLanguageInput(value: string): void {
+  if (
+    value.trim().length === 0 ||
+    value.length > MAX_NATURAL_LANGUAGE_SETTING ||
+    /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/u.test(value)
+  ) {
+    throw new Error("设定需要 1–" + String(MAX_NATURAL_LANGUAGE_SETTING) + " 个可读字符。");
+  }
 }
 
 export function inspectLegacyGuidedOpeningRecords(

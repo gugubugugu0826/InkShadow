@@ -440,7 +440,8 @@ function validateStrategyAgainstIntent(
   }
   const matchesContinuation =
     intent.application === "insert_at_cursor" &&
-    strategy.kind === "insert_at_cursor" &&
+    (strategy.kind === "insert_at_cursor" ||
+      strategy.kind === "insert_at_cursor_omitting_exact_prefix") &&
     strategy.cursorUtf16 === intent.startUtf16;
   const matchesSelection =
     intent.application === "replace_selection" &&

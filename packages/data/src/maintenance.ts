@@ -114,6 +114,7 @@ const RESTORABLE_TABLES = [
   "project_display_identities",
   "project_display_identity_revisions",
   "project_seeds",
+  "author_recovery_records",
   "story_settings_import_receipts",
   "team_template_application_receipts",
   "project_team_template_settings",
@@ -291,6 +292,7 @@ const LEGACY_OPTIONAL_RESTORABLE_TABLES = new Set<string>([
   "project_display_identities",
   "project_display_identity_revisions",
   "story_fact_evidence",
+  "author_recovery_records",
 ]);
 
 // Search snapshots are derived projections, not backup authority. Clearing
@@ -311,6 +313,7 @@ const RESTORE_DELETE_ORDER = [
   "consistency_investigation_steps",
   "consistency_investigation_runs",
   "story_settings_import_receipts",
+  "author_recovery_records",
   "novel_skill_evaluation_manual_decisions",
   "novel_skill_evaluation_review_receipts",
   "novel_skill_evaluation_scores",
@@ -581,6 +584,7 @@ const RESTORE_INSERT_ORDER = [
   "writing_provider_disclosure_grants",
   "novel_skill_definitions",
   "projects",
+  "author_recovery_records",
   "project_novel_skill_bindings",
   "project_seeds",
   "story_settings_import_receipts",

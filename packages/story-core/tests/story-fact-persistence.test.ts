@@ -65,6 +65,10 @@ const storyFactEvidenceGuardPerformanceMigration = readFileSync(
   new URL("../../data/migrations/0081_story_fact_evidence_guard_performance.sql", import.meta.url),
   "utf8",
 );
+const authorRecoveryRecordsMigration = readFileSync(
+  new URL("../../data/migrations/0082_author_recovery_records.sql", import.meta.url),
+  "utf8",
+);
 const migration = [
   baseMigration,
   aliasResolutionMigration,
@@ -74,6 +78,7 @@ const migration = [
   directLocalAuthorRevisionMigration,
   storyFactEvidenceMigration,
   storyFactEvidenceGuardPerformanceMigration,
+  authorRecoveryRecordsMigration,
 ].join("\n");
 const T0 = "2026-08-01T00:00:00.000Z";
 const T1 = "2026-08-01T00:01:00.000Z";

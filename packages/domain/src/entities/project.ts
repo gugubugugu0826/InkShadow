@@ -31,7 +31,8 @@ export interface TrashProjectInput {
   readonly retentionUntil: IsoUtcTimestamp;
 }
 
-const MAX_PROJECT_NAME_LENGTH = 120;
+export const MAX_PROJECT_NAME_LENGTH = 120;
+const MAX_LEGACY_PROJECT_NAME_LENGTH = 10_000;
 const CONTROL_CHARACTER_PATTERN = /[\u0000-\u001f\u007f]/u;
 
 export function normalizeProjectName(value: string): Result<string, AppError> {
@@ -56,7 +57,7 @@ export function normalizeProjectName(value: string): Result<string, AppError> {
 }
 
 function validateSnapshot(snapshot: ProjectSnapshot): Result<ProjectSnapshot, AppError> {
-  const name = normalizeProjectName(snapshot.name);
+  const name = preserveLegacyProjectName(snapshot.name);
   if (!name.ok) {
     return name;
   }
@@ -104,6 +105,19 @@ function validateSnapshot(snapshot: ProjectSnapshot): Result<ProjectSnapshot, Ap
   }
 
   return ok({ ...snapshot, name: name.value });
+}
+
+function preserveLegacyProjectName(value: string): Result<string, AppError> {
+  if (value.length > MAX_LEGACY_PROJECT_NAME_LENGTH || CONTROL_CHARACTER_PATTERN.test(value)) {
+    return err(
+      new AppError({
+        code: "VALIDATION_FAILED",
+        message: "Persisted project name exceeds the safe read boundary.",
+        details: { field: "name" },
+      }),
+    );
+  }
+  return ok(value);
 }
 
 export class Project {

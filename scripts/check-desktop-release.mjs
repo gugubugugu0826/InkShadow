@@ -24,7 +24,7 @@ const budgets = Object.freeze({
   workerAsset: 1_536 * 1024,
   generalAsset: 2 * 1024 * 1024,
   releaseManifest: 32 * 1024,
-  totalFrontend: 7 * 1024 * 1024,
+  totalFrontend: 7 * 1024 * 1024 + 128 * 1024,
   maximumFiles: 200,
 });
 
@@ -419,8 +419,9 @@ async function checkArtifact(distDirectory) {
     const relativeFile = normalizeSlash(path.relative(normalizedDist, file.path));
     fileSet.add(relativeFile);
     const isReleaseManifest = relativeFile === DESKTOP_RELEASE_MANIFEST_NAME;
-    // The Vite policy applies the 7 MiB budget before this attestation file is
-    // generated. Mirror that payload boundary here and cap the manifest
+    // The Vite policy applies the aggregate frontend budget before this
+    // attestation file is generated. Mirror that exact payload boundary here
+    // and cap the manifest
     // separately so adding integrity metadata cannot silently grow without a
     // limit or consume the application-code budget.
     if (!isReleaseManifest) frontendBytes += file.bytes;

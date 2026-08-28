@@ -385,6 +385,52 @@ describe("candidate application planning", () => {
     expect(splitEmoji.status === "error" && splitEmoji.error.code).toBe("INVALID_SELECTION");
   });
 
+  it("removes only a verified exact stable正文 prefix while retaining the raw Candidate", () => {
+    const stable = "林深走到望潮崖尽头。".repeat(30);
+    const candidate = `\n\n${stable}雾里传来第二声钟响。`;
+    const outcome = planCandidateApplication({
+      baseline: snapshot(stable),
+      current: snapshot(stable),
+      candidateContent: candidate,
+      strategy: {
+        kind: "insert_at_cursor_omitting_exact_prefix",
+        cursorUtf16: stable.length,
+        omittedCandidateRange: { start: 2, end: 2 + stable.length },
+      },
+    });
+
+    expect(outcome.status).toBe("ready");
+    if (outcome.status === "ready") {
+      expect(outcome.plan.resultContent).toBe(`${stable}\n\n雾里传来第二声钟响。`);
+      expect(outcome.plan.edits).toEqual([
+        {
+          range: { start: stable.length, end: stable.length },
+          replacement: "\n\n雾里传来第二声钟响。",
+          sourceChangeId: null,
+        },
+      ]);
+      expect(outcome.plan.strategy).toBe("insert_at_cursor_omitting_exact_prefix");
+    }
+    expect(candidate).toBe(`\n\n${stable}雾里传来第二声钟响。`);
+  });
+
+  it("rejects an exact-prefix omission when the range is not the current stable正文", () => {
+    const stable = "不可被猜测裁剪的稳定正文。".repeat(24);
+    const candidate = `${stable}新的续写。`;
+    const outcome = planCandidateApplication({
+      baseline: snapshot(stable),
+      current: snapshot(stable),
+      candidateContent: candidate,
+      strategy: {
+        kind: "insert_at_cursor_omitting_exact_prefix",
+        cursorUtf16: stable.length,
+        omittedCandidateRange: { start: 1, end: stable.length },
+      },
+    });
+
+    expect(outcome.status === "error" && outcome.error.code).toBe("INVALID_SELECTION");
+  });
+
   it("returns an explicit three-way conflict when revision and digest changed", () => {
     const outcome = planCandidateApplication({
       baseline: snapshot("base", 7, "sha256:base"),

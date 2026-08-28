@@ -155,6 +155,13 @@ describe("Model Hub provider registry", () => {
     expect(resolveProviderBaseUrl("alibaba_qwen", { region: "china_beijing" })).toBe(
       "https://dashscope.aliyuncs.com/compatible-mode/v1",
     );
+    expect(getModelProviderPreset("alibaba_qwen").modelDiscovery).toEqual({
+      strategy: "openai_models",
+      method: "GET",
+      path: "/models",
+      automatic: false,
+      capabilityMetadata: false,
+    });
     expect(
       resolveProviderBaseUrl("alibaba_qwen", {
         region: "singapore",

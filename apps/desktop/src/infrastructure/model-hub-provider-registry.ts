@@ -369,9 +369,9 @@ const PROVIDER_PRESETS: readonly ModelProviderPreset[] = Object.freeze([
     ],
     expertFields: STANDARD_EXPERT_FIELDS,
     modelDiscovery: {
-      strategy: "preset_and_manual",
+      strategy: "openai_models",
       method: "GET",
-      path: null,
+      path: "/models",
       automatic: false,
       capabilityMetadata: false,
     },

@@ -696,6 +696,11 @@ pub(crate) fn local_migrator() -> Migrator {
                     "../../../../packages/data/migrations/0081_story_fact_evidence_guard_performance.sql"
                 ),
             ),
+            migration(
+                85,
+                "persist backup-safe author recovery records",
+                include_str!("../../../../packages/data/migrations/0082_author_recovery_records.sql"),
+            ),
         ]),
         ignore_missing: false,
         locking: true,
@@ -2193,11 +2198,15 @@ mod tests {
         );
         assert_eq!(
             after_upgrade.protected_tables.len(),
-            before.protected_tables.len() + 1
+            before.protected_tables.len() + 2
         );
         assert_eq!(
             after_upgrade.protected_tables["story_fact_evidence"].row_count,
             SYNTHETIC_V029_CHAPTER_SPAN_FACT_COUNT
+        );
+        assert_eq!(
+            after_upgrade.protected_tables["author_recovery_records"].row_count,
+            0
         );
         upgraded.close().await.expect("close upgraded database");
 
@@ -2296,11 +2305,15 @@ mod tests {
         );
         assert_eq!(
             upgraded_snapshot.protected_tables.len(),
-            snapshot.protected_tables.len() + 1
+            snapshot.protected_tables.len() + 2
         );
         assert_eq!(
             upgraded_snapshot.protected_tables["story_fact_evidence"].row_count,
             SYNTHETIC_V029_CHAPTER_SPAN_FACT_COUNT
+        );
+        assert_eq!(
+            upgraded_snapshot.protected_tables["author_recovery_records"].row_count,
+            0
         );
         let migrated_historical_selection_actions: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM ai_candidates
@@ -4023,7 +4036,7 @@ mod tests {
             .fetch_one(&mut connection)
             .await
             .expect("maximum migration version");
-        assert_eq!(maximum_version, 84);
+        assert_eq!(maximum_version, 85);
         let forbidden_columns: i64 = sqlx::query_scalar(
             "SELECT COUNT(*)
              FROM pragma_table_info('novel_skill_evaluation_predispatch_authority_snapshots')

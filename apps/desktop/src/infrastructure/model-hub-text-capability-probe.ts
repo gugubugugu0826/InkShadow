@@ -116,6 +116,8 @@ export interface ExecuteAuditedModelHubCapabilityProbeInput<Result> {
     streamed: boolean;
     visibleContentLength: number;
   }>;
+  /** Capability-specific, content-free failure metadata. Text probes keep the current default. */
+  readonly observeFailure?: (cause: unknown) => SafeAiFailureMetadata;
 }
 
 type CapabilityProbeNativeDispatchBoundary = Readonly<{
@@ -293,7 +295,9 @@ export async function executeAuditedModelHubCapabilityProbe<Result>(
         // Startup reconciliation owns an unreadable durable receipt.
       }
     }
-    const observed = modelHubTextCapabilityProbeFailureMetadata(cause, input.providerKind);
+    const observed =
+      input.observeFailure?.(cause) ??
+      modelHubTextCapabilityProbeFailureMetadata(cause, input.providerKind);
     const failure: SafeAiFailureMetadata = Object.freeze({
       requestId: observed.requestId ?? null,
       stage: dispatched ? (observed.stage ?? "unknown") : "request_preparation",

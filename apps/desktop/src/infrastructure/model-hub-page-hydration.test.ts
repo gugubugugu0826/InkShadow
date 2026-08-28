@@ -377,6 +377,58 @@ describe("Model Hub page hydration", () => {
     expect(getSummary).not.toHaveBeenCalled();
   });
 
+  it("does not restore a requested connection whose retirement cleanup is still pending", async () => {
+    window.localStorage.clear();
+    const setup = createDevelopmentRuntime(window.localStorage);
+    const retiring = await setup.modelHub.saveConnection({
+      id: "cleanup-pending-request",
+      providerKind: "custom_openai_compatible",
+      displayName: "Cleanup pending request",
+      baseUrlOverride: "https://retirement.example/v1",
+      credentialRef: "keyring:model-hub:cleanup-pending-request",
+      credentialState: "present",
+      authenticationMode: "bearer_keyring",
+      enabled: true,
+      expectedRevision: null,
+    });
+    await setup.modelHub.saveConnection({
+      id: retiring.id,
+      providerKind: retiring.providerKind,
+      displayName: retiring.displayName,
+      baseUrlOverride: retiring.baseUrl,
+      credentialRef: retiring.credentialRef,
+      credentialState: retiring.credentialState,
+      authenticationMode: retiring.authenticationMode,
+      enabled: false,
+      retirementCleanupPending: true,
+      expectedRevision: retiring.revision,
+    });
+
+    const restarted = createDevelopmentRuntime(window.localStorage);
+    const getSummary = vi.fn(() => Promise.resolve({ configured: true, lastFour: "3172" }));
+    const hydrated = await loadAuthoritativeModelHubHydration({
+      modelHub: restarted.modelHub,
+      credentials: { getSummary },
+      mode: "tauri",
+      clock: restarted.clock,
+      requestedConnectionId: retiring.id,
+      snapshotRevision: 1,
+      lastAction: "bootstrap",
+    });
+
+    expect(hydrated.page.selectedConnectionId).toBeNull();
+    expect(hydrated.page.connections).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: retiring.id,
+          enabled: false,
+          lastErrorCode: "MODEL_HUB_CONNECTION_RETIREMENT_INCOMPLETE",
+        }),
+      ]),
+    );
+    expect(getSummary).not.toHaveBeenCalled();
+  });
+
   it("keeps the cached catalog ready when the system credential status reaches its deadline", async () => {
     const runtime = createDevelopmentRuntime(window.localStorage);
     await runtime.modelHub.saveConnection({

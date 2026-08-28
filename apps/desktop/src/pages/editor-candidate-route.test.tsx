@@ -1812,6 +1812,421 @@ describe("editor candidate route selection", () => {
     expect((await runtime.writingExperience.getOrInitialize()).mode).toBe("professional");
   });
 
+  it("anchors a professional continuation at the restored stable正文 end", async () => {
+    const runtime = createDevelopmentRuntime(window.localStorage);
+    const preference = await runtime.writingExperience.getOrInitialize();
+    await runtime.writingExperience.switchMode("professional", preference.revision);
+    await seedRemoteContinuationRoute(runtime);
+    const generate = vi.fn<NativeModelGatewayClient["generate"]>(() =>
+      Promise.resolve({
+        text: "恢复之后，林深沿着崖边继续向前。",
+        usage: { inputTokens: 120, outputTokens: 30, cachedInputTokens: null },
+      }),
+    );
+    Object.assign(runtime, {
+      mode: "tauri" as const,
+      modelGateway: {
+        available: true,
+        listModels: () =>
+          Promise.resolve({
+            provider: "open_ai_compatible" as const,
+            models: [{ id: "direct-writer", displayName: "Direct writer" }],
+          }),
+        checkConnection: () => Promise.reject(new Error("not used")),
+        embed: () => Promise.reject(new Error("not used")),
+        generate,
+        cancelGeneration: () => Promise.resolve(true),
+      } satisfies NativeModelGatewayClient,
+    });
+    const restoredContent = "雾起了。林深站在望潮崖顶，望着海上的灯。";
+    const seeded = await seedChapter(runtime, restoredContent);
+    const edited = await runtime.useCases.editChapter.execute({
+      chapterId: seeded.chapter.id,
+      expectedRevision: seeded.chapter.revision,
+      content: "这是稍后写坏、需要放弃的第二版正文。",
+      cursorOffset: 0,
+    });
+    if (!edited.ok) throw edited.error;
+    const saved = await runtime.useCases.saveChapter.execute({
+      chapterId: seeded.chapter.id,
+      expectedRevision: seeded.chapter.revision,
+      reason: "manual",
+    });
+    if (!saved.ok) throw saved.error;
+    const versionsBeforeRestore = await runtime.repositories.chapterVersions.listByChapterId(
+      seeded.chapter.id,
+    );
+    if (!versionsBeforeRestore.ok) throw versionsBeforeRestore.error;
+    const immutableVersionsBeforeRestore = versionsBeforeRestore.value.map((version) =>
+      version.toSnapshot(),
+    );
+    const user = userEvent.setup();
+    renderEditor(runtime, seeded.project, saved.value.chapter);
+    const editor = await screen.findByRole<HTMLTextAreaElement>("textbox", {
+      name: "章节正文",
+    });
+
+    await user.click(await screen.findByRole("button", { name: "版本历史" }));
+    const history = await screen.findByRole("dialog", { name: "版本历史" });
+    const [restoreVersionButton] = within(history).getAllByRole("button", {
+      name: "恢复此版本",
+    });
+    if (restoreVersionButton === undefined) throw new Error("没有找到恢复版本按钮。");
+    await user.click(restoreVersionButton);
+    const restore = await screen.findByRole("dialog", { name: /恢复版本/u });
+    await user.click(within(restore).getByRole("button", { name: "创建恢复版本" }));
+    await waitFor(() => expect(editor).toHaveValue(restoredContent));
+    await waitFor(() => {
+      expect(editor.selectionStart).toBe(restoredContent.length);
+      expect(editor.selectionEnd).toBe(restoredContent.length);
+    });
+    const [closeHistoryButton] = within(history).getAllByRole("button", { name: "关闭" });
+    if (closeHistoryButton === undefined) throw new Error("没有找到关闭版本历史按钮。");
+    await user.click(closeHistoryButton);
+    await waitFor(() => expect(history).not.toBeInTheDocument());
+
+    const restoredChapter = await runtime.repositories.chapters.findById(seeded.chapter.id);
+    if (!restoredChapter.ok || restoredChapter.value === null) {
+      throw new Error("恢复后的章节不可用。");
+    }
+    const restoredVersions = await runtime.repositories.chapterVersions.listByChapterId(
+      seeded.chapter.id,
+    );
+    if (!restoredVersions.ok) throw restoredVersions.error;
+    const restoredVersion = restoredVersions.value.find(
+      (version) => version.id === restoredChapter.value?.currentVersionId,
+    );
+    if (restoredVersion === undefined) throw new Error("恢复版本不可用。");
+    expect(restoredVersions.value).toHaveLength(versionsBeforeRestore.value.length + 1);
+
+    await user.click(screen.getByRole("button", { name: "生成续写建议" }));
+    const preflight = await screen.findByRole("dialog", { name: "生成续写建议前检查" });
+    await user.click(
+      within(preflight).getByRole("button", {
+        name: /确认并生成续写建议|使用安全默认值并生成续写建议/u,
+      }),
+    );
+    await waitFor(async () => {
+      const candidates = await runtime.repositories.aiCandidates.listByChapterId(seeded.chapter.id);
+      expect(candidates.ok && candidates.value[0]?.status).toBe("ready");
+    });
+    const candidates = await runtime.repositories.aiCandidates.listByChapterId(seeded.chapter.id);
+    if (!candidates.ok || candidates.value[0] === undefined) {
+      throw new Error("恢复后没有保存续写建议。");
+    }
+    const generatedCandidate = candidates.value[0];
+    expect(generatedCandidate.baseVersionId).toBe(restoredVersion.id);
+    expect(generatedCandidate.applicationIntent).toMatchObject({
+      application: "insert_at_cursor",
+      startUtf16: restoredContent.length,
+      endUtf16: restoredContent.length,
+    });
+    await user.click(await screen.findByRole("button", { name: /比较.*建议/u }));
+    const review = await screen.findByRole("dialog", { name: /比较.*建议与正文/u });
+    expect(review).toHaveTextContent(
+      new RegExp(`第\\s*${String(restoredContent.length)}\\s*个字符处`, "u"),
+    );
+    await user.click(within(review).getByRole("button", { name: "插入光标并创建版本" }));
+
+    await waitFor(async () => {
+      const accepted = await runtime.repositories.aiCandidates.findById(generatedCandidate.id);
+      expect(accepted.ok && accepted.value?.status).toBe("accepted");
+      const acceptedChapter = await runtime.repositories.chapters.findById(seeded.chapter.id);
+      expect(acceptedChapter.ok && acceptedChapter.value?.content).toBe(
+        `${restoredContent}${generatedCandidate.content}`,
+      );
+      expect(editor).toHaveValue(`${restoredContent}${generatedCandidate.content}`);
+    });
+    const versionsAfterAcceptance = await runtime.repositories.chapterVersions.listByChapterId(
+      seeded.chapter.id,
+    );
+    if (!versionsAfterAcceptance.ok) throw versionsAfterAcceptance.error;
+    expect(versionsAfterAcceptance.value).toHaveLength(restoredVersions.value.length + 1);
+    const acceptedChapter = await runtime.repositories.chapters.findById(seeded.chapter.id);
+    if (!acceptedChapter.ok || acceptedChapter.value === null) {
+      throw new Error("接受续写后的章节不可用。");
+    }
+    const acceptedVersion = versionsAfterAcceptance.value.find(
+      (version) => version.id === acceptedChapter.value?.currentVersionId,
+    );
+    expect(acceptedVersion?.toSnapshot()).toMatchObject({
+      parentVersionId: restoredVersion.id,
+      sourceCandidateId: generatedCandidate.id,
+    });
+    for (const immutableVersion of immutableVersionsBeforeRestore) {
+      expect(
+        versionsAfterAcceptance.value
+          .find((version) => version.id === immutableVersion.id)
+          ?.toSnapshot(),
+      ).toEqual(immutableVersion);
+    }
+  });
+
+  it("keeps an incomplete exact-overlap Candidate unchanged while explicitly using only new text", async () => {
+    window.localStorage.clear();
+    const runtime = createDevelopmentRuntime(window.localStorage);
+    const stable = "林深沿着望潮崖的旧石阶寻找灯塔。".repeat(28);
+    const generated = `\n\n${stable}海面终于传来第二声钟响。`;
+    const { chapter, project } = await seedChapter(runtime, stable);
+    const candidate = await createReadyCandidate(runtime, project, chapter, generated, {
+      source: "generate",
+      incomplete: true,
+      applicationIntent: {
+        task: "continuation",
+        application: "insert_at_cursor",
+        payload: "fragment",
+        startUtf16: stable.length,
+        endUtf16: stable.length,
+      },
+    });
+    const providerGenerate = vi.spyOn(runtime.modelGateway, "generate");
+    const versionsBefore = await runtime.repositories.chapterVersions.listByChapterId(chapter.id);
+    if (!versionsBefore.ok) throw versionsBefore.error;
+    const immutableBefore = versionsBefore.value.map((version) => version.toSnapshot());
+    const user = userEvent.setup();
+    renderEditor(runtime, project, chapter, `?candidate=${candidate.id}`);
+
+    await user.click(await screen.findByRole("button", { name: /保留当前部分并比较|比较.*建议/u }));
+    const review = await screen.findByRole("dialog", { name: /比较.*建议与正文/u });
+    expect(within(review).getByText("续写开头完整重复了当前正文")).toBeVisible();
+    expect(within(review).getByText("处理前：完整原始结果")).toBeVisible();
+    expect(within(review).getByText("处理后：只保留新增部分")).toBeVisible();
+    expect(within(review).getByRole("button", { name: "使用这版" })).toBeDisabled();
+    expect(within(review).getByRole("button", { name: "插入光标并创建版本" })).toBeDisabled();
+
+    await user.click(within(review).getByRole("button", { name: "移除重复部分后使用并创建版本" }));
+
+    await waitFor(async () => {
+      const stored = await runtime.repositories.aiCandidates.findById(candidate.id);
+      expect(stored.ok && stored.value?.status).toBe("accepted");
+    });
+    const stored = await runtime.repositories.aiCandidates.findById(candidate.id);
+    expect(stored.ok && stored.value?.content).toBe(generated);
+    expect(stored.ok && stored.value?.toSnapshot().incomplete).toBe(true);
+    const savedChapter = await runtime.repositories.chapters.findById(chapter.id);
+    expect(savedChapter.ok && savedChapter.value?.content).toBe(
+      `${stable}\n\n海面终于传来第二声钟响。`,
+    );
+    const versionsAfter = await runtime.repositories.chapterVersions.listByChapterId(chapter.id);
+    if (!versionsAfter.ok) throw versionsAfter.error;
+    expect(versionsAfter.value).toHaveLength(immutableBefore.length + 1);
+    const acceptedVersion = versionsAfter.value.find(
+      (version) => version.id === (savedChapter.ok ? savedChapter.value?.currentVersionId : null),
+    );
+    expect(acceptedVersion?.toSnapshot()).toMatchObject({
+      content: `${stable}\n\n海面终于传来第二声钟响。`,
+      reason: "candidate_accept",
+      sourceCandidateId: candidate.id,
+    });
+    for (const snapshot of immutableBefore) {
+      expect(
+        versionsAfter.value.find((version) => version.id === snapshot.id)?.toSnapshot(),
+      ).toEqual(snapshot);
+    }
+    expect(providerGenerate).not.toHaveBeenCalled();
+  });
+
+  it("requires an explicit one-time confirmation for a highly similar long prefix", async () => {
+    window.localStorage.clear();
+    const runtime = createDevelopmentRuntime(window.localStorage);
+    const stable = Array.from(
+      { length: 48 },
+      (_, index) => `第${String(index + 1)}盏灯在浓雾里亮起，林深记下潮声方向。`,
+    ).join("");
+    const generated = `${stable.slice(0, 460)}雾语改走了另一条石阶。${stable.slice(485)}北面的潮声更近了。`;
+    const { chapter, project } = await seedChapter(runtime, stable);
+    const candidate = await createReadyCandidate(runtime, project, chapter, generated, {
+      source: "generate",
+      applicationIntent: {
+        task: "continuation",
+        application: "insert_at_cursor",
+        payload: "fragment",
+        startUtf16: stable.length,
+        endUtf16: stable.length,
+      },
+    });
+    const user = userEvent.setup();
+    renderEditor(runtime, project, chapter, `?candidate=${candidate.id}`);
+
+    await user.click(await screen.findByRole("button", { name: /比较.*建议/u }));
+    const review = await screen.findByRole("dialog", { name: /比较.*建议与正文/u });
+    expect(within(review).getByText("续写开头与当前正文高度相似")).toBeVisible();
+    expect(
+      within(review).queryByRole("button", { name: "移除重复部分后使用并创建版本" }),
+    ).not.toBeInTheDocument();
+    const useComplete = within(review).getByRole("button", { name: "使用这版" });
+    expect(useComplete).toBeDisabled();
+    await user.click(
+      within(review).getByRole("checkbox", {
+        name: "我已查看重复证据，仍要使用完整结果",
+      }),
+    );
+    expect(useComplete).toBeEnabled();
+    await user.click(useComplete);
+
+    await waitFor(async () => {
+      const stored = await runtime.repositories.aiCandidates.findById(candidate.id);
+      expect(stored.ok && stored.value?.status).toBe("accepted");
+    });
+    const stored = await runtime.repositories.aiCandidates.findById(candidate.id);
+    expect(stored.ok && stored.value?.content).toBe(generated);
+    const savedChapter = await runtime.repositories.chapters.findById(chapter.id);
+    expect(savedChapter.ok && savedChapter.value?.content).toBe(`${stable}${generated}`);
+  });
+
+  it("uses an author-selected continuation anchor after restoring a stable version", async () => {
+    const runtime = createDevelopmentRuntime(window.localStorage);
+    const preference = await runtime.writingExperience.getOrInitialize();
+    await runtime.writingExperience.switchMode("professional", preference.revision);
+    await seedRemoteContinuationRoute(runtime);
+    const generate = vi.fn<NativeModelGatewayClient["generate"]>(() =>
+      Promise.resolve({
+        text: "他停在原地，重新看向海面。",
+        usage: { inputTokens: 110, outputTokens: 24, cachedInputTokens: null },
+      }),
+    );
+    Object.assign(runtime, {
+      mode: "tauri" as const,
+      modelGateway: {
+        available: true,
+        listModels: () =>
+          Promise.resolve({
+            provider: "open_ai_compatible" as const,
+            models: [{ id: "direct-writer", displayName: "Direct writer" }],
+          }),
+        checkConnection: () => Promise.reject(new Error("not used")),
+        embed: () => Promise.reject(new Error("not used")),
+        generate,
+        cancelGeneration: () => Promise.resolve(true),
+      } satisfies NativeModelGatewayClient,
+    });
+    const restoredContent = "雾起了。林深站在望潮崖顶，望着海上的灯。";
+    const insertionOffset = "雾起了。".length;
+    const seeded = await seedChapter(runtime, restoredContent);
+    const edited = await runtime.useCases.editChapter.execute({
+      chapterId: seeded.chapter.id,
+      expectedRevision: seeded.chapter.revision,
+      content: "这是恢复前的第二版正文。",
+      cursorOffset: 0,
+    });
+    if (!edited.ok) throw edited.error;
+    const saved = await runtime.useCases.saveChapter.execute({
+      chapterId: seeded.chapter.id,
+      expectedRevision: seeded.chapter.revision,
+      reason: "manual",
+    });
+    if (!saved.ok) throw saved.error;
+    const versionsBeforeRestore = await runtime.repositories.chapterVersions.listByChapterId(
+      seeded.chapter.id,
+    );
+    if (!versionsBeforeRestore.ok) throw versionsBeforeRestore.error;
+    const immutableVersionsBeforeRestore = versionsBeforeRestore.value.map((version) =>
+      version.toSnapshot(),
+    );
+    const user = userEvent.setup();
+    renderEditor(runtime, seeded.project, saved.value.chapter);
+    const editor = await screen.findByRole<HTMLTextAreaElement>("textbox", {
+      name: "章节正文",
+    });
+
+    await user.click(await screen.findByRole("button", { name: "版本历史" }));
+    const history = await screen.findByRole("dialog", { name: "版本历史" });
+    const [restoreVersionButton] = within(history).getAllByRole("button", {
+      name: "恢复此版本",
+    });
+    if (restoreVersionButton === undefined) throw new Error("没有找到恢复版本按钮。");
+    await user.click(restoreVersionButton);
+    const restore = await screen.findByRole("dialog", { name: /恢复版本/u });
+    await user.click(within(restore).getByRole("button", { name: "创建恢复版本" }));
+    await waitFor(() => expect(editor).toHaveValue(restoredContent));
+    await waitFor(() => expect(editor.selectionStart).toBe(restoredContent.length));
+    const [closeHistoryButton] = within(history).getAllByRole("button", { name: "关闭" });
+    if (closeHistoryButton === undefined) throw new Error("没有找到关闭版本历史按钮。");
+    await user.click(closeHistoryButton);
+    await waitFor(() => expect(history).not.toBeInTheDocument());
+
+    editor.focus();
+    editor.setSelectionRange(insertionOffset, insertionOffset);
+    fireEvent.select(editor);
+    expect(editor.selectionStart).toBe(insertionOffset);
+    expect(editor.selectionEnd).toBe(insertionOffset);
+
+    const restoredChapter = await runtime.repositories.chapters.findById(seeded.chapter.id);
+    if (!restoredChapter.ok || restoredChapter.value === null) {
+      throw new Error("恢复后的章节不可用。");
+    }
+    const restoredVersions = await runtime.repositories.chapterVersions.listByChapterId(
+      seeded.chapter.id,
+    );
+    if (!restoredVersions.ok) throw restoredVersions.error;
+    const restoredVersion = restoredVersions.value.find(
+      (version) => version.id === restoredChapter.value?.currentVersionId,
+    );
+    if (restoredVersion === undefined) throw new Error("恢复版本不可用。");
+    expect(restoredVersions.value).toHaveLength(versionsBeforeRestore.value.length + 1);
+
+    await user.click(screen.getByRole("button", { name: "生成续写建议" }));
+    const preflight = await screen.findByRole("dialog", { name: "生成续写建议前检查" });
+    await user.click(
+      within(preflight).getByRole("button", {
+        name: /确认并生成续写建议|使用安全默认值并生成续写建议/u,
+      }),
+    );
+    await waitFor(async () => {
+      const candidates = await runtime.repositories.aiCandidates.listByChapterId(seeded.chapter.id);
+      expect(candidates.ok && candidates.value[0]?.status).toBe("ready");
+    });
+    const candidates = await runtime.repositories.aiCandidates.listByChapterId(seeded.chapter.id);
+    if (!candidates.ok || candidates.value[0] === undefined) {
+      throw new Error("恢复后没有保存作者指定位置的续写建议。");
+    }
+    const generatedCandidate = candidates.value[0];
+    expect(generatedCandidate.baseVersionId).toBe(restoredVersion.id);
+    expect(generatedCandidate.applicationIntent).toMatchObject({
+      application: "insert_at_cursor",
+      startUtf16: insertionOffset,
+      endUtf16: insertionOffset,
+    });
+    await user.click(await screen.findByRole("button", { name: /比较.*建议/u }));
+    const review = await screen.findByRole("dialog", { name: /比较.*建议与正文/u });
+    expect(review).toHaveTextContent(
+      new RegExp(`第\\s*${String(insertionOffset)}\\s*个字符处`, "u"),
+    );
+    await user.click(within(review).getByRole("button", { name: "插入光标并创建版本" }));
+
+    const expectedContent = `${restoredContent.slice(0, insertionOffset)}${generatedCandidate.content}${restoredContent.slice(insertionOffset)}`;
+    await waitFor(async () => {
+      const accepted = await runtime.repositories.aiCandidates.findById(generatedCandidate.id);
+      expect(accepted.ok && accepted.value?.status).toBe("accepted");
+      const acceptedChapter = await runtime.repositories.chapters.findById(seeded.chapter.id);
+      expect(acceptedChapter.ok && acceptedChapter.value?.content).toBe(expectedContent);
+      expect(editor).toHaveValue(expectedContent);
+    });
+    const versionsAfterAcceptance = await runtime.repositories.chapterVersions.listByChapterId(
+      seeded.chapter.id,
+    );
+    if (!versionsAfterAcceptance.ok) throw versionsAfterAcceptance.error;
+    expect(versionsAfterAcceptance.value).toHaveLength(restoredVersions.value.length + 1);
+    const acceptedChapter = await runtime.repositories.chapters.findById(seeded.chapter.id);
+    if (!acceptedChapter.ok || acceptedChapter.value === null) {
+      throw new Error("接受指定位置续写后的章节不可用。");
+    }
+    const acceptedVersion = versionsAfterAcceptance.value.find(
+      (version) => version.id === acceptedChapter.value?.currentVersionId,
+    );
+    expect(acceptedVersion?.toSnapshot()).toMatchObject({
+      parentVersionId: restoredVersion.id,
+      sourceCandidateId: generatedCandidate.id,
+    });
+    for (const immutableVersion of immutableVersionsBeforeRestore) {
+      expect(
+        versionsAfterAcceptance.value
+          .find((version) => version.id === immutableVersion.id)
+          ?.toSnapshot(),
+      ).toEqual(immutableVersion);
+    }
+  });
+
   it("reopens the stable正文 and keeps an older recovery draft available for an explicit decision", async () => {
     window.localStorage.clear();
     const runtime = createDevelopmentRuntime(window.localStorage);
@@ -3128,6 +3543,7 @@ async function createReadyCandidate(
     source?: AiCandidateSource;
     purpose?: AiCandidatePurpose;
     applicationIntent?: AiCandidateApplicationIntent;
+    incomplete?: boolean;
   }> = {},
 ): Promise<AiCandidate> {
   const streaming = AiCandidate.createStreaming({
@@ -3149,7 +3565,12 @@ async function createReadyCandidate(
   if (!checksum.ok) {
     throw checksum.error;
   }
-  const ready = streaming.value.markReady(content, checksum.value, runtime.clock.now());
+  const ready = streaming.value.markReady(
+    content,
+    checksum.value,
+    runtime.clock.now(),
+    options.incomplete ?? false,
+  );
   if (!ready.ok) {
     throw ready.error;
   }

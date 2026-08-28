@@ -62,6 +62,8 @@ pub(crate) struct EmbeddingRequest {
     pub(crate) model: String,
     pub(crate) inputs: Vec<String>,
     pub(crate) dispatch_scope: NativeModelDispatchScope,
+    #[serde(default)]
+    pub(crate) invocation_dispatch_ledger: Option<NativeModelInvocationDispatchLedger>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -168,6 +170,8 @@ pub(crate) struct EmbeddingResponse {
     pub(crate) dimension: usize,
     pub(crate) vector_count: usize,
     pub(crate) embeddings: Vec<Vec<f32>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) invocation_dispatch_receipt: Option<NativeModelInvocationDispatchReceipt>,
 }
 
 #[derive(Clone, Debug, Serialize, PartialEq)]

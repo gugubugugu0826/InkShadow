@@ -477,20 +477,44 @@ pub(crate) async fn embed_native_model(
     sqlite: State<'_, NativeSqliteState>,
     request: EmbeddingRequest,
 ) -> Result<EmbeddingResponse, CommandError> {
+    embed_native_model_inner(&state, &sqlite, request).await
+}
+
+async fn embed_native_model_inner(
+    state: &ModelGatewayState,
+    sqlite: &NativeSqliteState,
+    request: EmbeddingRequest,
+) -> Result<EmbeddingResponse, CommandError> {
+    validate_embedding_invocation_dispatch_ledger_request(&request)?;
     let request_timeout = configured_request_timeout(&request.config)?;
     let prepared = prepare_embedding(&request).await?;
-    let operation_id = uuid::Uuid::now_v7().to_string();
-    run_prepared_embedding_with_dispatch(
-        &state,
-        &sqlite,
+    let invocation_dispatch_boundary = request
+        .invocation_dispatch_ledger
+        .as_ref()
+        .map(|ledger| {
+            Ok::<_, CommandError>((
+                ledger.clone(),
+                embedding_invocation_dispatch_target(&request)?,
+            ))
+        })
+        .transpose()?;
+    let operation_id = request.invocation_dispatch_ledger.as_ref().map_or_else(
+        || uuid::Uuid::now_v7().to_string(),
+        |ledger| ledger.invocation_id.clone(),
+    );
+    run_prepared_embedding_with_dispatch_and_ledger(
+        state,
+        sqlite,
         &request.dispatch_scope,
         request_timeout,
         prepared,
         operation_id,
+        invocation_dispatch_boundary,
     )
     .await
 }
 
+#[cfg(test)]
 async fn run_prepared_embedding_with_dispatch(
     state: &ModelGatewayState,
     sqlite: &NativeSqliteState,
@@ -498,6 +522,30 @@ async fn run_prepared_embedding_with_dispatch(
     request_timeout: Duration,
     prepared: PreparedEmbedding,
     operation_id: String,
+) -> Result<EmbeddingResponse, CommandError> {
+    run_prepared_embedding_with_dispatch_and_ledger(
+        state,
+        sqlite,
+        dispatch_scope,
+        request_timeout,
+        prepared,
+        operation_id,
+        None,
+    )
+    .await
+}
+
+async fn run_prepared_embedding_with_dispatch_and_ledger(
+    state: &ModelGatewayState,
+    sqlite: &NativeSqliteState,
+    dispatch_scope: &NativeModelDispatchScope,
+    request_timeout: Duration,
+    prepared: PreparedEmbedding,
+    operation_id: String,
+    invocation_dispatch_boundary: Option<(
+        NativeModelInvocationDispatchLedger,
+        NativeModelInvocationDispatchTarget,
+    )>,
 ) -> Result<EmbeddingResponse, CommandError> {
     let state = state.clone();
     let sqlite = sqlite.clone();
@@ -515,10 +563,36 @@ async fn run_prepared_embedding_with_dispatch(
             &operation_id,
         )
         .await?;
+        let invocation_dispatch_receipt = match invocation_dispatch_boundary.as_ref() {
+            Some((ledger, target)) => match sqlite
+                .mark_model_invocation_dispatched(ledger, target)
+                .await
+            {
+                Ok(receipt) => Some(receipt),
+                Err(error) => {
+                    let cleanup = finish_remote_dispatch(
+                        &state.dispatch_lifecycle,
+                        &state.dispatch_registry,
+                        &sqlite,
+                        lease,
+                        &operation_id,
+                    )
+                    .await;
+                    return Err(cleanup
+                        .err()
+                        .unwrap_or_else(|| map_invocation_dispatch_ledger_error(error)));
+                }
+            },
+            None => None,
+        };
         let client = state.client.clone();
         let network_result = AssertUnwindSafe(async move {
             match timeout(request_timeout, execute_embedding(&client, prepared)).await {
-                Ok(result) => result,
+                Ok(Ok(mut result)) => {
+                    result.invocation_dispatch_receipt = invocation_dispatch_receipt;
+                    Ok(result)
+                }
+                Ok(Err(error)) => Err(error),
                 Err(_) => Err(CommandError::timeout()),
             }
         })
@@ -536,6 +610,36 @@ async fn run_prepared_embedding_with_dispatch(
         network_result
     });
     worker.await.map_err(|_| CommandError::runtime_failed())?
+}
+
+fn validate_embedding_invocation_dispatch_ledger_request(
+    request: &EmbeddingRequest,
+) -> Result<(), CommandError> {
+    let Some(ledger) = request.invocation_dispatch_ledger.as_ref() else {
+        return Ok(());
+    };
+    if request.config.retry_limit.unwrap_or(0) != 0
+        || !invocation_task_matches_dispatch_scope(
+            ledger.task_snapshot.as_str(),
+            &request.dispatch_scope,
+        )
+        || ledger.connection_revision < 1
+        || ledger.catalog_entry_revision < 1
+        || ledger.model_id_snapshot != request.model
+        || !provider_snapshot_matches_protocol(
+            ledger.provider_kind_snapshot.as_str(),
+            request.config.provider,
+        )
+    {
+        return Err(CommandError::request_invalid());
+    }
+    Ok(())
+}
+
+fn embedding_invocation_dispatch_target(
+    request: &EmbeddingRequest,
+) -> Result<NativeModelInvocationDispatchTarget, CommandError> {
+    model_invocation_dispatch_target_from_config(&request.config, &request.model)
 }
 
 #[tauri::command]
@@ -715,29 +819,36 @@ fn provider_snapshot_matches_protocol(snapshot: &str, provider: ProviderKind) ->
 fn model_invocation_dispatch_target(
     request: &StartGenerationRequest,
 ) -> Result<NativeModelInvocationDispatchTarget, CommandError> {
+    model_invocation_dispatch_target_from_config(&request.config, &request.model)
+}
+
+fn model_invocation_dispatch_target_from_config(
+    config: &ModelEndpointConfig,
+    model: &str,
+) -> Result<NativeModelInvocationDispatchTarget, CommandError> {
     Ok(NativeModelInvocationDispatchTarget {
-        protocol: match request.config.provider {
+        protocol: match config.provider {
             ProviderKind::OpenAiCompatible => "openai_compatible",
             ProviderKind::Ollama => "ollama",
             ProviderKind::Anthropic => "anthropic",
             ProviderKind::Gemini => "gemini",
         }
         .to_owned(),
-        credential_provider_id: request.config.provider_id.clone(),
-        base_url: request.config.base_url.clone(),
-        authentication_mode: match request.config.authentication {
+        credential_provider_id: config.provider_id.clone(),
+        base_url: config.base_url.clone(),
+        authentication_mode: match config.authentication {
             AuthenticationMode::None => "none",
             AuthenticationMode::BearerKeyring => "bearer_keyring",
             AuthenticationMode::CustomHeaderKeyring => "custom_header_keyring",
         }
         .to_owned(),
-        credential_header_name: request.config.credential_header_name.clone(),
-        model_discovery_path: request.config.model_discovery_path.clone(),
-        text_generation_path: request.config.text_generation_path.clone(),
-        embedding_path: request.config.embedding_path.clone(),
-        request_timeout_ms: i64::try_from(configured_request_timeout(&request.config)?.as_millis())
+        credential_header_name: config.credential_header_name.clone(),
+        model_discovery_path: config.model_discovery_path.clone(),
+        text_generation_path: config.text_generation_path.clone(),
+        embedding_path: config.embedding_path.clone(),
+        request_timeout_ms: i64::try_from(configured_request_timeout(config)?.as_millis())
             .map_err(|_| CommandError::request_invalid())?,
-        model_id: request.model.clone(),
+        model_id: model.to_owned(),
     })
 }
 
@@ -1715,6 +1826,7 @@ async fn execute_embedding(
         dimension,
         vector_count: embeddings.len(),
         embeddings,
+        invocation_dispatch_receipt: None,
     })
 }
 
@@ -2557,7 +2669,96 @@ mod tests {
             },
             model: model.to_owned(),
             inputs: inputs.iter().map(|input| (*input).to_owned()).collect(),
+            invocation_dispatch_ledger: None,
         }
+    }
+
+    async fn seeded_non_project_embedding_invocation(
+        label: &str,
+        base_url: &str,
+        request_timeout_ms: u64,
+        invocation_id: &str,
+    ) -> (std::path::PathBuf, NativeSqliteState, EmbeddingRequest) {
+        let directory = std::env::temp_dir().join(format!(
+            "inkshadow-embedding-ledger-{label}-{}-{}",
+            std::process::id(),
+            uuid::Uuid::now_v7()
+        ));
+        std::fs::create_dir(&directory).expect("create embedding ledger test directory");
+        let database_path = directory.join("inkshadow.db");
+        let sqlite = NativeSqliteState::default();
+        sqlite
+            .test_open_migrated_database(&database_path)
+            .await
+            .expect("open migrated embedding ledger database");
+        sqlite
+            .test_execute_internal_sql(&format!(
+                "INSERT INTO model_provider_connections (
+                   id, provider_kind, display_name, protocol, base_url,
+                   authentication_mode, request_timeout_ms, retry_limit,
+                   created_at, updated_at
+                 ) VALUES (
+                   'native-embedding-ledger', 'custom_openai_compatible',
+                   'Native embedding ledger', 'openai_compatible', '{base_url}/v1',
+                   'none', {request_timeout_ms}, 0,
+                   '2026-08-29T00:00:00.000Z', '2026-08-29T00:00:00.000Z'
+                 )"
+            ))
+            .await
+            .expect("seed embedding ledger connection");
+        sqlite
+            .test_execute_internal_sql(
+                "INSERT INTO model_catalog_entries (
+                   id, connection_id, provider_model_id, display_name, catalog_source,
+                   availability, lifecycle, first_discovered_at, last_seen_at
+                 ) VALUES (
+                   'native-embedding-catalog', 'native-embedding-ledger', 'embed-1',
+                   'embed-1', 'manual', 'available', 'stable',
+                   '2026-08-29T00:00:00.000Z', '2026-08-29T00:00:00.000Z'
+                 )",
+            )
+            .await
+            .expect("seed embedding ledger catalog");
+        sqlite
+            .test_execute_internal_sql(&format!(
+                "INSERT INTO model_invocation_facts (
+                   id, task, connection_id, catalog_entry_id,
+                   provider_kind_snapshot, model_id_snapshot,
+                   route_reason, status, attempt, privacy_policy, data_destination,
+                   started_at, created_at, revision
+                 ) VALUES (
+                   '{invocation_id}', 'capability_probe', 'native-embedding-ledger',
+                   'native-embedding-catalog', 'custom_openai_compatible', 'embed-1',
+                   'user_override', 'running', 1, 'cloud_allowed', 'remote',
+                   '2026-08-29T00:00:00.000Z', '2026-08-29T00:00:00.000Z', 1
+                 )"
+            ))
+            .await
+            .expect("seed running embedding invocation");
+        let mut request = embedding_request(
+            format!("{base_url}/v1"),
+            ProviderKind::OpenAiCompatible,
+            "embed-1",
+            &["fixed private embedding probe"],
+        );
+        request.config.provider_id = "native-embedding-ledger".to_owned();
+        request.config.request_timeout_ms = Some(request_timeout_ms);
+        request.config.retry_limit = Some(0);
+        request.dispatch_scope = NativeModelDispatchScope::NonProject {
+            reason: crate::native_sqlite::NativeNonProjectDispatchReason::ConnectionProbe,
+        };
+        request.invocation_dispatch_ledger = Some(NativeModelInvocationDispatchLedger {
+            invocation_id: invocation_id.to_owned(),
+            task_snapshot: "capability_probe".to_owned(),
+            expected_revision: 1,
+            connection_id: "native-embedding-ledger".to_owned(),
+            connection_revision: 1,
+            catalog_entry_id: "native-embedding-catalog".to_owned(),
+            catalog_entry_revision: 1,
+            provider_kind_snapshot: "custom_openai_compatible".to_owned(),
+            model_id_snapshot: "embed-1".to_owned(),
+        });
+        (directory, sqlite, request)
     }
 
     fn generation_request() -> StartGenerationRequest {
@@ -2735,6 +2936,64 @@ mod tests {
             .expect("test ledger")
             .model_id_snapshot = "different-model".to_owned();
         assert!(validate_invocation_dispatch_ledger_request(&request).is_err());
+    }
+
+    #[test]
+    fn embedding_invocation_receipt_requires_exact_zero_retry_scope_and_identity() {
+        let mut request = embedding_request(
+            "http://127.0.0.1:11434/v1".to_owned(),
+            ProviderKind::OpenAiCompatible,
+            "embed-1",
+            &["fixed probe"],
+        );
+        request.dispatch_scope = NativeModelDispatchScope::ProjectContext {
+            receipt: NativeProjectContextPrivacyReceipt {
+                schema_version: 1,
+                project_id: "019f9f4a-b3c7-7350-9226-000000000607".to_owned(),
+                fingerprint: "a".repeat(64),
+                active_chapter_count: 0,
+                retained_chapter_count: 0,
+                requires_verified_local: false,
+                chapters: vec![],
+            },
+        };
+        request.invocation_dispatch_ledger = Some(NativeModelInvocationDispatchLedger {
+            invocation_id: "019f9f4a-b3c7-7350-9226-000000000604".to_owned(),
+            task_snapshot: "embedding".to_owned(),
+            expected_revision: 1,
+            connection_id: "connection-1".to_owned(),
+            connection_revision: 1,
+            catalog_entry_id: "catalog-1".to_owned(),
+            catalog_entry_revision: 1,
+            provider_kind_snapshot: "custom_openai_compatible".to_owned(),
+            model_id_snapshot: "embed-1".to_owned(),
+        });
+        assert!(validate_embedding_invocation_dispatch_ledger_request(&request).is_ok());
+
+        request.config.retry_limit = Some(1);
+        assert!(validate_embedding_invocation_dispatch_ledger_request(&request).is_err());
+        request.config.retry_limit = Some(0);
+        request
+            .invocation_dispatch_ledger
+            .as_mut()
+            .expect("embedding ledger")
+            .model_id_snapshot = "different-model".to_owned();
+        assert!(validate_embedding_invocation_dispatch_ledger_request(&request).is_err());
+        request
+            .invocation_dispatch_ledger
+            .as_mut()
+            .expect("embedding ledger")
+            .model_id_snapshot = "embed-1".to_owned();
+        request.dispatch_scope = NativeModelDispatchScope::NonProject {
+            reason: crate::native_sqlite::NativeNonProjectDispatchReason::ConnectionProbe,
+        };
+        assert!(validate_embedding_invocation_dispatch_ledger_request(&request).is_err());
+        request
+            .invocation_dispatch_ledger
+            .as_mut()
+            .expect("embedding ledger")
+            .task_snapshot = "capability_probe".to_owned();
+        assert!(validate_embedding_invocation_dispatch_ledger_request(&request).is_ok());
     }
 
     #[test]
@@ -3315,6 +3574,121 @@ mod tests {
         assert_eq!(response.dimension, 2);
         assert_eq!(response.vector_count, 2);
         assert_eq!(response.embeddings[0], vec![0.1, 0.2]);
+    }
+
+    #[tokio::test]
+    async fn native_embedding_writes_one_content_free_receipt_before_provider_io() {
+        const INVOCATION_ID: &str = "019f9f4a-b3c7-7350-9226-000000000605";
+        let server = spawn_fake_server(
+            "200 OK",
+            br#"{"data":[{"index":0,"embedding":[0.25,0.75]}],"model":"embed-1"}"#,
+            Duration::ZERO,
+            None,
+        );
+        let (directory, sqlite, request) = seeded_non_project_embedding_invocation(
+            "success",
+            &server.base_url,
+            30_000,
+            INVOCATION_ID,
+        )
+        .await;
+        let gateway = ModelGatewayState::new().expect("build embedding gateway");
+
+        let response = embed_native_model_inner(&gateway, &sqlite, request)
+            .await
+            .expect("native embedding succeeds after durable receipt");
+        let receipt = response
+            .invocation_dispatch_receipt
+            .as_ref()
+            .expect("successful native embedding returns its receipt");
+        assert_eq!(receipt.invocation_id, INVOCATION_ID);
+        assert_eq!(receipt.revision, 2);
+        assert_eq!(response.vector_count, 1);
+        assert_eq!(response.dimension, 2);
+        let wire_request = server
+            .request
+            .recv_timeout(Duration::from_secs(1))
+            .expect("provider receives the single fenced embedding request");
+        assert!(String::from_utf8(wire_request)
+            .expect("wire request is UTF-8")
+            .starts_with("POST /v1/embeddings HTTP/1.1\r\n"));
+        assert!(
+            server.request.try_recv().is_err(),
+            "automatic retry remains zero"
+        );
+        server.handle.join().expect("fake server stops");
+
+        let mut inspector = open_dispatch_inspector(&directory.join("inkshadow.db")).await;
+        let persisted: (
+            Option<String>,
+            i64,
+            Option<i64>,
+            Option<i64>,
+            Option<String>,
+        ) = sqlx::query_as(
+            "SELECT provider_dispatch_started_at, revision,
+                        input_tokens, output_tokens, error_summary
+                 FROM model_invocation_facts WHERE id = ?",
+        )
+        .bind(INVOCATION_ID)
+        .fetch_one(&mut inspector)
+        .await
+        .expect("inspect content-free embedding receipt");
+        assert_eq!(persisted.0.as_deref(), Some(receipt.dispatched_at.as_str()));
+        assert_eq!(persisted.1, 2);
+        assert_eq!((persisted.2, persisted.3, persisted.4), (None, None, None));
+        drop(inspector);
+        drop(sqlite);
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    #[tokio::test]
+    async fn native_embedding_timeout_keeps_one_receipt_and_never_resends() {
+        const INVOCATION_ID: &str = "019f9f4a-b3c7-7350-9226-000000000606";
+        let server = spawn_fake_server(
+            "200 OK",
+            br#"{"data":[{"index":0,"embedding":[0.25,0.75]}],"model":"embed-1"}"#,
+            Duration::from_millis(1_200),
+            None,
+        );
+        let (directory, sqlite, request) = seeded_non_project_embedding_invocation(
+            "timeout",
+            &server.base_url,
+            1_000,
+            INVOCATION_ID,
+        )
+        .await;
+        let gateway = ModelGatewayState::new().expect("build embedding gateway");
+
+        let error = embed_native_model_inner(&gateway, &sqlite, request)
+            .await
+            .expect_err("provider response after the deadline stays unresolved");
+        assert_eq!(error.code(), "MODEL_TIMEOUT");
+        server
+            .request
+            .recv_timeout(Duration::from_secs(1))
+            .expect("provider receives exactly one request before timeout");
+        assert!(
+            server.request.try_recv().is_err(),
+            "automatic retry remains zero"
+        );
+        server.handle.join().expect("slow fake server stops");
+
+        let mut inspector = open_dispatch_inspector(&directory.join("inkshadow.db")).await;
+        let persisted: (Option<String>, i64, String) = sqlx::query_as(
+            "SELECT provider_dispatch_started_at, revision, status
+             FROM model_invocation_facts WHERE id = ?",
+        )
+        .bind(INVOCATION_ID)
+        .fetch_one(&mut inspector)
+        .await
+        .expect("inspect receipt after provider timeout");
+        assert!(persisted.0.is_some(), "dispatch receipt remains durable");
+        assert_eq!(persisted.1, 2);
+        assert_eq!(persisted.2, "running");
+        drop(inspector);
+        drop(sqlite);
+        let _ = std::fs::remove_dir_all(directory);
     }
 
     #[tokio::test]
@@ -5523,6 +5897,7 @@ mod tests {
                     "雾港的钟声在午夜响起。".to_owned(),
                     "The lighthouse keeper found a sealed letter.".to_owned(),
                 ],
+                invocation_dispatch_ledger: None,
             },
             REQUEST_TIMEOUT,
         )

@@ -1,6 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ProjectDisplayIdentity } from "@inkshadow/application";
-import { parseUuidV7, type Project, type ProjectStatus } from "@inkshadow/domain";
+import {
+  MAX_PROJECT_NAME_LENGTH,
+  parseUuidV7,
+  type Project,
+  type ProjectStatus,
+} from "@inkshadow/domain";
 import {
   Badge,
   Button,
@@ -69,6 +74,8 @@ export function ProjectsPage() {
   const { toast } = useToast();
   const loadRequestRef = useRef(0);
   const journeyLoadRequestRef = useRef(0);
+  const projectNameInputRef = useRef<HTMLInputElement>(null);
+  const renameNameInputRef = useRef<HTMLInputElement>(null);
   const [status, setStatus] = useState<ProjectStatus>("active");
   const [search, setSearch] = useState("");
   const [projects, setProjects] = useState<readonly Project[]>([]);
@@ -205,12 +212,18 @@ export function ProjectsPage() {
   }, [loadActiveIdeaJourneys]);
 
   async function createProject(): Promise<void> {
+    if (projectName.trim().length === 0) {
+      setFormError(`项目名称不能为空，请输入 1 至 ${String(MAX_PROJECT_NAME_LENGTH)} 个字符。`);
+      window.requestAnimationFrame(() => projectNameInputRef.current?.focus());
+      return;
+    }
     setSubmitting(true);
     setFormError(null);
     const result = await runtime.useCases.createProject.execute({ name: projectName });
     setSubmitting(false);
     if (!result.ok) {
       setFormError(normalizeUiError(result.error).description);
+      window.requestAnimationFrame(() => projectNameInputRef.current?.focus());
       return;
     }
     setProjectName("");
@@ -295,6 +308,11 @@ export function ProjectsPage() {
     if (renameTarget === null) {
       return;
     }
+    if (renameName.trim().length === 0) {
+      setRenameError(`项目名称不能为空，请输入 1 至 ${String(MAX_PROJECT_NAME_LENGTH)} 个字符。`);
+      window.requestAnimationFrame(() => renameNameInputRef.current?.focus());
+      return;
+    }
     setRenameSubmitting(true);
     setRenameError(null);
     const result = await runtime.useCases.renameProject.execute({
@@ -304,6 +322,7 @@ export function ProjectsPage() {
     setRenameSubmitting(false);
     if (!result.ok) {
       setRenameError(normalizeUiError(result.error).description);
+      window.requestAnimationFrame(() => renameNameInputRef.current?.focus());
       return;
     }
     setRenameTarget(null);
@@ -693,11 +712,7 @@ export function ProjectsPage() {
             <Button variant="secondary" onClick={() => setCreateOpen(false)}>
               取消
             </Button>
-            <Button
-              loading={submitting}
-              disabled={projectName.trim().length === 0}
-              onClick={() => void createProject()}
-            >
+            <Button loading={submitting} disabled={submitting} onClick={() => void createProject()}>
               创建项目
             </Button>
           </>
@@ -707,16 +722,15 @@ export function ProjectsPage() {
           {(fieldProps) => (
             <Input
               {...fieldProps}
+              ref={projectNameInputRef}
               value={projectName}
-              maxLength={120}
-              onChange={(event) => setProjectName(event.currentTarget.value)}
+              maxLength={MAX_PROJECT_NAME_LENGTH}
+              onChange={(event) => {
+                setProjectName(event.currentTarget.value);
+                setFormError(null);
+              }}
               onKeyDown={(event) => {
-                if (
-                  event.key === "Enter" &&
-                  !event.nativeEvent.isComposing &&
-                  !submitting &&
-                  projectName.trim().length > 0
-                ) {
+                if (event.key === "Enter" && !event.nativeEvent.isComposing && !submitting) {
                   event.preventDefault();
                   void createProject();
                 }
@@ -788,7 +802,7 @@ export function ProjectsPage() {
             </Button>
             <Button
               loading={renameSubmitting}
-              disabled={renameName.trim().length === 0}
+              disabled={renameSubmitting}
               onClick={() => void renameProject()}
             >
               保存名称
@@ -800,9 +814,13 @@ export function ProjectsPage() {
           {(fieldProps) => (
             <Input
               {...fieldProps}
+              ref={renameNameInputRef}
               value={renameName}
-              maxLength={120}
-              onChange={(event) => setRenameName(event.currentTarget.value)}
+              maxLength={MAX_PROJECT_NAME_LENGTH}
+              onChange={(event) => {
+                setRenameName(event.currentTarget.value);
+                setRenameError(null);
+              }}
               onKeyDown={(event) => {
                 if (event.key === "Enter" && !event.nativeEvent.isComposing && !renameSubmitting) {
                   event.preventDefault();
@@ -853,7 +871,13 @@ function ProjectLibraryCard({
     <Card>
       <CardHeader>
         <div className="card-heading-row">
-          <CardTitle headingLevel={2}>{project.name}</CardTitle>
+          <CardTitle
+            className="project-library-page__project-title"
+            headingLevel={2}
+            title={project.name}
+          >
+            {project.name}
+          </CardTitle>
           <div className="project-library-page__card-badges">
             {classificationLabel !== null && (
               <Badge
@@ -897,9 +921,6 @@ function ProjectLibraryCard({
             <Badge tone="warning">未完成创作</Badge>
             <p>已创建空白作品并保留原始创作过程；继续后仍由你决定使用或放弃结果。</p>
             <p>完成或结束这次创作后即可重命名作品。</p>
-            <Link className="button-link" to={`/create/idea?journey=${activeIdeaJourney.id}`}>
-              继续未完成创作
-            </Link>
           </div>
         )}
       </CardContent>
@@ -968,6 +989,10 @@ function ProjectLibraryCard({
           <Button size="sm" loading={pending} onClick={() => onLifecycle(project, "restore")}>
             恢复
           </Button>
+        ) : activeIdeaJourney !== null ? (
+          <Link className="button-link" to={`/create/idea?journey=${activeIdeaJourney.id}`}>
+            继续未完成创作
+          </Link>
         ) : (
           <Link className="button-link" to={`/projects/${project.id}`}>
             打开

@@ -347,6 +347,39 @@ export const recoveryDrafts = sqliteTable(
   ],
 );
 
+export const authorRecoveryRecords = sqliteTable(
+  "author_recovery_records",
+  {
+    projectId: text("project_id")
+      .notNull()
+      .references(() => projects.id, { onDelete: "cascade" }),
+    kind: text("kind").notNull(),
+    schemaVersion: text("schema_version").notNull(),
+    payloadJson: text("payload_json").notNull(),
+    revision: integer("revision").notNull(),
+    createdAt: text("created_at").notNull(),
+    updatedAt: text("updated_at").notNull(),
+  },
+  (table) => [
+    primaryKey({ columns: [table.projectId, table.kind] }),
+    check("author_recovery_records_kind_length", sql`length(${table.kind}) BETWEEN 1 AND 64`),
+    check("author_recovery_records_kind_chars", sql`${table.kind} NOT GLOB '*[^a-z0-9_]*'`),
+    check(
+      "author_recovery_records_schema_length",
+      sql`length(${table.schemaVersion}) BETWEEN 1 AND 128`,
+    ),
+    check(
+      "author_recovery_records_payload_object",
+      sql`json_valid(${table.payloadJson}) AND json_type(${table.payloadJson}) = 'object'`,
+    ),
+    check(
+      "author_recovery_records_revision",
+      sql`${table.revision} BETWEEN 1 AND 9007199254740991`,
+    ),
+    index("author_recovery_records_updated_idx").on(table.updatedAt, table.projectId, table.kind),
+  ],
+);
+
 export const aiCandidates = sqliteTable(
   "ai_candidates",
   {
@@ -1784,6 +1817,7 @@ export type NewChapterVersionRow = typeof chapterVersions.$inferInsert;
 export type ChapterValidationSnapshotRow = typeof chapterValidationSnapshots.$inferSelect;
 export type NewChapterValidationSnapshotRow = typeof chapterValidationSnapshots.$inferInsert;
 export type RecoveryDraftRow = typeof recoveryDrafts.$inferSelect;
+export type AuthorRecoveryRecordRow = typeof authorRecoveryRecords.$inferSelect;
 export type AiCandidateRow = typeof aiCandidates.$inferSelect;
 export type ModelProfileRow = typeof modelProfiles.$inferSelect;
 export type ModelPricingProfileRow = typeof modelPricingProfiles.$inferSelect;

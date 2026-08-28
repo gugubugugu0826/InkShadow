@@ -20,6 +20,13 @@ import { useModelHubReadiness } from "../hooks/use-model-hub-readiness";
 import { useRuntime } from "../runtime-context";
 import { CommandPalette } from "./command-palette";
 
+const MODEL_HUB_ROUTE_HASHES = Object.freeze([
+  "#model-center",
+  "#model-routing",
+  "#model-evaluation",
+  "#image-generation",
+]);
+
 export interface DesktopShellProps {
   readonly children: ReactNode;
 }
@@ -159,7 +166,8 @@ export function DesktopShell({ children }: DesktopShellProps) {
     useState<SafeGenerationPreflightDiagnostic | null>(null);
   const mainRef = useRef<HTMLElement>(null);
   const previousRouteRef = useRef<string | null>(null);
-  const modelHubActive = location.pathname === "/settings" && location.hash === "#model-center";
+  const modelHubActive =
+    location.pathname === "/settings" && MODEL_HUB_ROUTE_HASHES.includes(location.hash);
   const settingsActive = location.pathname === "/settings" && !modelHubActive;
   const currentPageTitle = modelHubActive ? "模型中心" : pageTitle(location.pathname);
   // Hash navigation is owned by the destination page so that an in-page

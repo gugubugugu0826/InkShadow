@@ -192,6 +192,22 @@ describe("desktop vertical slice", () => {
     expect(projects.ok && projects.value).toHaveLength(0);
   });
 
+  it("shows an inline limit error and returns focus for a blank project name", async () => {
+    const runtime = createDevelopmentRuntime(window.localStorage);
+    const user = userEvent.setup();
+    renderRoute(runtime, "/projects");
+
+    await user.click(await screen.findByRole("button", { name: "新建项目" }));
+    const input = screen.getByRole("textbox", { name: "项目名称" });
+    await user.type(input, "   ");
+    await user.click(screen.getByRole("button", { name: "创建项目" }));
+
+    expect(await screen.findByText("项目名称不能为空，请输入 1 至 120 个字符。")).toBeVisible();
+    expect(input).toHaveFocus();
+    const projects = await runtime.useCases.listProjects.execute({ statuses: ["active"] });
+    expect(projects.ok && projects.value).toHaveLength(0);
+  });
+
   it("does not create a chapter while Enter is confirming an IME candidate", async () => {
     const runtime = createDevelopmentRuntime(window.localStorage);
     await ensureWritingMode(runtime, "direct");
@@ -212,6 +228,31 @@ describe("desktop vertical slice", () => {
     fireEvent.keyDown(input, { key: "Enter", code: "Enter", isComposing: true });
 
     expect(dialog).toBeInTheDocument();
+    const chapters = await runtime.repositories.chapters.listByProjectId(project.value.id);
+    expect(chapters.ok && chapters.value).toHaveLength(0);
+  });
+
+  it("shows an inline limit error and returns focus for a blank chapter title", async () => {
+    const runtime = createDevelopmentRuntime(window.localStorage);
+    await ensureWritingMode(runtime, "direct");
+    const project = await runtime.useCases.createProject.execute({ name: "章节名称检查" });
+    if (!project.ok) throw project.error;
+    const user = userEvent.setup();
+    renderRoute(runtime, `/projects/${project.value.id}`);
+
+    const emptyStateHeading = await screen.findByRole("heading", { name: "还没有章节" });
+    const emptyState = emptyStateHeading.closest(".ink-empty-state");
+    if (!(emptyState instanceof HTMLElement)) throw new Error("找不到章节空状态区域。");
+    await user.click(within(emptyState).getByRole("button", { name: "新建章节" }));
+    const dialog = await screen.findByRole("dialog", { name: "新建章节" });
+    const input = within(dialog).getByRole("textbox", { name: "章节标题" });
+    await user.type(input, "   ");
+    await user.click(within(dialog).getByRole("button", { name: "创建章节" }));
+
+    expect(
+      await within(dialog).findByText("章节标题不能为空，请输入 1 至 200 个字符。"),
+    ).toBeVisible();
+    expect(input).toHaveFocus();
     const chapters = await runtime.repositories.chapters.listByProjectId(project.value.id);
     expect(chapters.ok && chapters.value).toHaveLength(0);
   });

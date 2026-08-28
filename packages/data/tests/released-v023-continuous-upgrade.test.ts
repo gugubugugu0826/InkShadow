@@ -23,7 +23,7 @@ type ProtectedTable = (typeof PROTECTED_TABLES)[number];
 type ProtectedColumns = Readonly<Record<ProtectedTable, readonly string[]>>;
 
 describe("released v0.2.3 continuous database upgrade", () => {
-  it("applies every forward migration through 0080 without changing authoritative content", () => {
+  it("applies every forward migration through 0082 without changing authoritative content", () => {
     const dataMigrationNames = readdirSync(MIGRATION_DIRECTORY)
       .filter((name) => /^\d{4}_.+\.sql$/u.test(name))
       .sort();
@@ -38,7 +38,7 @@ describe("released v0.2.3 continuous database upgrade", () => {
     ];
     const v023HeadIndex = migrations.findIndex(({ name }) => name === V023_SCHEMA_HEAD);
     expect(v023HeadIndex).toBeGreaterThanOrEqual(0);
-    expect(migrations.at(-1)?.name).toBe("0081_story_fact_evidence_guard_performance.sql");
+    expect(migrations.at(-1)?.name).toBe("0082_author_recovery_records.sql");
 
     const database = new DatabaseSync(":memory:");
     for (const migration of migrations.slice(0, v023HeadIndex + 1)) {
@@ -247,9 +247,26 @@ describe("released v0.2.3 continuous database upgrade", () => {
       background_tasks: { rowCount: 1 },
       ai_generation_runs: { rowCount: 1 },
     });
-    for (const migration of migrations.slice(v023HeadIndex + 1)) {
+    for (const migration of migrations.slice(v023HeadIndex + 1, -1)) {
       database.exec(readFileSync(migration.url, "utf8"));
     }
+    expect(
+      database
+        .prepare(
+          "SELECT COUNT(*) AS count FROM sqlite_schema WHERE type = 'table' AND name = 'author_recovery_records'",
+        )
+        .get(),
+    ).toEqual({ count: 0 });
+    const recoveryMigration = migrations.at(-1);
+    if (recoveryMigration === undefined) throw new Error("缺少 0082 恢复记录迁移。");
+    database.exec(readFileSync(recoveryMigration.url, "utf8"));
+    expect(
+      database
+        .prepare(
+          "SELECT COUNT(*) AS count FROM sqlite_schema WHERE type = 'table' AND name = 'author_recovery_records'",
+        )
+        .get(),
+    ).toEqual({ count: 1 });
 
     expect(database.prepare("PRAGMA integrity_check").all()).toEqual([{ integrity_check: "ok" }]);
     expect(database.prepare("PRAGMA foreign_key_check").all()).toEqual([]);

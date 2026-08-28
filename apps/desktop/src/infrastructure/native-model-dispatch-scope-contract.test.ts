@@ -41,6 +41,12 @@ const NON_PROJECT_ALLOWLIST = new Map<
     { reason: "connection_probe", occurrences: 1 },
   ],
   [
+    "infrastructure/model-hub-embedding-capability-probe.ts",
+    // The request contains only the module-owned fixed embedding probe text;
+    // vectors and probe input never enter the invocation ledger.
+    { reason: "connection_probe", occurrences: 1 },
+  ],
+  [
     "infrastructure/model-hub-structured-capability-probe.ts",
     // Both attempts use only the module-owned frozen JSON probe messages.
     { reason: "connection_probe", occurrences: 1 },

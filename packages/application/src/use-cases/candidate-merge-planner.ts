@@ -115,6 +115,11 @@ export type CandidateApplicationStrategy =
       readonly cursorUtf16: number;
     }
   | {
+      readonly kind: "insert_at_cursor_omitting_exact_prefix";
+      readonly cursorUtf16: number;
+      readonly omittedCandidateRange: CandidateUtf16Range;
+    }
+  | {
       readonly kind: "replace_selection";
       readonly selection: CandidateUtf16Range;
     }
@@ -346,6 +351,8 @@ export function planCandidateApplication(
       return planSelectedChanges(input, input.strategy, resolved.limits);
     case "insert_at_cursor":
       return planCursorInsertion(input, input.strategy, resolved.limits);
+    case "insert_at_cursor_omitting_exact_prefix":
+      return planCursorInsertionOmittingExactPrefix(input, input.strategy, resolved.limits);
     case "replace_selection":
       return planSelectionReplacement(input, input.strategy, resolved.limits);
   }
@@ -467,6 +474,67 @@ function planCursorInsertion(
       freezeTextEdit({
         range: { start: cursor, end: cursor },
         replacement: input.candidateContent,
+        sourceChangeId: null,
+      }),
+    ],
+    [],
+    [],
+    null,
+  );
+}
+
+function planCursorInsertionOmittingExactPrefix(
+  input: PlanCandidateApplicationInput,
+  strategy: Extract<
+    CandidateApplicationStrategy,
+    { readonly kind: "insert_at_cursor_omitting_exact_prefix" }
+  >,
+  limits: CandidateDiffLimits,
+): CandidateApplicationPlanOutcome {
+  const { cursorUtf16, omittedCandidateRange } = strategy;
+  const { start, end } = omittedCandidateRange;
+  const cursorValid =
+    isValidUtf16Offset(input.current.content, cursorUtf16) &&
+    isUnicodeScalarBoundary(input.current.content, cursorUtf16);
+  const omittedRangeValid =
+    isValidUtf16Offset(input.candidateContent, start) &&
+    isValidUtf16Offset(input.candidateContent, end) &&
+    start < end &&
+    isUnicodeScalarBoundary(input.candidateContent, start) &&
+    isUnicodeScalarBoundary(input.candidateContent, end);
+  const leadingText = omittedRangeValid ? input.candidateContent.slice(0, start) : "";
+  const omittedText = omittedRangeValid ? input.candidateContent.slice(start, end) : "";
+  if (
+    !cursorValid ||
+    cursorUtf16 !== input.current.content.length ||
+    !omittedRangeValid ||
+    leadingText.trim().length > 0 ||
+    omittedText !== input.current.content
+  ) {
+    return planningError(
+      "INVALID_SELECTION",
+      "Only a verified full stable-content prefix may be omitted from a cursor insertion.",
+      {
+        cursorUtf16,
+        omittedEndUtf16: end,
+        omittedStartUtf16: start,
+      },
+    );
+  }
+  const replacement = `${leadingText}${input.candidateContent.slice(end)}`;
+  const outputLength = input.current.content.length + replacement.length;
+  const outputError = ensureOutputLength(outputLength, limits);
+  if (outputError !== null) return outputError;
+  if (replacement.length === 0) {
+    return readyPlan(input, input.current.content, [], [], [], null);
+  }
+  return readyPlan(
+    input,
+    `${input.current.content}${replacement}`,
+    [
+      freezeTextEdit({
+        range: { start: cursorUtf16, end: cursorUtf16 },
+        replacement,
         sourceChangeId: null,
       }),
     ],

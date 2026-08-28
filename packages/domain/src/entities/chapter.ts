@@ -54,7 +54,8 @@ type RehydrateChapterSnapshot = Omit<ChapterSnapshot, "privacyMode" | "privacyRe
     privacyRevision?: number;
   }>;
 
-const MAX_CHAPTER_TITLE_LENGTH = 200;
+export const MAX_CHAPTER_TITLE_LENGTH = 200;
+const MAX_LEGACY_CHAPTER_TITLE_LENGTH = 10_000;
 export const MAX_CHAPTER_CONTENT_LENGTH = 5_000_000;
 const CONTROL_CHARACTER_PATTERN = /[\u0000-\u001f\u007f]/u;
 
@@ -94,7 +95,7 @@ export function validateChapterContent(content: string): Result<string, AppError
 }
 
 function validateSnapshot(snapshot: RehydrateChapterSnapshot): Result<ChapterSnapshot, AppError> {
-  const title = normalizeChapterTitle(snapshot.title);
+  const title = preserveLegacyChapterTitle(snapshot.title);
   if (!title.ok) {
     return title;
   }
@@ -148,6 +149,19 @@ function validateSnapshot(snapshot: RehydrateChapterSnapshot): Result<ChapterSna
     privacyMode,
     privacyRevision,
   });
+}
+
+function preserveLegacyChapterTitle(value: string): Result<string, AppError> {
+  if (value.length > MAX_LEGACY_CHAPTER_TITLE_LENGTH || CONTROL_CHARACTER_PATTERN.test(value)) {
+    return err(
+      new AppError({
+        code: "VALIDATION_FAILED",
+        message: "Persisted chapter title exceeds the safe read boundary.",
+        details: { field: "title" },
+      }),
+    );
+  }
+  return ok(value);
 }
 
 export class Chapter {

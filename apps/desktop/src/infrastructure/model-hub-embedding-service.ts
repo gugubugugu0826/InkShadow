@@ -77,7 +77,10 @@ export interface ModelHubEmbeddingInspectionDependencies {
 }
 
 export interface ModelHubEmbeddingExecutionDependencies extends ModelHubEmbeddingInspectionDependencies {
-  readonly modelGateway: Pick<NativeEmbeddingGatewayClient, "available" | "embed">;
+  readonly modelGateway: Pick<
+    NativeEmbeddingGatewayClient,
+    "available" | "embed" | "supportsNativeInvocationDispatchLedger"
+  >;
   readonly ids: Pick<UuidV7Generator, "next">;
 }
 
@@ -251,6 +254,9 @@ export async function executeModelHubEmbeddingTask(
   });
 
   let dispatched = false;
+  let recoveredNativeDispatchReceipt = false;
+  const nativeInvocationDispatchLedger =
+    dependencies.modelGateway.supportsNativeInvocationDispatchLedger === true;
   let embedded: NativeEmbeddingResult;
   try {
     await input.onBeforeDispatch?.({
@@ -277,25 +283,72 @@ export async function executeModelHubEmbeddingTask(
         costPrivacy: current.target.costPrivacy,
       }),
     );
-    invocation = await dependencies.modelHub.markInvocationDispatched({
-      id: invocation.id,
-      dispatchedAt: dependencies.clock.now(),
-      expectedRevision: invocation.revision,
-    });
-    // Persist the dispatch receipt immediately before crossing the synchronous
-    // native boundary. A restarted process can now see that redispatch is unsafe.
-    dispatched = true;
+    if (!nativeInvocationDispatchLedger) {
+      invocation = await dependencies.modelHub.markInvocationDispatched({
+        id: invocation.id,
+        dispatchedAt: dependencies.clock.now(),
+        expectedRevision: invocation.revision,
+      });
+      // Legacy and test gateways without a native SQLite fence retain the
+      // renderer boundary. Production embedding calls use the receipt below.
+      dispatched = true;
+    }
     embedded = await dependencies.modelGateway.embed({
       config: modelHubNativeEndpointConfig(current.target.connection),
       model: current.target.catalogEntry.providerModelId,
       inputs: input.inputs,
       dispatchScope: input.dispatchScope,
+      ...(nativeInvocationDispatchLedger
+        ? {
+            invocationDispatchLedger: {
+              invocationId: invocation.id,
+              taskSnapshot: invocation.task,
+              expectedRevision: invocation.revision,
+              connectionId: current.target.connection.id,
+              connectionRevision: current.target.connection.revision,
+              catalogEntryId: current.target.catalogEntry.id,
+              catalogEntryRevision: current.target.catalogEntry.revision,
+              providerKindSnapshot: current.target.connection.providerKind,
+              modelIdSnapshot: current.target.catalogEntry.providerModelId,
+            },
+            onInvocationDispatchAccepted: (receipt) => {
+              invocation = Object.freeze({
+                ...invocation,
+                providerDispatchStartedAt: receipt.dispatchedAt,
+                revision: receipt.revision,
+              });
+              dispatched = true;
+            },
+          }
+        : {}),
     });
   } catch (cause: unknown) {
+    if (nativeInvocationDispatchLedger && !dispatched) {
+      // The invoke response may be lost after the native atomic write. Recover
+      // the durable receipt before deciding whether a retry could duplicate a
+      // paid request; unreadable state is left for startup reconciliation.
+      try {
+        const persisted = await dependencies.modelHub.findInvocation(invocation.id);
+        if (
+          persisted?.status === "running" &&
+          persisted.providerDispatchStartedAt !== null &&
+          persisted.revision === invocation.revision + 1
+        ) {
+          invocation = persisted;
+          dispatched = true;
+          recoveredNativeDispatchReceipt = true;
+        }
+      } catch {
+        // Startup reconciliation owns an unreadable durable receipt.
+      }
+    }
     const normalized = dispatched
       ? normalizeDispatchedError(cause)
       : normalizePreDispatchError(cause);
-    const ambiguous = dispatched && isAmbiguousTransportFailure(cause, normalized);
+    const ambiguous =
+      dispatched &&
+      ((recoveredNativeDispatchReceipt && !hasExplicitHttpStatus(cause)) ||
+        isAmbiguousTransportFailure(cause, normalized));
     const projected = ambiguous ? ambiguousEmbeddingResult() : normalized;
     await dependencies.modelHub
       .finishInvocation({
@@ -793,6 +846,15 @@ function isAmbiguousTransportFailure(cause: unknown, normalized: ModelHubExecuti
       : null;
   return (
     httpStatus === null && /(?:NETWORK|TIMEOUT|DNS|TLS|TRANSPORT|DISCONNECT)/u.test(normalized.code)
+  );
+}
+
+function hasExplicitHttpStatus(cause: unknown): boolean {
+  const diagnostics = isRecord(cause) && isRecord(cause.diagnostics) ? cause.diagnostics : null;
+  return (
+    diagnostics !== null &&
+    typeof diagnostics.httpStatus === "number" &&
+    Number.isSafeInteger(diagnostics.httpStatus)
   );
 }
 

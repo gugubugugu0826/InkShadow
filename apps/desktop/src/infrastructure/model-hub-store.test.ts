@@ -9,6 +9,7 @@ import { NodeSqliteExecutor } from "../../../../packages/data/tests/node-sqlite-
 import {
   BrowserDevelopmentModelHubStore,
   DEVELOPMENT_MODEL_HUB_KEY,
+  isRetirementCleanupPendingModelProviderConnection,
   isRetiredModelProviderConnection,
   TauriModelHubStore,
   type ModelHubStore,
@@ -32,6 +33,193 @@ const migration = [
 ].join("\n");
 
 describe("TauriModelHubStore", () => {
+  it("atomically persists the pending retirement-cleanup marker in SQLite and browser storage", async () => {
+    const assertPendingRetirement = async (
+      store: ModelHubStore,
+      reopen: () => ModelHubStore,
+      id: string,
+    ) => {
+      const active = await store.saveConnection({
+        id,
+        providerKind: "custom_openai_compatible",
+        displayName: "Pending retirement",
+        baseUrlOverride: "https://retirement.example/v1",
+        credentialRef: null,
+        credentialState: "missing",
+        authenticationMode: "none",
+        enabled: true,
+        expectedRevision: null,
+      });
+      const pending = await store.saveConnection({
+        id: active.id,
+        providerKind: active.providerKind,
+        displayName: active.displayName,
+        baseUrlOverride: active.baseUrl,
+        credentialRef: active.credentialRef,
+        credentialState: active.credentialState,
+        authenticationMode: active.authenticationMode,
+        enabled: false,
+        retirementCleanupPending: true,
+        expectedRevision: active.revision,
+      });
+      expect(isRetirementCleanupPendingModelProviderConnection(pending)).toBe(true);
+      const reopened = reopen();
+      const restored = await reopened.findConnection(active.id);
+      expect(restored).toMatchObject({
+        enabled: false,
+        connectionStatus: "disabled",
+        lastErrorCode: "MODEL_HUB_CONNECTION_RETIREMENT_INCOMPLETE",
+      });
+      if (restored === null) throw new Error("待完成退役连接没有在重开后恢复。");
+      await expect(
+        reopened.recordConnectionTest({
+          connectionId: restored.id,
+          status: "ready",
+          expectedRevision: restored.revision,
+        }),
+      ).rejects.toMatchObject({ code: "MODEL_HUB_CONNECTION_RETIREMENT_INCOMPLETE" });
+      await expect(
+        reopened.syncCatalog({
+          syncId: `${id}-late-sync`,
+          connectionId: restored.id,
+          source: "provider_api",
+          status: "succeeded",
+          models: [{ id: `${id}-late-model`, providerModelId: "late-model" }],
+        }),
+      ).rejects.toMatchObject({ code: "MODEL_HUB_CONNECTION_RETIREMENT_INCOMPLETE" });
+      await expect(
+        reopened.saveConnection({
+          id: restored.id,
+          providerKind: restored.providerKind,
+          displayName: "Unsafe ordinary edit",
+          baseUrlOverride: restored.baseUrl,
+          credentialRef: restored.credentialRef,
+          credentialState: restored.credentialState,
+          authenticationMode: restored.authenticationMode,
+          enabled: false,
+          expectedRevision: restored.revision,
+        }),
+      ).rejects.toMatchObject({ code: "MODEL_HUB_CONNECTION_RETIREMENT_INCOMPLETE" });
+      await expect(
+        reopened.saveConnection({
+          id: restored.id,
+          providerKind: restored.providerKind,
+          displayName: restored.displayName,
+          baseUrlOverride: restored.baseUrl,
+          credentialRef: restored.credentialRef,
+          credentialState: restored.credentialState,
+          authenticationMode: restored.authenticationMode,
+          enabled: true,
+          expectedRevision: restored.revision,
+        }),
+      ).rejects.toMatchObject({ code: "MODEL_HUB_CONNECTION_RETIREMENT_INCOMPLETE" });
+      await expect(reopened.findConnection(active.id)).resolves.toEqual(restored);
+      await expect(reopened.listCatalogSyncs(active.id)).resolves.toEqual([]);
+      await expect(reopened.listCatalog(active.id)).resolves.toEqual([]);
+      const retired = await reopened.retireConnection({
+        connectionId: restored.id,
+        expectedRevision: restored.revision,
+      });
+      expect(isRetiredModelProviderConnection(retired)).toBe(true);
+    };
+
+    const executor = new NodeSqliteExecutor(migration);
+    const sqlite = new TauriModelHubStore(executor, clock);
+    await assertPendingRetirement(
+      sqlite,
+      () => new TauriModelHubStore(executor, clock),
+      "sqlite-pending-retirement",
+    );
+    await executor.close();
+
+    window.localStorage.clear();
+    const browser = new BrowserDevelopmentModelHubStore(window.localStorage, clock);
+    await assertPendingRetirement(
+      browser,
+      () => new BrowserDevelopmentModelHubStore(window.localStorage, clock),
+      "browser-pending-retirement",
+    );
+  });
+
+  it("rejects stale catalog routes from pending and retired connections in SQLite and browser storage", async () => {
+    const assertFrozenConnectionCannotBeRouted = async (store: ModelHubStore, id: string) => {
+      const active = await store.saveConnection({
+        id,
+        providerKind: "custom_openai_compatible",
+        displayName: "Route freeze target",
+        baseUrlOverride: `https://${id}.example.test/v1`,
+        credentialState: "missing",
+        authenticationMode: "none",
+        enabled: true,
+        expectedRevision: null,
+      });
+      const catalogId = `${id}-stale-model`;
+      await store.syncCatalog({
+        syncId: `${id}-sync`,
+        connectionId: active.id,
+        source: "manual",
+        status: "succeeded",
+        models: [{ id: catalogId, providerModelId: "stale-model" }],
+      });
+      const current = await store.findConnection(active.id);
+      if (current === null) throw new Error("没有取得待退役连接。");
+      const pending = await store.saveConnection({
+        id: current.id,
+        providerKind: current.providerKind,
+        displayName: current.displayName,
+        baseUrlOverride: current.baseUrl,
+        credentialRef: current.credentialRef,
+        credentialState: current.credentialState,
+        authenticationMode: current.authenticationMode,
+        enabled: false,
+        retirementCleanupPending: true,
+        expectedRevision: current.revision,
+      });
+
+      const expectRoutesRejected = async (state: "pending" | "retired") => {
+        await expect(
+          store.saveTaskRoute({
+            task: "idea_discussion",
+            primaryCatalogEntryId: catalogId,
+            privacyPolicy: "cloud_allowed",
+            failurePolicy: "stop",
+            routeOrigin: "user",
+            expectedRevision: null,
+          }),
+        ).rejects.toMatchObject({ code: "MODEL_HUB_MODEL_NOT_AVAILABLE" });
+        await expect(
+          store.applyAutomaticRoutingPlan({
+            preset: automaticPreset(state === "pending" ? "smart" : "quality"),
+            routes: [automaticRoute("book_start_guidance", catalogId)],
+          }),
+        ).rejects.toMatchObject({ code: "MODEL_HUB_MODEL_NOT_AVAILABLE" });
+        await expect(store.findTaskRoute("idea_discussion")).resolves.toBeNull();
+        await expect(store.findTaskRoute("book_start_guidance")).resolves.toBeNull();
+      };
+
+      await expectRoutesRejected("pending");
+      const retired = await store.retireConnection({
+        connectionId: pending.id,
+        expectedRevision: pending.revision,
+      });
+      expect(isRetiredModelProviderConnection(retired)).toBe(true);
+      await expectRoutesRejected("retired");
+    };
+
+    const executor = new NodeSqliteExecutor(migration);
+    await assertFrozenConnectionCannotBeRouted(
+      new TauriModelHubStore(executor, clock),
+      "sqlite-route-freeze",
+    );
+    await executor.close();
+
+    window.localStorage.clear();
+    await assertFrozenConnectionCannotBeRouted(
+      new BrowserDevelopmentModelHubStore(window.localStorage, clock),
+      "browser-route-freeze",
+    );
+  });
+
   it("atomically applies idempotent automatic plans while preserving manual routes in SQLite and browser storage", async () => {
     const executor = new NodeSqliteExecutor(migration);
     const sqlite = new TauriModelHubStore(executor, clock);

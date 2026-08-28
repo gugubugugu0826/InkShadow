@@ -1,4 +1,5 @@
 export * from "./executor.js";
+export * from "./author-recovery-sqlite-store.js";
 export * from "./cloud-deletion-journal-sqlite-store.js";
 export * from "./fine-tuning-governance-sqlite-store.js";
 export * from "./graph-rag-sqlite-store.js";

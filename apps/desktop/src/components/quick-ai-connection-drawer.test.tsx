@@ -284,6 +284,53 @@ describe("quick AI connection drawer", () => {
     expect(screen.getByRole("button", { name: "测试连接并查找模型" })).toBeEnabled();
   });
 
+  it("does not reuse an inactive retirement record for credential discovery, hints, or its model catalog", async () => {
+    const harness = createTauriHarness({ deepseek: "retired-key-4321" });
+    let inactive = await harness.runtime.modelHub.saveConnection({
+      id: "deepseek",
+      providerKind: "deepseek",
+      displayName: "已退役 DeepSeek",
+      credentialRef: "keyring:model-hub:deepseek",
+      credentialState: "present",
+      authenticationMode: "bearer_keyring",
+      enabled: true,
+      expectedRevision: null,
+    });
+    await harness.runtime.modelHub.syncCatalog({
+      syncId: "retired-deepseek-sync",
+      connectionId: inactive.id,
+      source: "manual",
+      status: "succeeded",
+      models: [
+        {
+          id: "retired-deepseek-catalog",
+          providerModelId: "retired-text-model",
+          displayName: "Retired text model",
+        },
+      ],
+    });
+    inactive = await harness.runtime.modelHub.saveConnection({
+      id: inactive.id,
+      providerKind: inactive.providerKind,
+      displayName: inactive.displayName,
+      credentialRef: inactive.credentialRef,
+      credentialState: inactive.credentialState,
+      authenticationMode: inactive.authenticationMode,
+      enabled: false,
+      expectedRevision: inactive.revision + 1,
+    });
+
+    renderDrawer(harness.runtime);
+
+    await waitFor(() => expect(harness.discoverModelCredentials).toHaveBeenCalled());
+    expect(harness.discoverModelCredentials).toHaveBeenCalledWith([]);
+    expect(screen.queryByText(/已保存接口密钥（末四位 4321）/u)).not.toBeInTheDocument();
+    expect(screen.getByLabelText(/^接口密钥/u)).toHaveAttribute("placeholder", "粘贴接口密钥");
+    expect(harness.getCredentialSummary).not.toHaveBeenCalledWith("deepseek");
+    expect(document.body).not.toHaveTextContent("retired-text-model");
+    expect(inactive.enabled).toBe(false);
+  });
+
   it("lets the user return from an authentication failure, replace the key, and connect", async () => {
     const harness = createTauriHarness();
     const user = userEvent.setup();
@@ -601,37 +648,39 @@ function createTauriHarness(
     secrets.set(providerId, secret);
     return Promise.resolve({ configured: true, lastFour: secret.slice(-4) });
   });
+  const getCredentialSummary = vi.fn((providerId: string) => {
+    const secret = secrets.get(providerId);
+    return Promise.resolve({
+      configured: secret !== undefined,
+      lastFour: secret?.slice(-4) ?? null,
+    });
+  });
+  const discoverModelCredentials = vi.fn(() =>
+    options.discoveryFails === true
+      ? Promise.reject(
+          Object.assign(new Error("credential discovery unavailable"), {
+            code: "CREDENTIAL_STORE_UNAVAILABLE",
+            requestId: "01a033ab-1234-7890-abcd-1234567890ab",
+          }),
+        )
+      : Promise.resolve(
+          [...discoveredSecrets.entries()].map(([discoveryId, secret]) => ({
+            discoveryId,
+            lastFour: secret.slice(-4),
+            ...(options.trustedDiscovery === true
+              ? { providerKind: "deepseek", sourceConnectionId: "deepseek" }
+              : {}),
+          })),
+        ),
+  );
   const credentials = {
-    getSummary: vi.fn((providerId: string) => {
-      const secret = secrets.get(providerId);
-      return Promise.resolve({
-        configured: secret !== undefined,
-        lastFour: secret?.slice(-4) ?? null,
-      });
-    }),
+    getSummary: getCredentialSummary,
     save: saveCredential,
     delete: vi.fn((providerId: string) => {
       secrets.delete(providerId);
       return Promise.resolve({ configured: false, lastFour: null });
     }),
-    discoverModelCredentials: vi.fn(() =>
-      options.discoveryFails === true
-        ? Promise.reject(
-            Object.assign(new Error("credential discovery unavailable"), {
-              code: "CREDENTIAL_STORE_UNAVAILABLE",
-              requestId: "01a033ab-1234-7890-abcd-1234567890ab",
-            }),
-          )
-        : Promise.resolve(
-            [...discoveredSecrets.entries()].map(([discoveryId, secret]) => ({
-              discoveryId,
-              lastFour: secret.slice(-4),
-              ...(options.trustedDiscovery === true
-                ? { providerKind: "deepseek", sourceConnectionId: "deepseek" }
-                : {}),
-            })),
-          ),
-    ),
+    discoverModelCredentials,
     reuseDiscovered,
     deleteDiscovered,
   } as CredentialStore & {
@@ -720,6 +769,8 @@ function createTauriHarness(
     runtime,
     secrets,
     credentials,
+    getCredentialSummary,
+    discoverModelCredentials,
     saveCredential,
     reuseDiscovered,
     deleteDiscovered,

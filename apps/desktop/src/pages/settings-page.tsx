@@ -134,6 +134,17 @@ import {
 } from "../infrastructure/model-hub-ui-diagnostics";
 import { ModelHubLocalEvaluationService } from "../infrastructure/model-hub-local-evaluation-service";
 import {
+  recommendModelHubCapabilityProbeKind,
+  requireModelHubCapabilityProbeKind,
+  type ModelHubCapabilityProbeKind,
+} from "../infrastructure/model-hub-capability-probe-kind";
+import { describeModelHubCapabilityProbeFailure } from "../infrastructure/model-hub-capability-failure-presentation";
+import { describeModelHubCatalogEntrySource } from "../infrastructure/model-hub-catalog-presentation";
+import {
+  executeAuditedModelHubEmbeddingCapabilityProbe,
+  modelHubEmbeddingCapabilityProbeFailureMetadata,
+} from "../infrastructure/model-hub-embedding-capability-probe";
+import {
   MODEL_HUB_TEXT_CAPABILITY_PROBE_DISPATCH_SCOPE,
   MODEL_HUB_TEXT_CAPABILITY_PROBE_MAX_OUTPUT_TOKENS,
   MODEL_HUB_TEXT_CAPABILITY_PROBE_MESSAGES,
@@ -176,6 +187,7 @@ import {
 } from "../infrastructure/model-hub-final-dispatch-guard";
 import { providerActionFingerprint } from "../infrastructure/provider-action-disclosure";
 import {
+  isRetirementCleanupPendingModelProviderConnection,
   isRetiredModelProviderConnection,
   ModelHubStoreError,
   type ModelCatalogEntry,
@@ -230,6 +242,7 @@ interface SettingsTextProbeFormSnapshot {
   readonly providerId: string;
   readonly providerKind: ConnectableProviderKind;
   readonly loadedConnectionId: string | null;
+  readonly loadedConnectionRevision: number | null;
   readonly baseUrl: string;
   readonly region: string;
   readonly workspaceId: string;
@@ -242,6 +255,7 @@ interface SettingsTextProbeFormSnapshot {
   readonly requestTimeoutMs: string;
   readonly retryLimit: string;
   readonly selectedModel: string;
+  readonly capabilityProbeKind: ModelHubCapabilityProbeKind | null;
   readonly credentialConfigured: boolean;
   readonly credentialEditRevision: number;
 }
@@ -251,6 +265,7 @@ interface PreparedSettingsTextProbeAuthorization {
   readonly connectionInput: SaveModelProviderConnectionInput;
   readonly submittedSecret: string | null;
   readonly modelId: string;
+  readonly capabilityProbeKind: ModelHubCapabilityProbeKind;
   readonly disclosureFingerprint: string;
   readonly invocationId: string;
 }
@@ -259,6 +274,11 @@ interface SettingsCapabilityProbeFailureProjection {
   readonly supportId: string;
   readonly stage: "preparation" | "dispatch" | "result";
   readonly providerDispatchCount: 0 | 1;
+  readonly stageLabel: string;
+  readonly reason: string;
+  readonly recovery: string;
+  readonly diagnosticCode: string;
+  readonly httpStatus: number | null;
 }
 
 class SettingsTextProbePostDispatchConflictError extends Error {
@@ -602,6 +622,8 @@ export function SettingsPage() {
   const [confirmedCapabilities, setConfirmedCapabilities] = useState<readonly ModelHubCapability[]>(
     [],
   );
+  const [capabilityProbeKind, setCapabilityProbeKind] =
+    useState<ModelHubCapabilityProbeKind | null>(null);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [checkingModel, setCheckingModel] = useState(false);
@@ -617,6 +639,7 @@ export function SettingsPage() {
       providerId,
       providerKind: providerPreset,
       loadedConnectionId: hubConnection?.id ?? null,
+      loadedConnectionRevision: hubConnection?.revision ?? null,
       baseUrl,
       region,
       workspaceId,
@@ -629,16 +652,19 @@ export function SettingsPage() {
       requestTimeoutMs,
       retryLimit,
       selectedModel,
+      capabilityProbeKind,
       credentialConfigured: summary.configured || secret.trim().length > 0,
       credentialEditRevision: credentialEditRevisionRef.current,
     });
   }, [
     authentication,
     baseUrl,
+    capabilityProbeKind,
     credentialHeaderName,
     embeddingPath,
     endpointId,
     hubConnection?.id,
+    hubConnection?.revision,
     modelDiscoveryPath,
     providerId,
     providerPreset,
@@ -900,6 +926,17 @@ export function SettingsPage() {
         );
         setRetryLimit(String(selectedConnection?.retryLimit ?? 0));
         setSelectedModel(hydration.selectedCatalogEntry?.providerModelId ?? "");
+        setCapabilityProbeKind(
+          hydration.selectedCatalogEntry === null
+            ? null
+            : recommendModelHubCapabilityProbeKind({
+                providerKind: selectedConnection?.providerKind ?? "openai",
+                modelId: hydration.selectedCatalogEntry.providerModelId,
+                capabilityEvidence: hydration.selectedCapabilities,
+                requestedTask: null,
+                now: runtime.clock.now(),
+              }),
+        );
         applyHubModelToForm(hydration.selectedCatalogEntry, hydration.selectedCostPrivacy);
         setConfirmedCapabilities(
           hydration.selectedCapabilities
@@ -1197,6 +1234,8 @@ export function SettingsPage() {
         : hubConnections.find(
             (connection) =>
               connection.providerKind === nextProvider &&
+              connection.enabled &&
+              connection.connectionStatus !== "disabled" &&
               !isRetiredModelProviderConnection(connection),
           );
     if (reusableConnection !== undefined) {
@@ -1227,6 +1266,7 @@ export function SettingsPage() {
     setConnectionChecked(false);
     setModelCapacity(null);
     setSelectedModel("");
+    setCapabilityProbeKind(null);
     setRegion(nextProvider === "alibaba_qwen" ? "china_beijing" : "");
     setWorkspaceId("");
     setEndpointId("");
@@ -1313,11 +1353,30 @@ export function SettingsPage() {
     setSchemeMessage("已恢复供应商默认连接参数；系统凭据、已保存连接和创作任务安排均未删除。");
   }
 
+  function editFailedActiveConnection(): void {
+    setExpertMode(true);
+    setCredentialError(null);
+    setCapabilityProbeError(null);
+    setCapabilityProbeFailure(null);
+    setCapabilityProbeMessage(null);
+    setSchemeMessage(
+      "已打开连接设置。修改地址、模型或接口路径并保存后，再由你明确重新检查；已保存密钥保持不变。",
+    );
+    window.setTimeout(() => {
+      const expertSettings = document.getElementById("model-hub-expert-settings");
+      const firstEditable =
+        expertSettings?.querySelector<HTMLInputElement>('input[type="url"]') ??
+        expertSettings?.querySelector<HTMLInputElement>("input:not([disabled])");
+      firstEditable?.focus({ preventScroll: true });
+    }, 50);
+  }
+
   function captureSettingsTextProbeForm(): SettingsTextProbeFormSnapshot {
     return Object.freeze({
       providerId,
       providerKind: providerPreset,
       loadedConnectionId: hubConnection?.id ?? null,
+      loadedConnectionRevision: hubConnection?.revision ?? null,
       baseUrl,
       region,
       workspaceId,
@@ -1330,6 +1389,7 @@ export function SettingsPage() {
       requestTimeoutMs,
       retryLimit,
       selectedModel,
+      capabilityProbeKind,
       credentialConfigured: summary.configured || secret.trim().length > 0,
       credentialEditRevision: credentialEditRevisionRef.current,
     });
@@ -1352,6 +1412,20 @@ export function SettingsPage() {
   ): Promise<SaveModelProviderConnectionInput> {
     const existing = await runtime.modelHub.findConnection(form.providerId);
     assertProbeConnectionTargetIsOwned(existing, form);
+    const expectedRevision =
+      existing === null
+        ? null
+        : form.loadedConnectionId === existing.id
+          ? form.loadedConnectionRevision
+          : isCredentialDeletedConnection(existing)
+            ? existing.revision
+            : null;
+    if (existing !== null && expectedRevision === null) {
+      throw new ModelHubStoreError(
+        "MODEL_HUB_CONNECTION_CONFLICT",
+        "当前页面没有这条连接的载入版本。请重新读取后再保存，较新的设置和凭据没有被覆盖。",
+      );
+    }
     const resolvedBaseUrl = resolveProviderBaseUrl(form.providerKind, {
       region: form.region,
       workspaceId: form.workspaceId,
@@ -1385,7 +1459,7 @@ export function SettingsPage() {
       requestTimeoutMs: Number(form.requestTimeoutMs),
       retryLimit: Number(form.retryLimit),
       enabled: authenticationOverride === "none" || credentialConfigured,
-      expectedRevision: existing?.revision ?? null,
+      expectedRevision,
     });
   }
 
@@ -1399,6 +1473,9 @@ export function SettingsPage() {
     if (modelId.length === 0) {
       throw new Error("请先填写模型名称或编号；豆包也可以填写接入点编号。");
     }
+    const requestedCapabilityProbeKind = requireModelHubCapabilityProbeKind(
+      form.capabilityProbeKind,
+    );
     validateExpertConnectionDraft({
       provider: form.providerKind,
       baseUrl: form.baseUrl,
@@ -1425,6 +1502,7 @@ export function SettingsPage() {
       connectionInput,
       modelId,
       invocationId,
+      requestedCapabilityProbeKind,
     );
     assertSettingsTextProbeFormUnchanged(form);
     return Object.freeze({
@@ -1432,6 +1510,7 @@ export function SettingsPage() {
       connectionInput,
       submittedSecret,
       modelId,
+      capabilityProbeKind: requestedCapabilityProbeKind,
       invocationId,
       disclosureFingerprint,
     });
@@ -2012,7 +2091,7 @@ export function SettingsPage() {
         retentionPolicy: local ? "none" : "provider_default",
         trainingPolicy: local ? "not_used" : "unknown",
         evidenceSource: "provider_metadata",
-        evidenceVersion: "text-capability-probe-endpoint-v1",
+        evidenceVersion: "capability-probe-endpoint-v2",
         evidenceSummary: local
           ? "连接目标是本机回环地址；能力检查未发送作品内容。"
           : "连接目标是供应商远程端点；留存与训练政策仍以供应商当前政策为准。",
@@ -2077,6 +2156,7 @@ export function SettingsPage() {
             finalTarget.connection,
             finalTarget.entry.providerModelId,
             authorization.invocationId,
+            authorization.capabilityProbeKind,
           );
           if (currentDisclosureFingerprint !== authorization.disclosureFingerprint) {
             throw settingsTextProbeDisclosureChanged();
@@ -2185,6 +2265,176 @@ export function SettingsPage() {
             errorCode: normalized.code,
             errorSummary: normalized.description,
             failure: modelHubTextCapabilityProbeFailureMetadata(
+              cause,
+              savedConnection.providerKind,
+            ),
+          },
+          ...(updateConnectionStatus
+            ? {
+                connectionTest: {
+                  status: "error" as const,
+                  errorCode: normalized.code,
+                  errorSummary: normalized.description,
+                },
+              }
+            : {}),
+        });
+      } catch (commitCause: unknown) {
+        if (
+          commitCause instanceof ModelHubStoreError &&
+          commitCause.code === "MODEL_HUB_PROBE_TARGET_CONFLICT"
+        ) {
+          throw providerDispatched
+            ? new SettingsTextProbePostDispatchConflictError()
+            : new ModelHubFinalDispatchError();
+        }
+        throw commitCause;
+      }
+      if (providerDispatched && cause instanceof ModelHubFinalDispatchError) {
+        throw new SettingsTextProbePostDispatchConflictError();
+      }
+      throw cause;
+    }
+  }
+
+  async function performLightweightEmbeddingProbe(
+    savedConnection: ModelProviderConnection,
+    catalogEntry: ModelCatalogEntry,
+    authorization: PreparedSettingsTextProbeAuthorization,
+    updateConnectionStatus = false,
+  ): Promise<
+    Readonly<{
+      dimension: number;
+      vectorCount: number;
+      latencyMs: number;
+      connection: ModelProviderConnection;
+      catalog: readonly ModelCatalogEntry[];
+      entry: ModelCatalogEntry;
+    }>
+  > {
+    if (authorization.capabilityProbeKind !== "embedding") {
+      throw settingsTextProbeDisclosureChanged();
+    }
+    const scanId = createModelHubId("probe-scan");
+    const evidenceVersion = createModelHubId("embedding-probe-v1");
+    const invocationId = authorization.invocationId;
+    const startedAt = Date.parse(runtime.clock.now());
+    const expectedDispatchIdentity = settingsProbeDispatchIdentity(savedConnection, catalogEntry);
+    try {
+      const result = await executeAuditedModelHubEmbeddingCapabilityProbe({
+        gateway: runtime.modelGateway,
+        modelHub: runtime.modelHub,
+        clock: runtime.clock,
+        providerKind: savedConnection.providerKind,
+        invocationId,
+        connection: savedConnection,
+        catalogEntry,
+        config: Object.freeze({
+          ...modelHubNativeEndpointConfig(savedConnection),
+          retryLimit: 0,
+        }),
+        model: catalogEntry.providerModelId,
+        assertBeforeProviderDispatch: async () => {
+          const finalTarget = await readAuthoritativeProbeTarget(
+            savedConnection.id,
+            catalogEntry.id,
+          );
+          assertModelHubFinalDispatchUnchanged(
+            expectedDispatchIdentity,
+            settingsProbeDispatchIdentity(finalTarget.connection, finalTarget.entry),
+          );
+          const currentDisclosureFingerprint = await settingsTextProbeFingerprintFromConnection(
+            finalTarget.connection,
+            finalTarget.entry.providerModelId,
+            authorization.invocationId,
+            authorization.capabilityProbeKind,
+          );
+          if (currentDisclosureFingerprint !== authorization.disclosureFingerprint) {
+            throw settingsTextProbeDisclosureChanged();
+          }
+          assertSettingsTextProbeFormUnchanged(authorization.form);
+        },
+      });
+      const verified = await readAuthoritativeProbeTarget(savedConnection.id, catalogEntry.id);
+      assertModelHubFinalDispatchUnchanged(
+        expectedDispatchIdentity,
+        settingsProbeDispatchIdentity(verified.connection, verified.entry),
+      );
+      await ensureProbeCostPrivacyProfile(verified.connection, verified.entry);
+      const committed = await runtime.modelHub.commitCapabilityProbeResult({
+        connectionId: savedConnection.id,
+        expectedConnectionRevision: savedConnection.revision,
+        catalogEntryId: catalogEntry.id,
+        expectedCatalogRevision: catalogEntry.revision,
+        expectedProviderModelId: catalogEntry.providerModelId,
+        scan: {
+          scanId,
+          catalogEntryId: verified.entry.id,
+          modelInvocationId: result.invocation.id,
+          scanKind: "lightweight_probe",
+          status: "succeeded",
+          evidenceVersion,
+          evidence: [
+            {
+              id: createModelHubId("capability"),
+              capability: "embedding",
+              verdict: "supported",
+              evidenceSource: "lightweight_probe",
+              evidenceSummary: `固定无作品内容的向量检查成功；返回 ${String(result.vectorCount)} 条、每条 ${String(result.dimension)} 维。未保存测试文本或向量。`,
+            },
+          ],
+        },
+        ...(updateConnectionStatus ? { connectionTest: { status: "ready" as const } } : {}),
+      });
+      return Object.freeze({
+        dimension: result.dimension,
+        vectorCount: result.vectorCount,
+        latencyMs: Math.max(0, Date.parse(runtime.clock.now()) - startedAt),
+        connection: committed.connection,
+        catalog: verified.catalog,
+        entry: verified.entry,
+      });
+    } catch (cause: unknown) {
+      const probeInvocation = await runtime.modelHub.findInvocation(invocationId).catch(() => null);
+      const providerDispatched =
+        probeInvocation !== null && probeInvocation.providerDispatchStartedAt !== null;
+      if (!providerDispatched && cause instanceof ModelHubFinalDispatchError) {
+        throw settingsTextProbeDisclosureChanged();
+      }
+      if (
+        !providerDispatched &&
+        cause instanceof UiActionError &&
+        cause.code === "MODEL_HUB_PROBE_DISCLOSURE_CHANGED"
+      ) {
+        throw cause;
+      }
+      const normalized = normalizeUiError(cause);
+      if (
+        probeInvocation !== null &&
+        (probeInvocation.status === "queued" || probeInvocation.status === "running")
+      ) {
+        throw cause;
+      }
+      if (isCapabilityProbeResultAmbiguous(normalized.code, probeInvocation)) {
+        throw cause;
+      }
+      try {
+        await runtime.modelHub.commitCapabilityProbeResult({
+          connectionId: savedConnection.id,
+          expectedConnectionRevision: savedConnection.revision,
+          catalogEntryId: catalogEntry.id,
+          expectedCatalogRevision: catalogEntry.revision,
+          expectedProviderModelId: catalogEntry.providerModelId,
+          scan: {
+            scanId,
+            catalogEntryId: catalogEntry.id,
+            ...(probeInvocation === null ? {} : { modelInvocationId: probeInvocation.id }),
+            scanKind: "lightweight_probe",
+            status: "failed",
+            evidenceVersion,
+            errorCode: normalized.code,
+            errorSummary: normalized.description,
+            failure: modelHubEmbeddingCapabilityProbeFailureMetadata(
               cause,
               savedConnection.providerKind,
             ),
@@ -2628,7 +2878,7 @@ export function SettingsPage() {
     }
     const probeForm = captureSettingsTextProbeForm();
     const requestedModelId = effectiveSettingsTextProbeModelId({
-      automaticDiscovery: getModelProviderPreset(probeForm.providerKind).modelDiscovery.automatic,
+      automaticDiscovery: providerSupportsUserTriggeredCatalog(probeForm.providerKind),
       endpointModelId: probeForm.endpointId,
       selectedModelId: probeForm.selectedModel,
     });
@@ -2677,12 +2927,15 @@ export function SettingsPage() {
         return;
       }
       const target = await ensureCatalogEntryForModel(savedConnection, authorization.modelId);
-      const result = await performLightweightTextProbe(
-        target.connection,
-        target.entry,
-        authorization,
-        true,
-      );
+      const result =
+        authorization.capabilityProbeKind === "embedding"
+          ? await performLightweightEmbeddingProbe(
+              target.connection,
+              target.entry,
+              authorization,
+              true,
+            )
+          : await performLightweightTextProbe(target.connection, target.entry, authorization, true);
       if (
         !modelHubOperationCoordinatorRef.current.isCurrent(token, {
           providerKind: result.connection.providerKind,
@@ -2702,7 +2955,7 @@ export function SettingsPage() {
       let automaticallyConfigured: number | null = null;
       let automaticRoutingFailed = false;
       const routesBeforeAutomaticConfiguration = novelTaskRoutes;
-      if (connectionIntent === null) {
+      if (connectionIntent === null && authorization.capabilityProbeKind === "text_generation") {
         try {
           automaticallyConfigured = await applyInitialSmartRoutingIfEmpty(token);
         } catch (cause: unknown) {
@@ -2723,9 +2976,11 @@ export function SettingsPage() {
         return;
       }
       const successMessage = `${
-        result.streamed
-          ? `已验证“${result.entry.displayName}”可生成文字并支持流式返回。`
-          : `已验证“${result.entry.displayName}”可生成文字；本次没有观察到流式增量。`
+        authorization.capabilityProbeKind === "embedding"
+          ? `已验证“${result.entry.displayName}”可生成语义向量；返回 ${String("vectorCount" in result ? result.vectorCount : 0)} 条、每条 ${String("dimension" in result ? result.dimension : 0)} 维。`
+          : "streamed" in result && result.streamed
+            ? `已验证“${result.entry.displayName}”可生成文字并支持流式返回。`
+            : `已验证“${result.entry.displayName}”可生成文字；本次没有观察到流式增量。`
       }${
         automaticallyConfigured === null
           ? ""
@@ -2765,10 +3020,22 @@ export function SettingsPage() {
         id: invocationId,
         startedAt: probeInvocation?.startedAt ?? invocationStartedAt,
       });
+      const stage = resultAmbiguous ? "result" : providerDispatched ? "dispatch" : "preparation";
+      const observedFailure =
+        authorization?.capabilityProbeKind === "embedding"
+          ? modelHubEmbeddingCapabilityProbeFailureMetadata(visibleCause, probeForm.providerKind)
+          : modelHubTextCapabilityProbeFailureMetadata(visibleCause, probeForm.providerKind);
+      const failurePresentation = describeModelHubCapabilityProbeFailure({
+        phase: stage,
+        failureStage: probeInvocation?.failure?.stage ?? observedFailure.stage ?? null,
+        code: probeInvocation?.errorCode ?? normalizedVisibleCause.code,
+        httpStatus: probeInvocation?.failure?.httpStatus ?? observedFailure.httpStatus ?? null,
+      });
       setCapabilityProbeFailure({
         supportId,
-        stage: resultAmbiguous ? "result" : providerDispatched ? "dispatch" : "preparation",
+        stage,
         providerDispatchCount: providerDispatched ? 1 : 0,
+        ...failurePresentation,
       });
       setCapabilityProbeError(visibleCause);
       if (!refreshAttempted) {
@@ -2790,10 +3057,10 @@ export function SettingsPage() {
     if (!runtime.modelGateway.available) {
       return;
     }
-    const automaticDiscovery = getModelProviderPreset(providerPreset).modelDiscovery.automatic;
-    const probeForm = automaticDiscovery ? null : captureSettingsTextProbeForm();
+    const supportsCatalogDiscovery = providerSupportsUserTriggeredCatalog(providerPreset);
+    const probeForm = supportsCatalogDiscovery ? null : captureSettingsTextProbeForm();
     const requestedOperationModelId = effectiveSettingsTextProbeModelId({
-      automaticDiscovery,
+      automaticDiscovery: supportsCatalogDiscovery,
       endpointModelId: probeForm?.endpointId ?? endpointId,
       selectedModelId: probeForm?.selectedModel ?? selectedModel,
     });
@@ -2848,19 +3115,27 @@ export function SettingsPage() {
         providerPreset === "ollama" && runtime.modelGateway.inspectCapacity !== undefined
           ? runtime.modelGateway.inspectCapacity().catch(() => null)
           : Promise.resolve(null);
-      if (!automaticDiscovery) {
+      if (!supportsCatalogDiscovery) {
         if (probeAuthorization === null) {
           throw settingsTextProbeDisclosureChanged();
         }
         const modelId = requestedOperationModelId.normalize("NFKC");
         const target = await ensureCatalogEntryForModel(savedConnection, modelId);
         lightweightProbeOwnsConnectionOutcome = true;
-        const result = await performLightweightTextProbe(
-          target.connection,
-          target.entry,
-          probeAuthorization,
-          true,
-        );
+        const result =
+          probeAuthorization.capabilityProbeKind === "embedding"
+            ? await performLightweightEmbeddingProbe(
+                target.connection,
+                target.entry,
+                probeAuthorization,
+                true,
+              )
+            : await performLightweightTextProbe(
+                target.connection,
+                target.entry,
+                probeAuthorization,
+                true,
+              );
         const descriptors = result.catalog.map(catalogEntryToDescriptor);
         if (
           !modelHubOperationCoordinatorRef.current.isCurrent(token, {
@@ -2878,9 +3153,12 @@ export function SettingsPage() {
           });
           return;
         }
-        const successMessage = result.streamed
-          ? `连接成功，并已验证“${result.entry.displayName}”可生成文字和流式返回。`
-          : `连接成功，并已验证“${result.entry.displayName}”可生成文字。`;
+        const successMessage =
+          probeAuthorization.capabilityProbeKind === "embedding"
+            ? `连接成功，并已验证“${result.entry.displayName}”可生成语义向量。`
+            : "streamed" in result && result.streamed
+              ? `连接成功，并已验证“${result.entry.displayName}”可生成文字和流式返回。`
+              : `连接成功，并已验证“${result.entry.displayName}”可生成文字。`;
         setCapabilityProbeMessage(successMessage);
         refreshAttempted = true;
         const refreshed = await loadModelCenter({
@@ -2933,24 +3211,6 @@ export function SettingsPage() {
           displayName: model.displayName,
         })),
       });
-      for (const catalogEntry of catalog.filter(
-        ({ lastSyncId, availability }) => lastSyncId === syncId && availability === "available",
-      )) {
-        await runtime.modelHub.recordCapabilityScan({
-          scanId: createModelHubId("metadata-scan"),
-          catalogEntryId: catalogEntry.id,
-          scanKind: "provider_metadata",
-          status: "succeeded",
-          evidenceVersion: syncId,
-          evidence: MODEL_HUB_CAPABILITIES.map((capability) => ({
-            id: createModelHubId("capability"),
-            capability,
-            verdict: "unknown",
-            evidenceSource: "provider_metadata",
-            evidenceSummary: "供应商目录没有返回可验证的模型能力结论。",
-          })),
-        });
-      }
       void testedConnection;
       void catalog;
       const refreshedModelId =
@@ -2988,7 +3248,7 @@ export function SettingsPage() {
         !(visibleReason instanceof UiActionError)
       ) {
         const normalized = normalizeUiError(visibleReason);
-        await runtime.modelHub
+        const failedConnection = await runtime.modelHub
           .recordConnectionTest({
             connectionId: savedConnection.id,
             status: "error",
@@ -2996,7 +3256,21 @@ export function SettingsPage() {
             errorSummary: normalized.description,
             expectedRevision: savedConnection.revision,
           })
-          .catch(() => undefined);
+          .catch(() => null);
+        if (supportsCatalogDiscovery) {
+          await runtime.modelHub
+            .syncCatalog({
+              syncId: createModelHubId("provider-sync-failed"),
+              connectionId: savedConnection.id,
+              source: "provider_api",
+              status: "failed",
+              models: [],
+              errorCode: normalized.code,
+              errorSummary: normalized.description,
+            })
+            .catch(() => undefined);
+        }
+        void failedConnection;
         setHubConnections(await runtime.modelHub.listConnections().catch(() => hubConnections));
       }
       setCredentialError(visibleReason);
@@ -3518,8 +3792,6 @@ export function SettingsPage() {
       : projectOrdinaryUiError({ code: modelHubPageSnapshot.errorCode });
   const normalizedCapabilityProbeError =
     capabilityProbeError === null ? null : normalizeUiError(capabilityProbeError);
-  const capabilityProbeSupportSuffix =
-    capabilityProbeFailure === null ? "" : ` 支持编号：${capabilityProbeFailure.supportId}。`;
   const normalizedRouteError = routeError === null ? null : normalizeUiError(routeError);
   const taskProbeDisclosureError =
     routeError instanceof ModelHubTaskCapabilityProbeDisclosureError ? routeError : null;
@@ -3850,16 +4122,41 @@ export function SettingsPage() {
     selectedMemoryPolicy?.automaticLearningEnabled === true || activeProjectMemoryCount > 0;
   const automaticBackupPresentation = describeAutomaticBackupCheck(automaticBackupCheck);
   const selectedModelDescriptor = models.find(({ id }) => id === selectedModel) ?? null;
+  const selectedHubCatalogEntry =
+    hubCatalog.find(({ providerModelId }) => providerModelId === selectedModel) ?? null;
+  const selectedModelCatalogSourceDescription =
+    selectedHubCatalogEntry === null
+      ? "模型来源尚未记录。"
+      : describeModelHubCatalogEntrySource(selectedHubCatalogEntry, {
+          cached: modelHubPageSnapshot.catalogStatus === "cached_warning",
+        });
   const localCapacityAssessment = assessLocalModelCapacity(selectedModelDescriptor, modelCapacity);
   const manageableHubConnections = hubConnections.filter(
-    (connection) => !isRetiredModelProviderConnection(connection),
+    (connection) =>
+      connection.enabled &&
+      connection.connectionStatus !== "disabled" &&
+      !isRetiredModelProviderConnection(connection),
   );
   const retiredHubConnections = hubConnections.filter(isRetiredModelProviderConnection);
+  const retirementCleanupPendingConnections = hubConnections.filter(
+    isRetirementCleanupPendingModelProviderConnection,
+  );
+  const failedActiveHubConnection =
+    hubConnection !== null &&
+    hubConnection.enabled &&
+    hubConnection.connectionStatus === "error" &&
+    !isRetiredModelProviderConnection(hubConnection)
+      ? hubConnection
+      : null;
   const credentialDeletedConnection =
-    hubConnection !== null && isCredentialDeletedConnection(hubConnection) ? hubConnection : null;
-  const automaticModelDiscovery = getModelProviderPreset(providerPreset).modelDiscovery.automatic;
+    hubConnection !== null &&
+    !isRetirementCleanupPendingModelProviderConnection(hubConnection) &&
+    isCredentialDeletedConnection(hubConnection)
+      ? hubConnection
+      : null;
+  const catalogDiscoverySupported = providerSupportsUserTriggeredCatalog(providerPreset);
   const effectiveTextProbeModelId = effectiveSettingsTextProbeModelId({
-    automaticDiscovery: automaticModelDiscovery,
+    automaticDiscovery: catalogDiscoverySupported,
     endpointModelId: endpointId,
     selectedModelId: selectedModel,
   });
@@ -3891,7 +4188,7 @@ export function SettingsPage() {
     authenticationRequired: authentication !== "none",
     storedCredentialConfigured: summary.configured,
     newlyEnteredCredentialValid: secret.trim().length >= 8,
-    automaticDiscovery: automaticModelDiscovery,
+    automaticDiscovery: catalogDiscoverySupported,
     selectedModelId: selectedModel,
     endpointModelId: endpointId,
     connectionReady:
@@ -3918,7 +4215,7 @@ export function SettingsPage() {
     "本次不会保存设置，也不会发送请求。",
   );
   const modelHubDiscoverHelp = describeBlockedModelHubAction(
-    "测试连接并发现模型",
+    providerPreset === "alibaba_qwen" ? "重新读取模型列表" : "测试连接并发现模型",
     modelHubFormReadiness.discover,
     "本次不会发送请求。",
   );
@@ -3927,6 +4224,14 @@ export function SettingsPage() {
     modelHubFormReadiness.verify,
     "本次不会发送请求。",
   );
+  const capabilityProbeSelectionHelp =
+    capabilityProbeKind === null
+      ? `${modelHubVerifyHelp ?? "暂时不能验证模型能力。"} 还需要先选择“文字生成能力”或“语义向量能力”；选择并确认前不会发送请求。`
+      : modelHubVerifyHelp;
+  const effectiveModelHubDiscoverHelp =
+    !catalogDiscoverySupported && capabilityProbeKind === null
+      ? "暂时不能检查这个模型：供应商没有可读取的模型目录，请先选择要验证的能力。选择并确认前不会发送请求。"
+      : modelHubDiscoverHelp;
   const modelHubRefreshBlocked =
     modelHubHydrationPending || saving || checkingModel || probingCapability;
   const modelHubRefreshHelp = modelHubRefreshBlocked
@@ -3953,6 +4258,9 @@ export function SettingsPage() {
     modelHubMutationNotice === null &&
     !modelHubHydrationPending &&
     manageableHubConnections.length === 0 &&
+    retiredHubConnections.length === 0 &&
+    retirementCleanupPendingConnections.length === 0 &&
+    credentialDeletedConnection === null &&
     !summary.configured &&
     secret.trim().length === 0;
   const hasRetirementResult = retirementMessage !== null;
@@ -4955,6 +5263,40 @@ export function SettingsPage() {
                         />
                       )}
 
+                      {retirementCleanupPendingConnections.map((connection) => (
+                        <div key={`retirement-cleanup-${connection.id}`}>
+                          <InlineAlert
+                            tone="warning"
+                            title="退役尚未完成"
+                            description={`“${connection.displayName}”已经停止参与模型选择、推荐和创作任务安排，但系统凭据或旧模型选择尚未完成清理。重启不会恢复这条连接，也不会自动删除凭据；请由你明确继续清理。`}
+                          />
+                          <div className="settings-actions">
+                            <Button
+                              variant="secondary"
+                              disabled={modelHubManagementBlocked}
+                              onClick={() => setRetireConnectionTarget(connection)}
+                            >
+                              继续清理并完成退役
+                            </Button>
+                          </div>
+                        </div>
+                      ))}
+
+                      {failedActiveHubConnection !== null && (
+                        <div>
+                          <InlineAlert
+                            tone="warning"
+                            title="连接检查未通过"
+                            description={`“${failedActiveHubConnection.displayName}”仍是活动连接，但最近一次检查没有通过。连接设置和已保存密钥都仍然保留；请先编辑模型、地址或接口路径，保存后再由你明确重新检查。`}
+                          />
+                          <div className="settings-actions">
+                            <Button variant="secondary" onClick={editFailedActiveConnection}>
+                              编辑并重试
+                            </Button>
+                          </div>
+                        </div>
+                      )}
+
                       {credentialDeletedConnection !== null && (
                         <InlineAlert
                           tone="warning"
@@ -5022,7 +5364,12 @@ export function SettingsPage() {
                                   const preset = getModelProviderPreset(kind);
                                   return { value: kind, label: preset.displayName };
                                 })}
-                                disabled={loading || saving || checkingModel || probingCapability}
+                                disabled={
+                                  modelHubHydrationPending ||
+                                  saving ||
+                                  checkingModel ||
+                                  probingCapability
+                                }
                                 onChange={(event) =>
                                   applyProviderPreset(
                                     event.currentTarget.value as ConnectableProviderKind,
@@ -5393,11 +5740,9 @@ export function SettingsPage() {
                             <FormField
                               label="模型"
                               hint={
-                                modelHubPageSnapshot.catalogStatus === "cached_warning"
-                                  ? `正在使用上次保存的 ${String(models.length)} 个模型；重新检查失败后没有清空目录。`
-                                  : modelHubHydrationPending
-                                    ? `${modelHubHydrationPhaseLabel(modelHubPageSnapshot.phase)} 已保存的模型仍可查看。`
-                                    : `本次从端点读取 ${String(models.length)} 个模型。`
+                                modelHubHydrationPending
+                                  ? `${modelHubHydrationPhaseLabel(modelHubPageSnapshot.phase)} 已保存的模型仍可查看。`
+                                  : selectedModelCatalogSourceDescription
                               }
                               required
                             >
@@ -5432,6 +5777,38 @@ export function SettingsPage() {
                                 description="本次重新检查没有完成，原有模型和选择已保留。你可以稍后再次测试连接。"
                               />
                             )}
+                            {expertMode && (
+                              <FormField
+                                label="模型标识（手动调整）"
+                                hint="只在供应商目录与控制台不一致时修改；保存后需要重新验证对应能力。"
+                              >
+                                {(fieldProps) => (
+                                  <Input
+                                    {...fieldProps}
+                                    value={selectedModel}
+                                    maxLength={512}
+                                    disabled={saving || checkingModel || probingCapability}
+                                    onChange={(event) => {
+                                      const nextModelId = event.currentTarget.value;
+                                      setSelectedModel(nextModelId);
+                                      setCapabilityProbeKind(
+                                        recommendModelHubCapabilityProbeKind({
+                                          providerKind: providerPreset,
+                                          modelId: nextModelId,
+                                          capabilityEvidence: [],
+                                          requestedTask: null,
+                                          now: runtime.clock.now(),
+                                        }),
+                                      );
+                                      setConnection(null);
+                                      setCapabilityProbeError(null);
+                                      setCapabilityProbeFailure(null);
+                                      setCapabilityProbeMessage(null);
+                                    }}
+                                  />
+                                )}
+                              </FormField>
+                            )}
                           </>
                         ) : modelHubHydrationPending ? (
                           <InlineAlert
@@ -5446,8 +5823,7 @@ export function SettingsPage() {
                             title="模型目录暂时无法读取"
                             description="已保存连接和密钥没有被清除。请重新加载模型中心；若仍失败，再检查本地数据库或供应商连接。"
                           />
-                        ) : expertMode ||
-                          !getModelProviderPreset(providerPreset).modelDiscovery.automatic ? (
+                        ) : expertMode || !catalogDiscoverySupported ? (
                           <FormField
                             label={
                               providerPreset === "volcengine_doubao"
@@ -5455,9 +5831,7 @@ export function SettingsPage() {
                                 : "模型标识"
                             }
                             hint="该供应商不保证提供模型列表，请填写控制台显示的真实模型或接入点标识。"
-                            required={
-                              !getModelProviderPreset(providerPreset).modelDiscovery.automatic
-                            }
+                            required={!catalogDiscoverySupported}
                           >
                             {(fieldProps) => (
                               <Input
@@ -5465,7 +5839,19 @@ export function SettingsPage() {
                                 value={selectedModel}
                                 maxLength={512}
                                 disabled={saving || checkingModel || probingCapability}
-                                onChange={(event) => setSelectedModel(event.currentTarget.value)}
+                                onChange={(event) => {
+                                  const nextModelId = event.currentTarget.value;
+                                  setSelectedModel(nextModelId);
+                                  setCapabilityProbeKind(
+                                    recommendModelHubCapabilityProbeKind({
+                                      providerKind: providerPreset,
+                                      modelId: nextModelId,
+                                      capabilityEvidence: [],
+                                      requestedTask: null,
+                                      now: runtime.clock.now(),
+                                    }),
+                                  );
+                                }}
                               />
                             )}
                           </FormField>
@@ -5479,7 +5865,9 @@ export function SettingsPage() {
                                 : provider === "ollama"
                                   ? "请先启动本机 Ollama，然后点击“测试连接并发现模型”。"
                                   : summary.configured
-                                    ? "密钥已保存。点击“测试连接并发现模型”读取当前账号真正可用的模型。"
+                                    ? providerPreset === "alibaba_qwen"
+                                      ? "密钥已保存。点击“重新读取模型列表”读取当前账号真正可用的模型。"
+                                      : "密钥已保存。点击“测试连接并发现模型”读取当前账号真正可用的模型。"
                                     : "先把接口密钥保存到系统凭据库，再测试连接；密钥不会写入普通数据库。"
                             }
                           />
@@ -5649,46 +6037,103 @@ export function SettingsPage() {
                       )}
 
                       {effectiveTextProbeModelId.length > 0 && runtime.modelGateway.available && (
+                        <FormField
+                          label="要检查的能力"
+                          hint="墨影只会执行你在这里选择的一种检查；未知模型不会按名称猜测能力。"
+                          required
+                        >
+                          {(fieldProps) => (
+                            <Select
+                              {...fieldProps}
+                              value={capabilityProbeKind ?? ""}
+                              placeholder="选择文字生成或语义向量"
+                              options={[
+                                { value: "text_generation", label: "文字生成能力" },
+                                { value: "embedding", label: "语义向量能力" },
+                              ]}
+                              disabled={saving || checkingModel || probingCapability}
+                              onChange={(event) => {
+                                const value = event.currentTarget.value;
+                                setCapabilityProbeKind(
+                                  value === "text_generation" || value === "embedding"
+                                    ? value
+                                    : null,
+                                );
+                                setCapabilityProbeError(null);
+                                setCapabilityProbeFailure(null);
+                                setCapabilityProbeMessage(null);
+                              }}
+                            />
+                          )}
+                        </FormField>
+                      )}
+
+                      {effectiveTextProbeModelId.length > 0 && runtime.modelGateway.available && (
                         <InlineAlert
                           tone="warning"
-                          title="模型能力检查需要明确确认"
-                          description={`点击“${automaticModelDiscovery ? "确认 1 次固定验证" : "确认 1 次固定验证并检查连接"}”将通过“${hubConnection?.displayName ?? getModelProviderPreset(providerPreset).displayName}”的“${effectiveTextProbeModelId}”发送固定短句“只回复：OK”，最多请求 64 个输出内容额度；本次最多向模型服务发送 1 次，自动重试 0 次。${modelProbeDestinationDisclosure(providerPreset, { region, workspaceId, baseUrl })}不发送作品正文、灵感、设定或接口密钥；当前费用上限未知，供应商可能收取少量费用。测试输入和输出不会写入能力记录。`}
+                          title={
+                            capabilityProbeKind === null
+                              ? "先选择要检查的能力"
+                              : "模型能力检查需要明确确认"
+                          }
+                          description={
+                            capabilityProbeKind === "embedding"
+                              ? `点击“确认 1 次固定验证”将通过“${hubConnection?.displayName ?? getModelProviderPreset(providerPreset).displayName}”的“${effectiveTextProbeModelId}”向语义向量接口发送 1 条固定、无作品内容的最小测试文本；只检查返回条目数、有效维度和有限数值。本次最多向模型服务发送 1 次，自动重试 0 次。${modelProbeDestinationDisclosure(providerPreset, { region, workspaceId, baseUrl })}不发送作品正文、灵感、设定或接口密钥；当前费用上限未知，供应商可能收取少量费用。测试文本和向量不会写入能力记录或诊断。`
+                              : capabilityProbeKind === "text_generation"
+                                ? `点击“${catalogDiscoverySupported ? "确认 1 次固定验证" : "确认 1 次固定验证并检查连接"}”将通过“${hubConnection?.displayName ?? getModelProviderPreset(providerPreset).displayName}”的“${effectiveTextProbeModelId}”发送固定短句“只回复：OK”，最多请求 64 个输出内容额度；本次最多向模型服务发送 1 次，自动重试 0 次。${modelProbeDestinationDisclosure(providerPreset, { region, workspaceId, baseUrl })}不发送作品正文、灵感、设定或接口密钥；当前费用上限未知，供应商可能收取少量费用。测试输入和输出不会写入能力记录。`
+                                : "请选择文字生成能力或语义向量能力。选择并确认前，本次发送次数为零。"
+                          }
                         />
                       )}
 
                       {normalizedCapabilityProbeError !== null && (
-                        <InlineAlert
-                          tone={
-                            capabilityProbeFailure?.stage === "result" ||
-                            normalizedCapabilityProbeError.code === "PROVIDER_RESULT_AMBIGUOUS"
-                              ? "warning"
-                              : "error"
-                          }
-                          title={
-                            capabilityProbeFailure?.stage === "preparation"
-                              ? "模型能力检查未发送"
-                              : capabilityProbeFailure?.stage === "result" ||
-                                  normalizedCapabilityProbeError.code ===
-                                    "PROVIDER_RESULT_AMBIGUOUS"
-                                ? "模型能力检查结果待核对"
-                                : "模型能力检查失败"
-                          }
-                          description={
-                            capabilityProbeFailure?.stage === "preparation"
-                              ? `${normalizedCapabilityProbeError.description} 本次发送次数为零，自动重试为零；连接和模型目录仍然保留。${capabilityProbeSupportSuffix}`
-                              : capabilityProbeFailure?.stage === "result" ||
-                                  normalizedCapabilityProbeError.code ===
-                                    "PROVIDER_RESULT_AMBIGUOUS"
-                                ? `${normalizedCapabilityProbeError.description} 系统不会自动重发；连接和模型目录会保留。${capabilityProbeSupportSuffix}`
-                                : `${normalizedCapabilityProbeError.description} 本次发送一次，自动重试为零；连接和模型目录会保留，修正模型或接入点后可以重试。${capabilityProbeSupportSuffix}`
-                          }
-                        />
+                        <div>
+                          <InlineAlert
+                            tone={
+                              capabilityProbeFailure?.stage === "result" ||
+                              normalizedCapabilityProbeError.code === "PROVIDER_RESULT_AMBIGUOUS"
+                                ? "warning"
+                                : "error"
+                            }
+                            title={
+                              capabilityProbeFailure?.stage === "preparation"
+                                ? "模型能力检查未发送"
+                                : capabilityProbeFailure?.stage === "result" ||
+                                    normalizedCapabilityProbeError.code ===
+                                      "PROVIDER_RESULT_AMBIGUOUS"
+                                  ? "模型能力检查结果待核对"
+                                  : "模型能力检查失败"
+                            }
+                            description={
+                              capabilityProbeFailure === null
+                                ? normalizedCapabilityProbeError.description
+                                : `阶段：${capabilityProbeFailure.stageLabel}。${capabilityProbeFailure.reason}${capabilityProbeFailure.recovery} 本次发送 ${capabilityProbeFailure.providerDispatchCount === 0 ? "零" : "一次"}，自动重试为零；连接和模型目录仍然保留。 支持编号：${capabilityProbeFailure.supportId}。`
+                            }
+                          />
+                          {capabilityProbeFailure !== null && (
+                            <details>
+                              <summary>查看高级诊断详情</summary>
+                              <p>
+                                内部错误编号：{capabilityProbeFailure.diagnosticCode}
+                                ；服务响应状态：
+                                {capabilityProbeFailure.httpStatus === null
+                                  ? "未记录"
+                                  : String(capabilityProbeFailure.httpStatus)}
+                                。
+                              </p>
+                            </details>
+                          )}
+                        </div>
                       )}
 
                       {capabilityProbeMessage !== null && (
                         <InlineAlert
                           tone="info"
-                          title="写作能力已验证"
+                          title={
+                            capabilityProbeKind === "embedding"
+                              ? "语义向量能力已验证"
+                              : "写作能力已验证"
+                          }
                           description={capabilityProbeMessage}
                         />
                       )}
@@ -5710,29 +6155,39 @@ export function SettingsPage() {
                         <Button
                           variant="secondary"
                           loading={checkingModel}
-                          disabled={!modelHubFormReadiness.discover.enabled}
+                          disabled={
+                            !modelHubFormReadiness.discover.enabled ||
+                            (!catalogDiscoverySupported && capabilityProbeKind === null)
+                          }
                           aria-describedby={
-                            modelHubDiscoverHelp === null
+                            effectiveModelHubDiscoverHelp === null
                               ? undefined
                               : "model-hub-discover-disabled-help"
                           }
                           onClick={() => void checkModelConnection()}
                         >
-                          {automaticModelDiscovery
-                            ? "测试连接并发现模型"
+                          {catalogDiscoverySupported
+                            ? providerPreset === "alibaba_qwen"
+                              ? "重新读取模型列表"
+                              : "测试连接并发现模型"
                             : "确认 1 次固定验证并检查连接"}
                         </Button>
-                        {modelHubDiscoverHelp !== null && (
-                          <p id="model-hub-discover-disabled-help">{modelHubDiscoverHelp}</p>
+                        {effectiveModelHubDiscoverHelp !== null && (
+                          <p id="model-hub-discover-disabled-help">
+                            {effectiveModelHubDiscoverHelp}
+                          </p>
                         )}
-                        {automaticModelDiscovery && (
+                        {catalogDiscoverySupported && (
                           <>
                             <Button
                               variant="secondary"
                               loading={probingCapability}
-                              disabled={!modelHubFormReadiness.verify.enabled}
+                              disabled={
+                                !modelHubFormReadiness.verify.enabled ||
+                                capabilityProbeKind === null
+                              }
                               aria-describedby={
-                                modelHubVerifyHelp === null
+                                capabilityProbeSelectionHelp === null
                                   ? undefined
                                   : "model-hub-verify-disabled-help"
                               }
@@ -5740,8 +6195,10 @@ export function SettingsPage() {
                             >
                               确认 1 次固定验证
                             </Button>
-                            {modelHubVerifyHelp !== null && (
-                              <p id="model-hub-verify-disabled-help">{modelHubVerifyHelp}</p>
+                            {capabilityProbeSelectionHelp !== null && (
+                              <p id="model-hub-verify-disabled-help">
+                                {capabilityProbeSelectionHelp}
+                              </p>
                             )}
                           </>
                         )}
@@ -5750,12 +6207,8 @@ export function SettingsPage() {
                       {connection !== null && (
                         <InlineAlert
                           tone="info"
-                          title={
-                            getModelProviderPreset(providerPreset).modelDiscovery.automatic
-                              ? "模型目录连接成功"
-                              : "供应商连接成功"
-                          }
-                          description={`${connection.endpointOrigin} · ${String(connection.modelCount)} 个模型 · ${String(connection.latencyMs)} ms。${getModelProviderPreset(providerPreset).modelDiscovery.automatic ? "目录检查不会自动证明模型可生成正文，请按需继续验证写作能力。" : "已通过明确确认的固定短文本验证模型可生成文字。"}`}
+                          title={catalogDiscoverySupported ? "模型目录连接成功" : "供应商连接成功"}
+                          description={`${connection.endpointOrigin} · ${String(connection.modelCount)} 个模型 · ${String(connection.latencyMs)} 毫秒。${catalogDiscoverySupported ? "目录检查不会自动证明模型能力，请按需选择文字生成或语义向量检查。" : "已通过明确确认的固定能力检查。"}`}
                         />
                       )}
 
@@ -7999,6 +8452,8 @@ function settingsTextProbeFormIdentity(form: SettingsTextProbeFormSnapshot): str
   return JSON.stringify([
     form.providerId,
     form.providerKind,
+    form.loadedConnectionId,
+    form.loadedConnectionRevision,
     form.baseUrl,
     form.region,
     form.workspaceId,
@@ -8011,6 +8466,7 @@ function settingsTextProbeFormIdentity(form: SettingsTextProbeFormSnapshot): str
     form.requestTimeoutMs,
     form.retryLimit,
     form.selectedModel,
+    form.capabilityProbeKind,
     form.credentialConfigured,
     form.credentialEditRevision,
   ]);
@@ -8029,6 +8485,11 @@ function effectiveSettingsTextProbeModelId(
   return endpointModelId.length > 0 ? endpointModelId : selectedModelId;
 }
 
+function providerSupportsUserTriggeredCatalog(providerKind: ModelProviderKind): boolean {
+  const discovery = getModelProviderPreset(providerKind).modelDiscovery;
+  return discovery.path !== null && discovery.strategy !== "preset_and_manual";
+}
+
 function settingsTextProbeDisclosureChanged(): UiActionError {
   return new UiActionError(
     "MODEL_HUB_PROBE_DISCLOSURE_CHANGED",
@@ -8041,6 +8502,7 @@ async function settingsTextProbeFingerprintFromInput(
   input: SaveModelProviderConnectionInput,
   modelId: string,
   invocationId: string,
+  capabilityProbeKind: ModelHubCapabilityProbeKind,
 ): Promise<string> {
   const authentication =
     input.authenticationMode ?? (input.credentialState === "present" ? "bearer_keyring" : "none");
@@ -8073,6 +8535,7 @@ async function settingsTextProbeFingerprintFromInput(
     enabled: input.enabled ?? true,
     modelId,
     invocationId,
+    capabilityProbeKind,
     dataDestination: isLoopbackModelBaseUrl(endpoint.baseUrl) ? "local" : "remote",
   });
 }
@@ -8081,6 +8544,7 @@ async function settingsTextProbeFingerprintFromConnection(
   connection: ModelProviderConnection,
   modelId: string,
   invocationId: string,
+  capabilityProbeKind: ModelHubCapabilityProbeKind,
 ): Promise<string> {
   const endpoint = Object.freeze({
     providerKind: connection.providerKind,
@@ -8107,6 +8571,7 @@ async function settingsTextProbeFingerprintFromConnection(
     enabled: connection.enabled,
     modelId,
     invocationId,
+    capabilityProbeKind,
     dataDestination: isLoopbackModelBaseUrl(connection.baseUrl) ? "local" : "remote",
   });
 }
@@ -8125,14 +8590,21 @@ function settingsTextProbeFingerprint(
     enabled: boolean;
     modelId: string;
     invocationId: string;
+    capabilityProbeKind: ModelHubCapabilityProbeKind;
     dataDestination: "local" | "remote";
   }>,
 ): Promise<string> {
   return providerActionFingerprint({
     schemaVersion: "settings-text-capability-probe-disclosure-v2",
     invocationId: target.invocationId,
-    task: "settings_text_generation_capability_probe",
-    probeKind: "fixed_content_free_text_capability",
+    task:
+      target.capabilityProbeKind === "embedding"
+        ? "settings_embedding_capability_probe"
+        : "settings_text_generation_capability_probe",
+    probeKind:
+      target.capabilityProbeKind === "embedding"
+        ? "fixed_content_free_embedding_capability"
+        : "fixed_content_free_text_capability",
     connectionId: target.connectionId,
     connectionDisplayName: target.connectionDisplayName,
     providerKind: target.providerKind,
@@ -8146,8 +8618,12 @@ function settingsTextProbeFingerprint(
     modelId: target.modelId.normalize("NFKC").trim(),
     dataDestination: target.dataDestination,
     dispatchScope: MODEL_HUB_TEXT_CAPABILITY_PROBE_DISPATCH_SCOPE,
-    fixedMessages: MODEL_HUB_TEXT_CAPABILITY_PROBE_MESSAGES,
-    maximumOutputTokens: MODEL_HUB_TEXT_CAPABILITY_PROBE_MAX_OUTPUT_TOKENS,
+    ...(target.capabilityProbeKind === "embedding"
+      ? { fixedInputCount: 1, maximumOutputTokens: null }
+      : {
+          fixedMessages: MODEL_HUB_TEXT_CAPABILITY_PROBE_MESSAGES,
+          maximumOutputTokens: MODEL_HUB_TEXT_CAPABILITY_PROBE_MAX_OUTPUT_TOKENS,
+        }),
     maximumProviderCalls: 1,
     automaticRetryCount: 0,
     estimatedMaximumCostMicros: null,
@@ -8220,6 +8696,7 @@ function isCredentialDeletedConnection(connection: ModelProviderConnection): boo
   return (
     !connection.enabled &&
     !isRetiredModelProviderConnection(connection) &&
+    !isRetirementCleanupPendingModelProviderConnection(connection) &&
     connection.connectionStatus === "disabled" &&
     connection.credentialRef === null &&
     connection.credentialState === "missing"

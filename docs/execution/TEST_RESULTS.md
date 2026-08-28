@@ -1,10 +1,52 @@
 # InkShadow 测试与构建结果
 
-> 更新日期：2026-08-28
+> 更新日期：2026-08-29
 
-> 当前发布目标：`0.2.14`。本节只记录已经运行的本轮命令；历史数字不得替代当前结果，最终发布文案提交仍须重新运行完整候选链。
+> 当前验证对象：`0.2.14` 两轮缺陷统一修复。本轮不修改版本、不构建安装包、不创建或移动标签、不创建或修改 GitHub Release；历史数字不得替代当前工作树结果。
 
-## 2026-08-28 第二次远端同源门禁失败与稳定化
+## 2026-08-29 两轮缺陷统一修复当前证据
+
+下表只登记已经在当前候选源码实际运行的结果。测试集合可能重叠，不相加为全仓总数；修复前失败保留为失败证据，跳过项不计为通过。唯一干净提交上的发布态端到端和远端 `main` 核对只能在提交形成后执行，其结果由最终交付报告绑定。
+
+| 范围                     | 准确命令                                                                                                                                                                                                          | 通过 | 失败 | 跳过 | 当前结果与边界                                                                     |
+| ------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---: | ---: | ---: | ---------------------------------------------------------------------------------- |
+| F5 三文件完整回归        | `pnpm --filter @inkshadow/desktop exec vitest run src/infrastructure/model-hub-execution-service.test.ts src/infrastructure/usage-center-service.test.ts src/pages/usage-center-page.test.tsx --reporter=verbose` |   63 |    0 |    0 | 部分输出、无输出、完整结果、结果待核对和发送阶段中文投影一致。                     |
+| F6 本地批量设定          | `pnpm --filter @inkshadow/desktop test -- story-governance-page.test.tsx story-settings-authoring.test.ts`                                                                                                        |   58 |    0 |    0 | 拆分、证据范围、逐条审阅、恢复、项目隔离和零模型调用。                             |
+| F7 恢复后续写锚点        | `pnpm --filter @inkshadow/desktop exec vitest run src/pages/editor-candidate-route.test.tsx -t "anchors a professional continuation\|uses an author-selected continuation" --reporter=verbose`                    |    2 |    0 |   72 | 默认正文末尾与作者主动光标两条路径。                                               |
+| F10 原生发送边界修复前   | `pnpm --filter @inkshadow/desktop test -- model-hub-embedding-capability-probe.test.ts model-hub-embedding-service.test.ts native-model-gateway-client.test.ts`                                                   |   49 |    4 |    0 | 四个失败分别暴露探针未传同一账本、预检前误记发送、发送后中断未待核对和回执未回传。 |
+| F10 原生发送边界修复后   | 同上                                                                                                                                                                                                              |   55 |    0 |    0 | 预检失败零发送；原生回执后失败进入结果待核对；同一调用标识、一次发送、零自动重试。 |
+| F10 原生回执聚焦         | `cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml native_embedding --no-fail-fast`                                                                                                                    |    2 |    0 |    0 | 成功和超时均只写一个不含探针文本与向量的发送回执；209 项被过滤，不计为跳过。       |
+| F10 原生身份与作用域聚焦 | `cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml embedding_invocation_receipt_requires_exact_zero_retry_scope_and_identity --no-fail-fast`                                                           |    1 |    0 |    0 | 零重试、任务、模型、服务商和作用域必须与账本完全一致；210 项被过滤，不计为跳过。   |
+| 数据迁移、维护与恢复聚焦 | `pnpm --filter @inkshadow/data test -- author-recovery-sqlite-store.test.ts maintenance.test.ts released-v023-continuous-upgrade.test.ts`                                                                         |   54 |    0 |    0 | `0082` 新库、v0.2.3 连续升级、备份恢复、原始 JSON、修订号和时间戳守恒。            |
+| 数据层全量               | `pnpm --filter @inkshadow/data test`                                                                                                                                                                              |  483 |    0 |    0 | 83 个文件；当前数据层全量通过。                                                    |
+| AI 核心全量              | `pnpm --filter @inkshadow/ai-core test`                                                                                                                                                                           |  135 |    0 |    0 | 19 个文件；包含长前缀重合检查。                                                    |
+| 应用层全量               | `pnpm --filter @inkshadow/application test`                                                                                                                                                                       |   90 |    0 |    0 | 8 个文件；包含接受规划与原子版本合同。                                             |
+| 领域层全量               | `pnpm --filter @inkshadow/domain test`                                                                                                                                                                            |   25 |    0 |    0 | 新名称限制与旧长名称安全读取合同。                                                 |
+| 发布脚本                 | `pnpm test:scripts`                                                                                                                                                                                               |   40 |    0 |    0 | 当前发布与验证脚本通过，包含构建与发布证明总预算一致性。                           |
+| 全仓完整测试             | `pnpm test`                                                                                                                                                                                                       | 4037 |    0 |   65 | 522 个文件通过、16 个文件按约定跳过；桌面端 2634／0／1，数据层 483／0／0。         |
+| 类型检查                 | `pnpm typecheck`                                                                                                                                                                                                  |   20 |    0 |    0 | 有类型脚本的 20 个工作区全部通过。                                                 |
+| 代码规范                 | `pnpm lint`                                                                                                                                                                                                       | 通过 |    0 |    0 | 退出码 0，无警告或错误。                                                           |
+| 格式                     | `pnpm format:check`                                                                                                                                                                                               | 通过 |    0 |    0 | 当前候选全部匹配文件符合格式。                                                     |
+| 敏感信息                 | `pnpm check:secrets`                                                                                                                                                                                              | 通过 |    0 |    0 | 没有发现被规则命中的敏感信息。                                                     |
+| 许可证                   | `pnpm check:licenses`                                                                                                                                                                                             |  137 |    0 |    0 | 137 个依赖条目通过。                                                               |
+| 包边界                   | `pnpm check:boundaries`                                                                                                                                                                                           |   20 |    0 |    0 | 20 个工作区包边界通过。                                                            |
+| 桌面发布配置             | `pnpm check:desktop-release`                                                                                                                                                                                      | 通过 |    0 |    0 | 发布配置合同通过；本轮没有构建安装包。                                             |
+| 正式构建                 | `pnpm build`                                                                                                                                                                                                      |   20 |    0 |    0 | 有构建脚本的 20 个工作区通过；桌面端处理 2,311 个模块并合并为 25 个块。            |
+| 原生层完整门禁           | `pnpm check:rust`                                                                                                                                                                                                 |  210 |    0 |    1 | Rust 格式、`clippy -D warnings` 和库测试通过；1 项真实本地服务测试按约定忽略。     |
+| 正式网页端到端           | `pnpm test:e2e`                                                                                                                                                                                                   |   26 |    0 |    0 | 1440、1280、1024、800、浏览器等效 200% 缩放、明暗主题和关键旅程通过。              |
+| 提交前发布态端到端       | `pnpm test:e2e:release`                                                                                                                                                                                           |    0 |    1 |    0 | 按设计在来源捕获阶段拒绝脏工作区，未开始旅程；唯一干净提交形成后重跑。             |
+| 首次干净提交发布态端到端 | `pnpm test:e2e:release`                                                                                                                                                                                           |    0 |    1 |    0 | 构建通过后，发布证明器仍按旧 7 MiB 拒绝 7,400,736 字节制品；未开始网页旅程。       |
+| 发布预算一致性修复前     | `node --test --test-name-pattern="Vite and release attestation" scripts/desktop-release-manifest.test.mjs`                                                                                                        |    0 |    1 |    0 | 稳定证明构建器使用 7 MiB + 128 KiB，而发布证明器仍使用 7 MiB。                     |
+| 发布预算一致性修复后     | 同上                                                                                                                                                                                                              |    1 |    0 |    0 | 两个门禁必须使用完全相同的总预算表达式。                                           |
+| 变更空白检查             | `git diff --check`                                                                                                                                                                                                | 通过 |    0 |    0 | 当前补丁没有空白错误。                                                             |
+
+正式前端旧总体积上限首次按设计失败：7,400,574 / 7,340,032 字节。隔离发布基线的实体大小为 7,337,824 字节，当前实体大小为 7,400,736 字节，增长 62,912 字节；审计未发现重复运行时、源码映射或测试模块。经用户明确授权，总预算只提高 128 KiB 至 7,471,104 字节，当前计入预算 7,400,574 字节，余量 70,530 字节；入口 300 KiB、异步块 500 KiB、样式 128 KiB、工作线程 1.5 MiB 和一般资源 2 MiB 的单项上限均未改变。
+
+最终执行者只须在唯一干净提交形成后补录 `pnpm test:e2e:release`、提交 SHA、远端 `main` 安全同步与推送后回读一致性。此处不使用占位数字冒充结果。
+
+真实 Qwen、DeepSeek 和其他付费模型、真实安装程序、现场数据库恢复、真实断网及供应商迟到响应、真人鼠标拖选、触摸、视觉检查和操作系统级 200% 缩放均未执行。现场数据库、原始截图与录像、完整诊断包、支持编号、应用和组件调用栈、供应商原始响应均未取得。
+
+## 2026-08-28 第二次远端同源门禁失败与稳定化（历史）
 
 提交 `400120f643f9fccfe929560a39e79f263a384b1d` 已从干净来源完成本地未签名候选并推送到 `main`。GitHub 持续集成运行 `33107276512` 中，`Cloud PostgreSQL and forced RLS` 与 `Windows native shell` 均成功；后者完整通过 Rust 格式、严格静态检查、测试、正式前端演练和未签名 NSIS 打包。`Type, lint, test and web build` 的构建、类型和规范检查成功，但桌面测试有两项失败，因此没有创建标签或 Release。
 
@@ -1576,3 +1618,14 @@ manifest compare-and-swap、到期与校验和门禁，以及删除自动备份�
 代码覆盖 `READY / READY_WITH_WARNINGS / BLOCKED`、单一保守上下文回退、未知价格的非零价冒充防护、
 安全诊断字段，以及保存/发现/验证按钮对已保存凭据和新 Key 的最小条件。真实供应商返回、实际账单、
 模型真实上下文窗口、原生迁移升级及打包后恢复仍需在干净依赖树和目标 Windows 环境继续验证。
+
+## 2026-08-29：批量设定恢复进入可备份 SQLite
+
+未完成的批量设定此前只由界面 localStorage 保存，正式 SQLite 备份无法覆盖；项目切换和坏记录保护主要依靠组件内状态。当前新增向前迁移 `0082_author_recovery_records.sql`／Tauri `85`，生产 runtime 显式注入 SQLite store，创建、更新、删除均使用修订号比较交换。浏览器开发使用等价持久适配器，但正式桌面端没有 localStorage 回退。坏或未来 schema 原始 JSON 不删除、不覆盖；作者必须明确放弃整批内容，输入变化不再隐式清除恢复记录。
+
+| 范围                        | 当前精确命令                                                                                                                    |     通过 | 失败 | 跳过 | 说明                                                     |
+| --------------------------- | ------------------------------------------------------------------------------------------------------------------------------- | -------: | ---: | ---: | -------------------------------------------------------- |
+| Store 与 0081→0082 连续升级 | `pnpm --filter @inkshadow/data test -- author-recovery-sqlite-store.test.ts released-v023-continuous-upgrade.test.ts`           |        3 |    0 |    0 | 原始 JSON、CAS、并发写、项目隔离、全新库和连续升级       |
+| VACUUM 备份恢复             | `pnpm --filter @inkshadow/data test -- maintenance.test.ts -t "restores all supported tables from a healthy backup atomically"` |        1 |    0 |   50 | 恢复后 payload、revision、时间戳逐字一致                 |
+| 批量恢复与本地解析          | `pnpm --filter @inkshadow/desktop test -- story-governance-page.test.tsx story-settings-authoring.test.ts`                      |       58 |    0 |    0 | A→B 隔离、异常重启去重、坏记录保留、逐条审阅和零模型调用 |
+| 数据与桌面类型              | `pnpm --filter @inkshadow/data typecheck`；`pnpm --filter @inkshadow/desktop typecheck`                                         | 2 个命令 |    0 |    0 | 当前工作树聚焦类型检查                                   |

@@ -3,6 +3,7 @@ import { FormalStoryRecord, StoryFact } from "@inkshadow/story-core";
 
 import {
   inspectLegacyGuidedOpeningRecords,
+  parseBulkNaturalLanguageSettings,
   parseNaturalLanguageSetting,
   projectStorySettingsForExport,
   readRelationship,
@@ -65,6 +66,56 @@ describe("story settings authoring", () => {
     });
     if (candidate.kind !== "manual") throw new Error("测试句不应被猜测为结构化设定。");
     expect(candidate.missingInformation).toContain("明确");
+  });
+
+  it("splits a multi-theme paragraph into local drafts with exact UTF-16 evidence ranges", () => {
+    const source =
+      "林深是调查记者。林深和煤球是互相信任的搭档。故事发生在常年停电的旧城。每当钟声倒转，所有镜子都会结霜。写作时避免全知视角。雾里的回声令人不安。";
+    const drafts = parseBulkNaturalLanguageSettings(source);
+
+    expect(drafts.map(({ category }) => category)).toEqual([
+      "character_identity",
+      "relationship",
+      "location",
+      "world_rule",
+      "writing_rule",
+      null,
+    ]);
+    expect(drafts).toHaveLength(6);
+    for (const draft of drafts) {
+      expect(source.slice(draft.startOffset, draft.endOffset)).toBe(draft.sourceText);
+      expect(draft.startOffset).toBeGreaterThanOrEqual(0);
+      expect(draft.endOffset).toBeGreaterThan(draft.startOffset);
+    }
+    const unmatchedDraft = drafts[5];
+    expect(unmatchedDraft?.sourceText).toBe("雾里的回声令人不安。");
+    expect(unmatchedDraft?.category).toBeNull();
+    expect(unmatchedDraft?.missingInformation).toContain("选择");
+  });
+
+  it("never turns local bulk parsing into a confirmation or fabricated remote extraction", () => {
+    const drafts = parseBulkNaturalLanguageSettings(
+      "周望五十七岁。周望和赵伯是多年的老邻居。王城位于北方。正文不要使用第一人称。",
+    );
+
+    expect(drafts.map(({ category }) => category)).toEqual([
+      "character_identity",
+      "relationship",
+      "location",
+      "writing_rule",
+    ]);
+    expect(drafts.map(({ confirmation }) => confirmation)).toEqual([
+      "pending",
+      "pending",
+      "pending",
+      "pending",
+    ]);
+    expect(drafts.map(({ sourceKind }) => sourceKind)).toEqual([
+      "local_text",
+      "local_text",
+      "local_text",
+      "local_text",
+    ]);
   });
 
   it("detects legacy guided-opening cards and incomplete relationship facts", () => {

@@ -37,9 +37,13 @@ const PDFJS_WORKER_LICENSE_BANNER = `/*!
 // authoritative routing, recoverable opening state, privacy-safe diagnostics and
 // responsive editor behavior. A production graph audit found no duplicated
 // runtimes, source maps, test code or dynamic modules pulled into the startup
-// graph. Raise only the aggregate allowance to exactly 7 MiB; every per-output
-// ceiling remains unchanged and every lazy chunk still counts toward the total.
-const TOTAL_FRONTEND_BUDGET_BYTES = 7 * 1024 * 1024;
+// graph. The 2026-08-29 remediation adds durable author recovery, truthful model
+// dispatch receipts and the reviewed settings workflows. A current/baseline
+// Rollup audit found no duplicated runtimes, source maps or test modules; the
+// verified production graph grew by 60,542 bytes. Add exactly 128 KiB to the
+// aggregate allowance while keeping every per-output ceiling unchanged and
+// continuing to count every lazy chunk toward the total.
+const TOTAL_FRONTEND_BUDGET_BYTES = 7 * 1024 * 1024 + 128 * 1024;
 
 function isPdfJsWorkerModule(facadeModuleId: string | null): boolean {
   return (

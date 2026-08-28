@@ -276,32 +276,191 @@ describe("SqliteUsageCenterService", () => {
     ).toBe(false);
   });
 
-  it("combines the durable ledgers without double-counting continuations", async () => {
+  it("distinguishes output outcomes, uncertainty and both sides of the dispatch cancellation boundary", async () => {
+    const executor = await createSeededExecutor();
+    const cases = [
+      {
+        id: "opening-no-output",
+        status: "failed" as const,
+        occurredAt: "2026-08-08T14:00:00.000Z",
+        errorCode: "MODEL_OUTPUT_EMPTY",
+        failureStage: "response_normalization" as const,
+        visibleContentLength: 0,
+        providerDispatchStartedAt: "2026-08-08T13:59:59.000Z",
+        costMicros: "1200",
+        currency: "CNY",
+      },
+      {
+        id: "opening-partial-output",
+        status: "failed" as const,
+        occurredAt: "2026-08-08T14:01:00.000Z",
+        errorCode: "MODEL_OUTPUT_TRUNCATED",
+        failureStage: "response_normalization" as const,
+        visibleContentLength: 187,
+        providerDispatchStartedAt: "2026-08-08T14:00:59.000Z",
+        costMicros: "4100",
+        currency: "CNY",
+      },
+      {
+        id: "opening-complete-output",
+        status: "succeeded" as const,
+        occurredAt: "2026-08-08T14:02:00.000Z",
+        errorCode: null,
+        failureStage: null,
+        visibleContentLength: 243,
+        providerDispatchStartedAt: "2026-08-08T14:01:59.000Z",
+        costMicros: "5200",
+        currency: "CNY",
+      },
+      {
+        id: "opening-result-pending-review",
+        status: "timed_out" as const,
+        occurredAt: "2026-08-08T14:03:00.000Z",
+        errorCode: "PROVIDER_RESULT_AMBIGUOUS",
+        failureStage: "transport" as const,
+        visibleContentLength: null,
+        providerDispatchStartedAt: "2026-08-08T14:02:59.000Z",
+        costMicros: null,
+        currency: null,
+      },
+      {
+        id: "opening-confirmed-not-dispatched",
+        status: "cancelled" as const,
+        occurredAt: "2026-08-08T14:04:00.000Z",
+        errorCode: null,
+        failureStage: null,
+        visibleContentLength: null,
+        providerDispatchStartedAt: null,
+        costMicros: null,
+        currency: null,
+      },
+      {
+        id: "opening-dispatched-cancelled",
+        status: "cancelled" as const,
+        occurredAt: "2026-08-08T14:05:00.000Z",
+        errorCode: null,
+        failureStage: null,
+        visibleContentLength: null,
+        providerDispatchStartedAt: "2026-08-08T14:04:59.000Z",
+        costMicros: null,
+        currency: null,
+      },
+    ];
+    for (const item of cases) {
+      await seedInvocation(executor, {
+        ...item,
+        task: "book_start_guidance",
+        connectionId: "openai-connection",
+        providerKind: "openai",
+        modelId: "cloud-model",
+        privacyPolicy: "cloud_allowed",
+        destination: "remote",
+        inputTokens: item.status === "cancelled" ? null : 30,
+        outputTokens: item.status === "cancelled" ? null : 12,
+      });
+    }
+
+    const snapshot = await new SqliteUsageCenterService(executor).read(query());
+    const records = snapshot.records.filter(({ id }) => id.startsWith("hub:opening-"));
+    expect(records).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: "hub:opening-no-output",
+          invocationId: "opening-no-output",
+          status: "failed",
+          visibleContentLength: 0,
+          sendCount: 1,
+          automaticRetryCount: 0,
+        }),
+        expect.objectContaining({
+          id: "hub:opening-partial-output",
+          invocationId: "opening-partial-output",
+          occurredAt: "2026-08-08T14:01:00.000Z",
+          status: "partial",
+          visibleContentLength: 187,
+          sendCount: 1,
+          automaticRetryCount: 0,
+          privacyPolicy: "cloud_allowed",
+          dataDestination: "remote",
+          costMicros: "4100",
+          currency: "CNY",
+        }),
+        expect.objectContaining({
+          id: "hub:opening-complete-output",
+          invocationId: "opening-complete-output",
+          status: "succeeded",
+          visibleContentLength: 243,
+          sendCount: 1,
+          automaticRetryCount: 0,
+        }),
+        expect.objectContaining({
+          id: "hub:opening-result-pending-review",
+          invocationId: "opening-result-pending-review",
+          status: "ambiguous",
+          visibleContentLength: null,
+          sendCount: 1,
+          automaticRetryCount: 0,
+        }),
+        expect.objectContaining({
+          id: "hub:opening-confirmed-not-dispatched",
+          invocationId: "opening-confirmed-not-dispatched",
+          status: "pre_dispatch_cancelled",
+          visibleContentLength: null,
+          sendCount: 0,
+          automaticRetryCount: 0,
+        }),
+        expect.objectContaining({
+          id: "hub:opening-dispatched-cancelled",
+          invocationId: "opening-dispatched-cancelled",
+          status: "cancelled",
+          visibleContentLength: null,
+          sendCount: 1,
+          automaticRetryCount: 0,
+        }),
+      ]),
+    );
+    expect(records.map(({ id }) => id)).not.toContain("hub:opening-confirmation-cancelled");
+    expect(snapshot.summary).toMatchObject({
+      invocationCount: 10,
+      successCount: 4,
+      partialCount: 1,
+      failureCount: 3,
+      cancelledCount: 2,
+      activeCount: 0,
+    });
+  });
+
+  it("keeps independent continuation receipts and only deduplicates a truly linked usage row", async () => {
     const executor = await createSeededExecutor();
     const service = new SqliteUsageCenterService(executor);
 
     const snapshot = await service.read(query());
 
     expect(snapshot.summary).toMatchObject({
-      invocationCount: 3,
-      successCount: 2,
+      invocationCount: 4,
+      successCount: 3,
       failureCount: 1,
       localCount: 1,
-      remoteCount: 1,
+      remoteCount: 2,
       destinationUnknownCount: 1,
-      inputTokens: 100,
-      outputTokens: 20,
+      inputTokens: 200,
+      outputTokens: 40,
       tokenUsageUnknownCount: 2,
       costUnknownCount: 2,
-      costTotals: [{ currency: "CNY", micros: "120000", invocationCount: 1 }],
+      costTotals: [{ currency: "CNY", micros: "240000", invocationCount: 2 }],
     });
     expect(snapshot.records.map(({ id }) => id)).toEqual([
       "hub:image-call",
       "hub:embedding-call",
+      "hub:duplicate-continuation",
       `generation:${RUN_ID}:1`,
     ]);
-    expect(snapshot.records).not.toContainEqual(
-      expect.objectContaining({ id: "hub:duplicate-continuation" }),
+    expect(snapshot.records).toContainEqual(
+      expect.objectContaining({
+        id: "hub:duplicate-continuation",
+        source: "model_hub_invocation",
+        task: "continuation",
+      }),
     );
     expect(snapshot.records[0]).toMatchObject({
       task: "image_generation",
@@ -312,7 +471,7 @@ describe("SqliteUsageCenterService", () => {
     });
     expect(snapshot.breakdowns.project).toEqual(
       expect.arrayContaining([
-        expect.objectContaining({ key: "__unlinked__", label: "未关联作品", invocationCount: 1 }),
+        expect.objectContaining({ key: "__unlinked__", label: "未关联作品", invocationCount: 2 }),
         expect.objectContaining({ key: PROJECT_ID, label: "测试长篇", invocationCount: 2 }),
       ]),
     );
@@ -341,6 +500,33 @@ describe("SqliteUsageCenterService", () => {
         monthKey: "2026-08",
         currency: "CNY",
         limitMicros: "30000000",
+      }),
+    ]);
+  });
+
+  it("shows a linked continuation exactly once and keeps the invocation facts on that row", async () => {
+    const executor = await createSeededExecutor();
+    await seedCurrentGenerationAttempt(executor, "continuation");
+
+    const snapshot = await new SqliteUsageCenterService(executor).read({
+      ...query(),
+      task: "continuation",
+    });
+
+    expect(snapshot.records.map(({ id }) => id)).toEqual([
+      `generation:${CURRENT_RUN_ID}:1`,
+      "hub:duplicate-continuation",
+      `generation:${RUN_ID}:1`,
+    ]);
+    expect(
+      snapshot.records.filter(({ invocationId }) => invocationId === "current-continuation"),
+    ).toEqual([
+      expect.objectContaining({
+        id: `generation:${CURRENT_RUN_ID}:1`,
+        privacyPolicy: "local_preferred",
+        dataDestination: "remote",
+        sendCount: 1,
+        automaticRetryCount: 0,
       }),
     ]);
   });
@@ -402,8 +588,8 @@ describe("SqliteUsageCenterService", () => {
 
     const snapshot = await service.read({ ...query(), detailLimit: 1 });
 
-    expect(snapshot.summary.invocationCount).toBe(3);
-    expect(snapshot.totalMatchingRecords).toBe(3);
+    expect(snapshot.summary.invocationCount).toBe(4);
+    expect(snapshot.totalMatchingRecords).toBe(4);
     expect(snapshot.records).toHaveLength(1);
     expect(snapshot.detailsTruncated).toBe(true);
   });
@@ -547,6 +733,7 @@ async function createSeededExecutor(): Promise<NodeSqliteExecutor> {
     currency: "CNY",
     occurredAt: "2026-08-08T08:00:01.000Z",
     errorCode: null,
+    providerDispatchStartedAt: "2026-08-08T08:00:00.500Z",
   });
   await seedInvocation(executor, {
     id: "embedding-call",
@@ -662,6 +849,7 @@ async function seedCurrentGenerationAttempt(
     currency: "CNY",
     occurredAt: "2026-08-08T13:00:00.000Z",
     errorCode: null,
+    providerDispatchStartedAt: "2026-08-08T12:59:59.000Z",
   });
   await executor.execute(
     `INSERT INTO ai_generation_runs (
@@ -743,6 +931,7 @@ async function seedInvocation(
       | "stream_parse"
       | "response_normalization"
       | null;
+    visibleContentLength?: number | null;
     providerDispatchStartedAt?: string | null;
   }>,
 ): Promise<void> {
@@ -753,10 +942,10 @@ async function seedInvocation(
        attempt, fallback_from_invocation_id, privacy_policy, data_destination,
        maximum_cost_micros, currency, input_tokens, output_tokens,
        cached_input_tokens, estimated_cost_micros, error_code, error_summary,
-       failure_stage, provider_dispatch_started_at,
+       failure_stage, visible_content_length, provider_dispatch_started_at,
        started_at, completed_at, created_at, revision
      ) VALUES (?, ?, NULL, ?, NULL, ?, ?, 'task_primary', ?, 1, NULL, ?, ?,
-       NULL, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, 2)`,
+       NULL, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, 2)`,
     [
       input.id,
       input.task,
@@ -773,6 +962,7 @@ async function seedInvocation(
       input.errorCode,
       input.errorCode === null ? null : "供应商请求超时",
       input.failureStage ?? null,
+      input.visibleContentLength ?? null,
       input.providerDispatchStartedAt ?? null,
       input.occurredAt,
       input.occurredAt,

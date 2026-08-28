@@ -238,11 +238,18 @@ export function ProfessionalCreatePage() {
       if (projectCreatedAt === null) {
         throw new Error("未完成创建的项目缺少安全校验信息，请从作品库打开项目确认现状。");
       }
-      await runtime.projectSeeds.saveForProject(projectId, seedForProject);
-      await provisionProfessionalWorkspace(runtime, projectId, projectCreatedAt, {
-        ...draft,
-        projectName,
-      });
+      const savedProjectSeed = await runtime.projectSeeds.saveForProject(projectId, seedForProject);
+      await provisionProfessionalWorkspace(
+        runtime,
+        projectId,
+        projectCreatedAt,
+        {
+          ...draft,
+          projectName,
+        },
+        savedProjectSeed.seed,
+        savedProjectSeed.revision,
+      );
       setCreatedProject({ id: projectId, name: projectName });
       setPendingProjectId(null);
       setPendingProjectCreatedAt(null);
@@ -417,6 +424,8 @@ async function provisionProfessionalWorkspace(
   projectId: string,
   expectedProjectCreatedAt: string,
   draft: ProfessionalSetupDraft,
+  projectSeed: ProjectSeed,
+  projectSeedRevision: number,
 ): Promise<void> {
   const domainProjectId = parseDomainUuidV7(projectId);
   if (!domainProjectId.ok) {
@@ -490,24 +499,14 @@ async function provisionProfessionalWorkspace(
     throw facts.error;
   }
 
-  await ensureStoryFact(runtime, facts.value, {
-    projectId,
-    factType: "character_profile",
-    contentText: labeledLines([["主角", draft.protagonist]]),
-    pending: true,
-  });
-  await ensureStoryFact(runtime, facts.value, {
-    projectId,
-    factType: "core_relationship",
-    contentText: labeledLines([["人物关系", draft.relationship]]),
-    pending: true,
-  });
-  await ensureStoryFact(runtime, facts.value, {
-    projectId,
-    factType: "world_rule",
-    contentText: labeledLines([["世界背景", draft.worldBackground]]),
-    pending: true,
-  });
+  for (const fact of buildProfessionalSetupFacts(draft)) {
+    await ensurePendingStoryFact(runtime, facts.value, {
+      projectId,
+      projectSeed,
+      projectSeedRevision,
+      ...fact,
+    });
+  }
   if (draft.pov.trim().length > 0) {
     await ensureProfessionalPreference(
       runtime,
@@ -526,15 +525,215 @@ async function provisionProfessionalWorkspace(
       draft.style,
     );
   }
-  await ensureStoryFact(runtime, facts.value, {
-    projectId,
-    factType: "writing_constraint",
-    contentText: labeledLines([
-      ["禁止项", draft.boundaries],
-      ["其他创作约束", draft.otherConstraints],
-    ]),
-    lock: true,
-  });
+}
+
+interface ProfessionalSetupFactDraft {
+  readonly factType: string;
+  readonly contentText: string;
+  readonly sourceField: "characters" | "relationships" | "world" | "boundaries";
+  readonly inputKey:
+    "protagonist" | "relationship" | "worldBackground" | "boundaries" | "otherConstraints";
+  readonly originalInput: string;
+  readonly sourceSegment: string;
+}
+
+function buildProfessionalSetupFacts(
+  draft: ProfessionalSetupDraft,
+): readonly ProfessionalSetupFactDraft[] {
+  const facts: ProfessionalSetupFactDraft[] = [];
+  const identities =
+    /(?:是|担任|任职|作为|身份为|职业(?:是|为)|\d+岁|[零一二三四五六七八九十百]+岁)/u;
+
+  for (const segment of splitSetupSegments(draft.protagonist, /[\r\n；;]+/u)) {
+    const normalized = stripSetupLabel(segment, ["人物", "主角", "身份", "人物身份"]);
+    if (identities.test(normalized)) {
+      facts.push({
+        factType: "character_identity",
+        contentText: `人物身份：${normalized}`,
+        sourceField: "characters",
+        inputKey: "protagonist",
+        originalInput: draft.protagonist,
+        sourceSegment: segment,
+      });
+      continue;
+    }
+    for (const name of splitSetupSegments(normalized, /[、]+/u)) {
+      facts.push({
+        factType: "character_profile",
+        contentText: `人物：${name}`,
+        sourceField: "characters",
+        inputKey: "protagonist",
+        originalInput: draft.protagonist,
+        sourceSegment: segment,
+      });
+    }
+  }
+
+  for (const relationship of splitSetupSegments(draft.relationship, /[\r\n；;]+/u)) {
+    const normalized = stripSetupLabel(relationship, ["人物关系", "关系"]);
+    if (normalized.length === 0) continue;
+    facts.push({
+      factType: "core_relationship",
+      contentText: `人物关系：${normalized}`,
+      sourceField: "relationships",
+      inputKey: "relationship",
+      originalInput: draft.relationship,
+      sourceSegment: relationship,
+    });
+  }
+
+  for (const segment of splitSetupSegments(draft.worldBackground, /[\r\n；;]+/u)) {
+    const location = readLabeledSetupValue(segment, ["地点", "场景", "地名"]);
+    const reliableLocations =
+      location === null
+        ? readReliableUnlabeledLocationList(segment)
+        : splitSetupSegments(location, /[、,，]+/u);
+    if (reliableLocations !== null) {
+      for (const place of reliableLocations) {
+        facts.push({
+          factType: "location",
+          contentText: `地点：${place}`,
+          sourceField: "world",
+          inputKey: "worldBackground",
+          originalInput: draft.worldBackground,
+          sourceSegment: segment,
+        });
+      }
+      continue;
+    }
+    const world = stripSetupLabel(segment, ["世界背景", "世界观", "世界", "规则"]);
+    if (world.length === 0) continue;
+    facts.push({
+      factType: "world_setting",
+      contentText: `世界背景：${world}`,
+      sourceField: "world",
+      inputKey: "worldBackground",
+      originalInput: draft.worldBackground,
+      sourceSegment: segment,
+    });
+  }
+
+  for (const boundary of splitSetupSegments(draft.boundaries, /[\r\n；;，,。]+/u)) {
+    const normalized = stripSetupLabel(boundary, ["禁止项"]);
+    if (normalized.length === 0) continue;
+    facts.push({
+      factType: "writing_constraint",
+      contentText: `禁止项：${normalized}`,
+      sourceField: "boundaries",
+      inputKey: "boundaries",
+      originalInput: draft.boundaries,
+      sourceSegment: boundary,
+    });
+  }
+  for (const constraint of splitSetupSegments(draft.otherConstraints, /[\r\n；;，,。]+/u)) {
+    const normalized = stripSetupLabel(constraint, ["其他创作约束", "创作约束"]);
+    if (normalized.length === 0) continue;
+    facts.push({
+      factType: "writing_constraint",
+      contentText: `其他创作约束：${normalized}`,
+      sourceField: "boundaries",
+      inputKey: "otherConstraints",
+      originalInput: draft.otherConstraints,
+      sourceSegment: constraint,
+    });
+  }
+
+  const seen = new Set<string>();
+  return Object.freeze(
+    facts.filter((fact) => {
+      const key = `${fact.factType}\u0000${fact.contentText}`;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    }),
+  );
+}
+
+function splitSetupSegments(value: string, separator: RegExp): readonly string[] {
+  return Object.freeze(
+    value
+      .split(separator)
+      .map((segment) => segment.trim())
+      .filter((segment) => segment.length > 0),
+  );
+}
+
+function stripSetupLabel(value: string, labels: readonly string[]): string {
+  return readLabeledSetupValue(value, labels) ?? value.trim();
+}
+
+function readLabeledSetupValue(value: string, labels: readonly string[]): string | null {
+  const normalized = value.trim();
+  for (const label of labels) {
+    const prefix = new RegExp(`^${label}\\s*[：:]\\s*`, "u");
+    if (!prefix.test(normalized)) continue;
+    return normalized.replace(prefix, "").trim();
+  }
+  return null;
+}
+
+const RELIABLE_LOCATION_NAME_SUFFIXES = Object.freeze([
+  "港口",
+  "机场",
+  "车站",
+  "学校",
+  "学院",
+  "医院",
+  "剧院",
+  "广场",
+  "码头",
+  "城堡",
+  "城市",
+  "旧城",
+  "新城",
+  "山庄",
+  "村庄",
+  "街区",
+  "海域",
+  "群岛",
+  "大陆",
+  "崖",
+  "海",
+  "港",
+  "城",
+  "镇",
+  "村",
+  "岛",
+  "洲",
+  "山",
+  "河",
+  "湖",
+  "谷",
+  "原",
+  "林",
+  "湾",
+  "岸",
+  "巷",
+  "街",
+  "路",
+  "桥",
+  "塔",
+  "宫",
+  "寺",
+  "站",
+]);
+
+function readReliableUnlabeledLocationList(value: string): readonly string[] | null {
+  const normalized = value.trim();
+  if (!/[、,，]/u.test(normalized) || /[：:；;。！？!?\r\n]/u.test(normalized)) return null;
+  const places = normalized.split(/[、,，]/u).map((place) => place.trim());
+  if (places.length < 2 || places.length > 8 || places.some((place) => place.length === 0)) {
+    return null;
+  }
+  if (!places.every(isReliableShortLocationName)) return null;
+  return Object.freeze(places);
+}
+
+function isReliableShortLocationName(value: string): boolean {
+  const characters = Array.from(value);
+  if (characters.length < 2 || characters.length > 12) return false;
+  if (!/^[\p{Script=Han}·]+$/u.test(value)) return false;
+  return RELIABLE_LOCATION_NAME_SUFFIXES.some((suffix) => value.endsWith(suffix));
 }
 
 async function ensureProfessionalPreference(
@@ -571,15 +770,19 @@ function splitPreferenceText(value: string, maximumUtf16Length: number): readonl
   return Object.freeze(chunks);
 }
 
-async function ensureStoryFact(
+async function ensurePendingStoryFact(
   runtime: ReturnType<typeof useRuntime>,
   existingFacts: readonly StoryFact[],
   input: Readonly<{
     projectId: string;
+    projectSeed: ProjectSeed;
+    projectSeedRevision: number;
     factType: string;
     contentText: string;
-    pending?: boolean;
-    lock?: boolean;
+    sourceField: ProfessionalSetupFactDraft["sourceField"];
+    inputKey: ProfessionalSetupFactDraft["inputKey"];
+    originalInput: string;
+    sourceSegment: string;
   }>,
 ): Promise<void> {
   if (input.contentText.length === 0) return;
@@ -588,19 +791,34 @@ async function ensureStoryFact(
     return snapshot.factType === input.factType && snapshot.contentText === input.contentText;
   });
   if (exists) return;
+  const seedField = input.projectSeed[input.sourceField];
   const command = {
     projectId: input.projectId,
     factType: input.factType,
     contentText: input.contentText,
+    structuredValue: {
+      schemaVersion: "inkshadow.professional-setup-fact-draft.v1",
+      sourceKind: "project_seed",
+      projectSeed: {
+        seedId: input.projectSeed.seedId,
+        revision: input.projectSeedRevision,
+        journeyKind: input.projectSeed.journeyKind,
+      },
+      field: {
+        fieldName: input.sourceField,
+        inputKey: input.inputKey,
+        source: seedField.source,
+        origin: seedField.origin,
+        confirmation: seedField.confirmation,
+      },
+      originalInput: input.originalInput,
+      originalInputLength: input.originalInput.length,
+      sourceSegment: input.sourceSegment,
+      derivation: "local_deterministic_split",
+    },
     actorId: runtime.story.actorId,
   };
-  const result = input.pending
-    ? await runtime.story.factService.stageUserDraftFact(command)
-    : await runtime.story.factService.createFormalUserFact({
-        ...command,
-        lock: input.lock ?? false,
-        humanConfirmed: true,
-      });
+  const result = await runtime.story.factService.stageUserDraftFact(command);
   if (!result.ok) throw result.error;
 }
 
@@ -608,7 +826,7 @@ function deriveProfessionalSetupSeed(
   input: Parameters<typeof deriveProfessionalProjectSeed>[0],
 ): ProjectSeed {
   let seed = deriveProfessionalProjectSeed(input);
-  for (const key of ["characters", "relationships", "world"] as const) {
+  for (const key of ["characters", "relationships", "world", "boundaries"] as const) {
     const field = seed[key];
     if (field.values.length === 0) continue;
     seed = updateProjectSeedField(seed, key, {

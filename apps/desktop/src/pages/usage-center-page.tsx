@@ -370,7 +370,7 @@ function UsageSummaryCards({ summary }: { readonly summary: UsageAggregate }) {
       />
       <SummaryCard
         title={`${formatInteger(summary.invocationCount)} 次`}
-        description={`${formatInteger(summary.successCount)} 成功 · ${formatInteger(summary.failureCount)} 失败 · ${formatInteger(summary.activeCount)} 进行中`}
+        description={`${formatInteger(summary.successCount)} 次完整结果 · ${formatInteger(summary.partialCount)} 次部分结果 · ${formatInteger(summary.failureCount)} 次失败或待核对 · ${formatInteger(summary.activeCount)} 次进行中`}
       />
       <SummaryCard
         title={`${formatInteger(summary.inputTokens + summary.outputTokens)} 个内容额度`}
@@ -389,10 +389,16 @@ function UsageSummaryCards({ summary }: { readonly summary: UsageAggregate }) {
 }
 
 function UsageAttentionSummary({ summary }: { readonly summary: UsageAggregate }) {
-  if (summary.failureCount === 0 && summary.activeCount === 0 && summary.costUnknownCount === 0) {
+  if (
+    summary.partialCount === 0 &&
+    summary.failureCount === 0 &&
+    summary.activeCount === 0 &&
+    summary.costUnknownCount === 0
+  ) {
     return null;
   }
   const facts = [
+    summary.partialCount > 0 ? `${formatInteger(summary.partialCount)} 次已保留部分结果` : null,
     summary.failureCount > 0 ? `${formatInteger(summary.failureCount)} 次失败或结果不明确` : null,
     summary.activeCount > 0 ? `${formatInteger(summary.activeCount)} 次尚未终结` : null,
     summary.costUnknownCount > 0 ? `${formatInteger(summary.costUnknownCount)} 次费用未知` : null,
@@ -517,8 +523,10 @@ function BreakdownPanel({
                   {entry.costUnknownCount > 0 ? ` · ${String(entry.costUnknownCount)} 次未知` : ""}
                 </TableCell>
                 <TableCell>
-                  {formatInteger(entry.successCount)} 成功 · {formatInteger(entry.failureCount)}{" "}
-                  失败 · {formatInteger(entry.activeCount)} 进行中
+                  {formatInteger(entry.successCount)} 次完整结果 ·{" "}
+                  {formatInteger(entry.partialCount)} 次部分结果 ·{" "}
+                  {formatInteger(entry.failureCount)} 次失败或待核对 ·{" "}
+                  {formatInteger(entry.activeCount)} 次进行中
                 </TableCell>
                 <TableCell>{formatInteger(entry.localCount)}</TableCell>
               </TableRow>
@@ -580,13 +588,7 @@ function UsageDetailsTable({ snapshot }: { readonly snapshot: UsageCenterSnapsho
                 <TableCell>{formatRecordTokens(record)}</TableCell>
                 <TableCell>{formatRecordCost(record)}</TableCell>
                 <TableCell>
-                  <Badge tone={statusTone(record.status)}>{statusLabel(record.status)}</Badge>
-                  {record.errorCode !== null && (
-                    <>
-                      <br />
-                      <span>{usageRecordErrorDescription(record.errorCode)}</span>
-                    </>
-                  )}
+                  <UsageRecordResult record={record} />
                 </TableCell>
                 <TableCell>
                   <Badge tone={destinationTone(record.dataDestination)}>
@@ -601,6 +603,39 @@ function UsageDetailsTable({ snapshot }: { readonly snapshot: UsageCenterSnapsho
         </Table>
       </CardContent>
     </Card>
+  );
+}
+
+function UsageRecordResult({ record }: { readonly record: UsageCenterEvent }) {
+  const facts = [
+    record.visibleContentLength === null
+      ? null
+      : `${formatInteger(record.visibleContentLength)} 个可见字符`,
+    record.sendCount === null ? null : `发送 ${formatInteger(record.sendCount)} 次`,
+    record.automaticRetryCount === null
+      ? null
+      : `自动重试 ${formatInteger(record.automaticRetryCount)} 次`,
+  ].filter((fact): fact is string => fact !== null);
+  return (
+    <>
+      <Badge tone={statusTone(record.status)}>{statusLabel(record.status)}</Badge>
+      {facts.length > 0 && (
+        <>
+          <br />
+          <span>{facts.join(" · ")}</span>
+        </>
+      )}
+      {record.errorCode !== null && (
+        <>
+          <br />
+          <span>
+            {record.status === "partial"
+              ? "返回没有完整结束，已收到的文字仍安全保留；正文没有改变。"
+              : usageRecordErrorDescription(record.errorCode)}
+          </span>
+        </>
+      )}
+    </>
   );
 }
 
@@ -658,7 +693,7 @@ function formatRecordCost(record: UsageCenterEvent): string {
 
 function formatRecordTokens(record: UsageCenterEvent): string {
   if (record.inputTokens === null || record.outputTokens === null) {
-    return "供应商未返回";
+    return "内容额度未记录";
   }
   const cached =
     record.cachedInputTokens !== null && record.cachedInputTokens > 0
@@ -689,11 +724,13 @@ function statusLabel(status: UsageEventStatus): string {
   return {
     queued: "等待发送",
     running: "服务处理中",
-    succeeded: "成功",
-    failed: "失败",
+    succeeded: "已得到完整结果",
+    partial: "已保留部分结果",
+    failed: "未得到结果",
     cancelled: "已取消",
-    ambiguous: "结果不明确",
-    not_dispatched: "未发送",
+    pre_dispatch_cancelled: "发送前安全终止",
+    ambiguous: "结果待核对",
+    not_dispatched: "发送前失败",
   }[status];
 }
 
@@ -702,10 +739,12 @@ function statusTone(status: UsageEventStatus): BadgeTone {
     queued: "neutral",
     running: "accent",
     succeeded: "success",
+    partial: "warning",
     failed: "danger",
     cancelled: "neutral",
+    pre_dispatch_cancelled: "neutral",
     ambiguous: "warning",
-    not_dispatched: "neutral",
+    not_dispatched: "danger",
   }[status] as BadgeTone;
 }
 

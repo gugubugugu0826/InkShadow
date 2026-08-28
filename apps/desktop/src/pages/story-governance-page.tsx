@@ -82,7 +82,11 @@ import { WritingPreferencesPanel } from "../components/writing-preferences-panel
 import { NovelSkillPanel } from "../components/novel-skill-panel";
 import { ContextHistoryPanel } from "../components/context-history-panel";
 import { ChapterSummaryPanel } from "../components/chapter-summary-panel";
-import { StorySettingsTools, type ManualFactFormDraft } from "../components/story-settings-tools";
+import {
+  BulkStorySettingsTool,
+  StorySettingsTools,
+  type ManualFactFormDraft,
+} from "../components/story-settings-tools";
 import type { ContinuousStoryStateDashboard } from "../infrastructure/continuous-story-state-extraction";
 
 const FORMAL_KIND_OPTIONS = FORMAL_RECORD_KINDS.map((kind) => ({
@@ -236,6 +240,74 @@ function StoryFactEvidenceDetails({
   );
 }
 
+interface LocalBulkSettingEvidence {
+  readonly sourceText: string;
+  readonly startOffset: number;
+  readonly endOffset: number;
+  readonly sourceLength: number;
+}
+
+interface ProfessionalSetupEvidence {
+  readonly originalInput: string;
+  readonly sourceSegment: string;
+}
+
+function readProfessionalSetupEvidence(
+  snapshot: StoryFactSnapshot,
+): ProfessionalSetupEvidence | null {
+  const structured = snapshot.structuredValue;
+  if (!isStoryObject(structured)) return null;
+  if (
+    structured.schemaVersion !== "inkshadow.professional-setup-fact-draft.v1" ||
+    structured.sourceKind !== "project_seed" ||
+    typeof structured.originalInput !== "string" ||
+    structured.originalInput.trim().length === 0 ||
+    typeof structured.sourceSegment !== "string" ||
+    structured.sourceSegment.trim().length === 0 ||
+    !isStoryObject(structured.projectSeed) ||
+    !isStoryObject(structured.field)
+  ) {
+    return null;
+  }
+  return {
+    originalInput: structured.originalInput,
+    sourceSegment: structured.sourceSegment,
+  };
+}
+
+function readLocalBulkSettingEvidence(
+  snapshot: StoryFactSnapshot,
+): LocalBulkSettingEvidence | null {
+  const structured = snapshot.structuredValue;
+  if (!isStoryObject(structured)) return null;
+  const sourceRange = structured.sourceRange;
+  if (
+    structured.schemaVersion !== "inkshadow.local-bulk-setting-draft.v1" ||
+    structured.sourceKind !== "local_text" ||
+    typeof structured.sourceText !== "string" ||
+    !isStoryObject(sourceRange) ||
+    sourceRange.unit !== "utf16_code_unit" ||
+    typeof sourceRange.startOffset !== "number" ||
+    typeof sourceRange.endOffset !== "number" ||
+    typeof sourceRange.sourceLength !== "number" ||
+    !Number.isInteger(sourceRange.startOffset) ||
+    !Number.isInteger(sourceRange.endOffset) ||
+    !Number.isInteger(sourceRange.sourceLength) ||
+    sourceRange.startOffset < 0 ||
+    sourceRange.endOffset <= sourceRange.startOffset ||
+    sourceRange.sourceLength < sourceRange.endOffset ||
+    structured.sourceText.length !== sourceRange.endOffset - sourceRange.startOffset
+  ) {
+    return null;
+  }
+  return {
+    sourceText: structured.sourceText,
+    startOffset: sourceRange.startOffset,
+    endOffset: sourceRange.endOffset,
+    sourceLength: sourceRange.sourceLength,
+  };
+}
+
 function PendingFactsSection({
   id,
   title,
@@ -274,7 +346,8 @@ function PendingFactsSection({
       <div className="story-governance-grid">
         {facts.map((fact) => {
           const snapshot = fact.toSnapshot();
-          const fromSetup = userDraftFactIdentity(snapshot) !== null;
+          const bulkEvidence = readLocalBulkSettingEvidence(snapshot);
+          const fromSetup = bulkEvidence === null && userDraftFactIdentity(snapshot) !== null;
           return (
             <Card key={fact.id}>
               <CardHeader>
@@ -282,7 +355,12 @@ function PendingFactsSection({
                   <div>
                     <CardTitle>{factTypeLabel(snapshot.factType)}</CardTitle>
                     <CardDescription>
-                      {fromSetup ? "来自专业创作输入" : "从正文原文整理"}，等待你的决定。
+                      {bulkEvidence !== null
+                        ? "来自本地批量整理"
+                        : fromSetup
+                          ? "来自专业创作输入"
+                          : "从正文原文整理"}
+                      ，等待你的决定。
                     </CardDescription>
                   </div>
                   <Badge tone="warning">待确认</Badge>
@@ -294,7 +372,30 @@ function PendingFactsSection({
                   className="story-governance-evidence"
                   label={fromSetup ? "查看输入来源" : "查看原文依据"}
                 >
-                  {fromSetup ? (
+                  {bulkEvidence !== null ? (
+                    <>
+                      <dl>
+                        <div>
+                          <dt>来源</dt>
+                          <dd>本地批量整理</dd>
+                        </div>
+                        <div>
+                          <dt>字符范围</dt>
+                          <dd>
+                            第 {String(bulkEvidence.startOffset + 1)} 至{" "}
+                            {String(bulkEvidence.endOffset)} 个字符
+                          </dd>
+                        </div>
+                        <div>
+                          <dt>完整输入长度</dt>
+                          <dd>{String(bulkEvidence.sourceLength)} 个字符</dd>
+                        </div>
+                      </dl>
+                      <blockquote className="story-source-quote">
+                        {bulkEvidence.sourceText}
+                      </blockquote>
+                    </>
+                  ) : fromSetup ? (
                     <>
                       <dl>
                         <div>
@@ -1430,7 +1531,7 @@ export function StoryGovernancePage() {
     const fields = readFormalFields(record);
     setFormalKind(record.kind);
     setFormalTitle(fields.title);
-    setFormalDescription(fields.description);
+    setFormalDescription(fields.editableDescription);
     setFormalDialog({ mode: "edit", record });
   }
 
@@ -1439,10 +1540,18 @@ export function StoryGovernancePage() {
       return;
     }
     setBusy(true);
-    const value = {
-      title: formalTitle.trim(),
-      description: formalDescription.trim(),
-    };
+    const value =
+      formalDialog.mode === "edit"
+        ? mergeFormalRecordFields(
+            formalDialog.record.currentValue,
+            formalDialog.record.kind,
+            formalTitle.trim(),
+            formalDescription.trim(),
+          )
+        : {
+            title: formalTitle.trim(),
+            description: formalDescription.trim(),
+          };
     const result =
       formalDialog.mode === "create"
         ? await runtime.story.formalRecordService.create({
@@ -2037,9 +2146,18 @@ export function StoryGovernancePage() {
                 <h2 id="direct-story-facts-title">当前设定</h2>
                 <p>每条设定都保留来源；从正文整理的内容可以展开查看原文依据。</p>
               </div>
-              <Button disabled={readonly || busy} onClick={openCreateFact}>
-                添加设定
-              </Button>
+              <div className="story-governance-actions">
+                <Button disabled={readonly || busy} onClick={openCreateFact}>
+                  添加设定
+                </Button>
+                <BulkStorySettingsTool
+                  key={projectIdParameter}
+                  runtime={runtime}
+                  projectId={projectIdParameter}
+                  readonly={readonly || busy}
+                  onChanged={load}
+                />
+              </div>
             </div>
 
             {directFormalFacts.length === 0 ? (
@@ -2059,6 +2177,8 @@ export function StoryGovernancePage() {
               <div className="story-governance-grid">
                 {directFormalFacts.map((fact) => {
                   const snapshot = fact.toSnapshot();
+                  const bulkEvidence = readLocalBulkSettingEvidence(snapshot);
+                  const professionalEvidence = readProfessionalSetupEvidence(snapshot);
                   const visibleEvidence = storyFactEvidenceForPresentation(
                     snapshot,
                     storyFactEvidenceByFactId.get(String(fact.id)),
@@ -2081,7 +2201,13 @@ export function StoryGovernancePage() {
                         <div className="card-heading-row">
                           <div>
                             <CardTitle>{factTypeLabel(snapshot.factType)}</CardTitle>
-                            <CardDescription>{factSourceLabel(snapshot)}</CardDescription>
+                            <CardDescription>
+                              {bulkEvidence !== null
+                                ? "来自本地批量整理"
+                                : professionalEvidence !== null
+                                  ? "来自专业创作输入"
+                                  : factSourceLabel(snapshot)}
+                            </CardDescription>
                           </div>
                           <Badge
                             tone={snapshot.locked ? "accent" : needsCheck ? "warning" : "success"}
@@ -2098,11 +2224,53 @@ export function StoryGovernancePage() {
                           </p>
                         )}
                         <EvidenceDisclosure label="查看原文依据">
-                          <StoryFactEvidenceDetails
-                            evidence={visibleEvidence}
-                            chapters={chapters}
-                            sourceVersions={sourceVersions}
-                          />
+                          {bulkEvidence !== null ? (
+                            <>
+                              <dl>
+                                <div>
+                                  <dt>来源</dt>
+                                  <dd>本地批量整理</dd>
+                                </div>
+                                <div>
+                                  <dt>字符范围</dt>
+                                  <dd>
+                                    第 {String(bulkEvidence.startOffset + 1)} 至{" "}
+                                    {String(bulkEvidence.endOffset)} 个字符
+                                  </dd>
+                                </div>
+                                <div>
+                                  <dt>完整输入长度</dt>
+                                  <dd>{String(bulkEvidence.sourceLength)} 个字符</dd>
+                                </div>
+                              </dl>
+                              <blockquote className="story-source-quote">
+                                {bulkEvidence.sourceText}
+                              </blockquote>
+                            </>
+                          ) : professionalEvidence !== null ? (
+                            <>
+                              <dl>
+                                <div>
+                                  <dt>来源</dt>
+                                  <dd>专业创作表单</dd>
+                                </div>
+                              </dl>
+                              <p className="story-governance-meta">本条来源</p>
+                              <blockquote className="story-source-quote">
+                                {professionalEvidence.sourceSegment}
+                              </blockquote>
+                              <p className="story-governance-meta">原始输入</p>
+                              <blockquote className="story-source-quote">
+                                {professionalEvidence.originalInput}
+                              </blockquote>
+                            </>
+                          ) : (
+                            <StoryFactEvidenceDetails
+                              evidence={visibleEvidence}
+                              chapters={chapters}
+                              sourceVersions={sourceVersions}
+                            />
+                          )}
                         </EvidenceDisclosure>
                       </CardContent>
                       <CardFooter>
@@ -2442,11 +2610,18 @@ export function StoryGovernancePage() {
         />
       )}
 
-      <InlineAlert
-        tone="warning"
-        title="逐章云端识别暂不可用"
-        description="一次识别会把最新一章完整正文分别发送给人物提取和世界设定提取，最多两次模型服务调用并可能产生两次费用。当前页面还不能在发送前持久展示精确模型服务、精确模型并把不确定结果锁定为不可重发，因此入口保持停用；正文和已有设定不受影响。"
-      />
+      <section aria-label="逐章云端识别说明">
+        <InlineAlert
+          tone="warning"
+          title="逐章云端识别暂不可用"
+          description="入口暂时停用；正文和已有设定不受影响。"
+        />
+        <EvidenceDisclosure label="查看停用原因">
+          <p className="story-governance-copy">
+            一次识别会把最新一章完整正文分别发送给人物提取和世界设定提取，最多两次模型服务调用并可能产生两次费用。当前页面还不能在发送前持久展示精确模型服务、精确模型并把不确定结果锁定为不可重发，因此入口保持停用；正文和已有设定不受影响。
+          </p>
+        </EvidenceDisclosure>
+      </section>
 
       {unavailableDerivedSections.length > 0 && (
         <InlineAlert
@@ -2798,6 +2973,8 @@ export function StoryGovernancePage() {
                       const mergeNotice = storyFactMergeNotice(snapshot);
                       const ambiguousAlias = readAmbiguousStoryFactEntityAlias(snapshot);
                       const needsAliasResolution = storyFactNeedsEntityAliasResolution(snapshot);
+                      const bulkEvidence = readLocalBulkSettingEvidence(snapshot);
+                      const professionalEvidence = readProfessionalSetupEvidence(snapshot);
                       return (
                         <Card key={fact.id}>
                           <CardHeader>
@@ -2813,6 +2990,54 @@ export function StoryGovernancePage() {
                           </CardHeader>
                           <CardContent>
                             <p className="story-governance-copy">{storyFactContent(snapshot)}</p>
+                            {(bulkEvidence !== null || professionalEvidence !== null) && (
+                              <EvidenceDisclosure
+                                className="story-governance-evidence"
+                                label="查看原文依据"
+                              >
+                                {bulkEvidence !== null ? (
+                                  <>
+                                    <dl>
+                                      <div>
+                                        <dt>来源</dt>
+                                        <dd>本地批量整理</dd>
+                                      </div>
+                                      <div>
+                                        <dt>字符范围</dt>
+                                        <dd>
+                                          第 {String(bulkEvidence.startOffset + 1)} 至{" "}
+                                          {String(bulkEvidence.endOffset)} 个字符
+                                        </dd>
+                                      </div>
+                                      <div>
+                                        <dt>完整输入长度</dt>
+                                        <dd>{String(bulkEvidence.sourceLength)} 个字符</dd>
+                                      </div>
+                                    </dl>
+                                    <blockquote className="story-source-quote">
+                                      {bulkEvidence.sourceText}
+                                    </blockquote>
+                                  </>
+                                ) : professionalEvidence !== null ? (
+                                  <>
+                                    <dl>
+                                      <div>
+                                        <dt>来源</dt>
+                                        <dd>专业创作表单</dd>
+                                      </div>
+                                    </dl>
+                                    <p className="story-governance-meta">本条来源</p>
+                                    <blockquote className="story-source-quote">
+                                      {professionalEvidence.sourceSegment}
+                                    </blockquote>
+                                    <p className="story-governance-meta">原始输入</p>
+                                    <blockquote className="story-source-quote">
+                                      {professionalEvidence.originalInput}
+                                    </blockquote>
+                                  </>
+                                ) : null}
+                              </EvidenceDisclosure>
+                            )}
                             <div className="story-governance-meta">
                               <span>可信度 {Math.round(snapshot.confidence * 100)}%</span>
                               <span>修订 {String(snapshot.revision)}</span>
@@ -4182,7 +4407,7 @@ function buildCharacterGroups(
     const fields = readFormalFields(record);
     groups.set(`entity:${record.toSnapshot().recordKey}`, {
       name: fields.title,
-      aliases: [],
+      aliases: [...fields.aliases],
       facts: [],
       records: [record],
     });
@@ -4429,28 +4654,115 @@ function entityChapterIds(group: StoryEntityGroup): readonly string[] {
 function readFormalFields(record: FormalStoryRecord): {
   readonly title: string;
   readonly description: string;
+  readonly editableDescription: string;
+  readonly aliases: readonly string[];
 } {
-  return readStoryValueFields(record.currentValue, "旧结构化设定");
+  return readStoryValueFields(record.currentValue, "旧结构化设定", record.kind);
 }
 
 function readStoryValueFields(
   value: StoryValue,
   fallbackTitle: string,
+  kind?: FormalRecordKind,
 ): {
   readonly title: string;
   readonly description: string;
+  readonly editableDescription: string;
+  readonly aliases: readonly string[];
 } {
   if (isStoryObject(value)) {
-    const title = value.title;
-    const description = value.description;
-    if (typeof title === "string" && typeof description === "string") {
-      return { title, description };
+    if (kind === "character") {
+      const title = readFirstStoryString(value, ["name", "title", "canonicalName"]);
+      if (title !== null) {
+        const aliases = readStoryStringList(value.aliases);
+        const role = readFirstStoryString(value, ["role"]);
+        const traits = readStoryStringList(value.traits);
+        const knownInformation = readStoryStringList(value.knownInformation);
+        const editableDescription =
+          readFirstStoryString(value, ["description", "shortDescription"]) ?? "";
+        const descriptionLines = [
+          role === null ? null : `角色：${role}`,
+          editableDescription.length === 0 ? null : editableDescription,
+          traits.length === 0 ? null : `特质：${traits.join("、")}`,
+          knownInformation.length === 0 ? null : `已知信息：${knownInformation.join("、")}`,
+        ].filter((line): line is string => line !== null);
+        return {
+          title,
+          aliases,
+          editableDescription,
+          description:
+            descriptionLines.length > 0
+              ? descriptionLines.join("\n")
+              : "这条人物设定已按结构化字段保存，尚未补充可显示的说明。",
+        };
+      }
+    }
+    const title = readFirstStoryString(value, ["title"]);
+    const description = readFirstStoryString(value, ["description"]);
+    if (title !== null && description !== null) {
+      return { title, description, editableDescription: description, aliases: [] };
     }
   }
   return {
     title: fallbackTitle,
     description: "这条旧设定使用结构化格式保存；普通视图不会显示内部字段，请在人工表单中复核。",
+    editableDescription: "",
+    aliases: [],
   };
+}
+
+function readFirstStoryString(
+  value: Readonly<Record<string, StoryValue>>,
+  keys: readonly string[],
+): string | null {
+  for (const key of keys) {
+    const candidate = value[key];
+    if (typeof candidate !== "string") continue;
+    const normalized = candidate.trim();
+    if (normalized.length > 0) return normalized;
+  }
+  return null;
+}
+
+function readStoryStringList(value: StoryValue | undefined): readonly string[] {
+  if (!Array.isArray(value)) return [];
+  return Object.freeze(
+    [...new Set(value.flatMap((item) => (typeof item === "string" ? [item.trim()] : [])))].filter(
+      (item) => item.length > 0,
+    ),
+  );
+}
+
+function mergeFormalRecordFields(
+  currentValue: StoryValue,
+  kind: FormalRecordKind,
+  title: string,
+  description: string,
+): StoryValue {
+  if (!isStoryObject(currentValue)) return { title, description };
+  const merged: Record<string, StoryValue> = { ...currentValue };
+  if (kind !== "character") {
+    merged.title = title;
+    merged.description = description;
+    return merged;
+  }
+
+  let updatedName = false;
+  for (const key of ["name", "title", "canonicalName"] as const) {
+    if (!Object.prototype.hasOwnProperty.call(currentValue, key)) continue;
+    merged[key] = title;
+    updatedName = true;
+  }
+  if (!updatedName) merged.name = title;
+
+  let updatedDescription = false;
+  for (const key of ["description", "shortDescription"] as const) {
+    if (!Object.prototype.hasOwnProperty.call(currentValue, key)) continue;
+    merged[key] = description;
+    updatedDescription = true;
+  }
+  if (!updatedDescription) merged.description = description;
+  return merged;
 }
 
 function defaultEvidence(content: string): string {
@@ -4553,6 +4865,7 @@ function factTypeLabel(factType: string): string {
     return option.label;
   }
   const labels: Readonly<Record<string, string>> = {
+    character_profile: "人物档案",
     core_relationship: "核心人物关系",
     character_death: "人物生死状态",
     major_ability_change: "重大能力变化",
@@ -4566,6 +4879,8 @@ function factTypeLabel(factType: string): string {
     plotline_state: "剧情线进展",
     pacing_metric: "节奏证据",
     world_setting: "世界背景",
+    location: "地点",
+    writing_constraint: "写作与禁止项",
     timeline_event: "时间线事件",
     character_voice: "人物说话方式",
     pov_knowledge: "人物知道的信息",

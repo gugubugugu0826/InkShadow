@@ -137,29 +137,34 @@ describe("professional project creation", () => {
         .filter(({ status }) => status === "unconfirmed")
         .map(({ factType }) => factType)
         .sort(),
-    ).toEqual(["character_profile", "core_relationship", "world_rule"]);
+    ).toEqual(
+      [
+        "character_profile",
+        "core_relationship",
+        "world_setting",
+        "writing_constraint",
+        "writing_constraint",
+      ].sort(),
+    );
     expect(
       factSnapshots
         .filter(({ status }) => status === "formal")
         .map(({ factType }) => factType)
         .sort(),
-    ).toEqual(["writing_constraint"]);
+    ).toEqual([]);
     const writingDashboard = await runtime.story.writingFeedback.loadDashboard(project.id);
     expect(writingDashboard.preferences.map(({ preferenceText }) => preferenceText).sort()).toEqual(
       ["写作风格：克制、短句", "叙事视角：第三人称限知"],
     );
     expect(
-      facts.value.some((fact) =>
-        fact
-          .toSnapshot()
-          .contentText?.includes("禁止项：不新增超自然力量\n其他创作约束：每章保持单一视角"),
-      ),
+      facts.value.some((fact) => fact.toSnapshot().contentText === "禁止项：不新增超自然力量"),
     ).toBe(true);
     expect(
-      facts.value
-        .find((fact) => fact.toSnapshot().contentText?.includes("其他创作约束：每章保持单一视角"))
-        ?.toSnapshot().locked,
+      facts.value.some(
+        (fact) => fact.toSnapshot().contentText === "其他创作约束：每章保持单一视角",
+      ),
     ).toBe(true);
+    expect(factSnapshots.every(({ locked }) => !locked)).toBe(true);
     expect(
       facts.value.some(
         (fact) =>
@@ -180,7 +185,7 @@ describe("professional project creation", () => {
       style: { values: ["克制、短句"], confirmation: "confirmed" },
       boundaries: {
         values: ["禁止项：不新增超自然力量", "其他创作约束：每章保持单一视角"],
-        confirmation: "confirmed",
+        confirmation: "unconfirmed",
       },
     });
     expect(generate).not.toHaveBeenCalled();
@@ -208,6 +213,202 @@ describe("professional project creation", () => {
       "/settings#model-routing",
     );
   });
+
+  it("splits batch setup into typed pending facts without silently confirming any setting", async () => {
+    const { runtime } = renderPage();
+    const user = userEvent.setup();
+
+    await user.type(screen.getByRole("textbox", { name: "项目名称" }), "守潮人档案");
+    await user.click(screen.getByText("人物与世界"));
+    fireEvent.change(screen.getByRole("textbox", { name: /^主角/u }), {
+      target: { value: "林深、雾语；林深是守潮人" },
+    });
+    fireEvent.change(screen.getByRole("textbox", { name: /^人物关系/u }), {
+      target: { value: "林深和雾语是搭档；雾语与赵伯是老邻居" },
+    });
+    fireEvent.change(screen.getByRole("textbox", { name: /^世界背景/u }), {
+      target: { value: "地点：望潮崖、浓雾海；世界背景：海上终年有雾" },
+    });
+    await user.click(screen.getByText("视角、风格与创作约束"));
+    fireEvent.change(screen.getByRole("textbox", { name: /^禁止项/u }), {
+      target: { value: "禁止自动接受生成结果，禁止写总结式结尾" },
+    });
+    fireEvent.change(screen.getByRole("textbox", { name: /^其他创作约束/u }), {
+      target: { value: "每章保持单一视角；人物不得无依据改名" },
+    });
+    await user.click(screen.getByRole("button", { name: "创建项目并准备工作区" }));
+    await screen.findByText("专业项目已准备好");
+
+    const projects = await runtime.useCases.listProjects.execute({ statuses: ["active"] });
+    if (!projects.ok || projects.value[0] === undefined) throw new Error("批量设定项目未创建。");
+    const storyProjectId = parseUuidV7(projects.value[0].id);
+    if (!storyProjectId.ok) throw storyProjectId.error;
+    const facts = await runtime.story.facts.listByProjectId(storyProjectId.value);
+    if (!facts.ok) throw facts.error;
+    const snapshots = facts.value.map((fact) => fact.toSnapshot());
+
+    expect(snapshots.every(({ status }) => status === "unconfirmed")).toBe(true);
+    expect(snapshots.every(({ locked }) => !locked)).toBe(true);
+    expect(snapshots.map(({ factType }) => factType).sort()).toEqual(
+      [
+        "character_profile",
+        "character_profile",
+        "character_identity",
+        "core_relationship",
+        "core_relationship",
+        "location",
+        "location",
+        "world_setting",
+        "writing_constraint",
+        "writing_constraint",
+        "writing_constraint",
+        "writing_constraint",
+      ].sort(),
+    );
+    expect(snapshots.map(({ contentText }) => contentText)).toEqual(
+      expect.arrayContaining([
+        "人物：林深",
+        "人物：雾语",
+        "人物身份：林深是守潮人",
+        "人物关系：林深和雾语是搭档",
+        "人物关系：雾语与赵伯是老邻居",
+        "地点：望潮崖",
+        "地点：浓雾海",
+        "世界背景：海上终年有雾",
+        "禁止项：禁止自动接受生成结果",
+        "禁止项：禁止写总结式结尾",
+        "其他创作约束：每章保持单一视角",
+        "其他创作约束：人物不得无依据改名",
+      ]),
+    );
+    const seed = await runtime.projectSeeds.findByProjectId(projects.value[0].id);
+    if (seed === null) throw new Error("专业创建没有保存可追溯的项目种子。");
+    expect(seed.seed.boundaries.confirmation).toBe("unconfirmed");
+    expect(snapshots.every(({ structuredValue }) => structuredValue !== null)).toBe(true);
+    const identity = snapshots.find(({ contentText }) => contentText === "人物身份：林深是守潮人");
+    expect(identity?.structuredValue).toMatchObject({
+      schemaVersion: "inkshadow.professional-setup-fact-draft.v1",
+      sourceKind: "project_seed",
+      projectSeed: {
+        seedId: seed.seed.seedId,
+        revision: seed.revision,
+        journeyKind: "professional",
+      },
+      field: {
+        fieldName: "characters",
+        inputKey: "protagonist",
+        source: "professional_setup",
+        origin: "professional_setup.protagonist",
+        confirmation: "unconfirmed",
+      },
+      originalInput: "林深、雾语；林深是守潮人",
+      sourceSegment: "林深是守潮人",
+      derivation: "local_deterministic_split",
+    });
+    const otherConstraint = snapshots.find(
+      ({ contentText }) => contentText === "其他创作约束：人物不得无依据改名",
+    );
+    expect(otherConstraint?.structuredValue).toMatchObject({
+      schemaVersion: "inkshadow.professional-setup-fact-draft.v1",
+      sourceKind: "project_seed",
+      projectSeed: {
+        seedId: seed.seed.seedId,
+        revision: seed.revision,
+        journeyKind: "professional",
+      },
+      field: {
+        fieldName: "boundaries",
+        inputKey: "otherConstraints",
+        source: "professional_setup",
+        origin: "professional_setup.boundaries",
+        confirmation: "unconfirmed",
+      },
+      originalInput: "每章保持单一视角；人物不得无依据改名",
+      sourceSegment: "人物不得无依据改名",
+      derivation: "local_deterministic_split",
+    });
+  });
+
+  it.each([
+    {
+      name: "无标签短地点名列表",
+      worldBackground: "望潮崖、浓雾海；世界背景：海上终年有雾",
+      expectedFacts: [
+        ["location", "地点：望潮崖"],
+        ["location", "地点：浓雾海"],
+        ["world_setting", "世界背景：海上终年有雾"],
+      ] as const,
+    },
+    {
+      name: "地点名与世界叙述混合",
+      worldBackground: "望潮崖、海上终年有雾",
+      expectedFacts: [["world_setting", "世界背景：望潮崖、海上终年有雾"]] as const,
+    },
+    {
+      name: "空世界背景",
+      worldBackground: "",
+      expectedFacts: [] as const,
+    },
+  ])(
+    "仅在整段可可靠判断时把$name拆成待确认地点",
+    async ({ expectedFacts, name, worldBackground }) => {
+      window.localStorage.clear();
+      const { runtime, unmount } = renderPage();
+      const user = userEvent.setup();
+      await user.type(screen.getByRole("textbox", { name: "项目名称" }), `地点判断-${name}`);
+      if (worldBackground.length > 0) {
+        await user.click(screen.getByText("人物与世界"));
+        fireEvent.change(screen.getByRole("textbox", { name: /^世界背景/u }), {
+          target: { value: worldBackground },
+        });
+      }
+      await user.click(screen.getByRole("button", { name: "创建项目并准备工作区" }));
+      await screen.findByText("专业项目已准备好");
+
+      const projects = await runtime.useCases.listProjects.execute({ statuses: ["active"] });
+      if (!projects.ok || projects.value[0] === undefined) throw new Error("地点判断项目未创建。");
+      const project = projects.value[0];
+      const storyProjectId = parseUuidV7(project.id);
+      if (!storyProjectId.ok) throw storyProjectId.error;
+      const facts = await runtime.story.facts.listByProjectId(storyProjectId.value);
+      if (!facts.ok) throw facts.error;
+      const snapshots = facts.value.map((fact) => fact.toSnapshot());
+      expect(snapshots.map(({ contentText, factType }) => [factType, contentText]).sort()).toEqual(
+        [...expectedFacts].sort(),
+      );
+      expect(snapshots.every(({ locked, status }) => status === "unconfirmed" && !locked)).toBe(
+        true,
+      );
+
+      const seed = await runtime.projectSeeds.findByProjectId(project.id);
+      if (seed === null) throw new Error("地点判断项目没有保存项目种子。");
+      expect(seed.seed.world).toMatchObject({
+        values: worldBackground.length === 0 ? [] : [worldBackground],
+        source: worldBackground.length === 0 ? null : "professional_setup",
+      });
+      for (const snapshot of snapshots) {
+        expect(snapshot.structuredValue).toMatchObject({
+          schemaVersion: "inkshadow.professional-setup-fact-draft.v1",
+          sourceKind: "project_seed",
+          projectSeed: {
+            seedId: seed.seed.seedId,
+            revision: seed.revision,
+            journeyKind: "professional",
+          },
+          field: {
+            fieldName: "world",
+            inputKey: "worldBackground",
+            source: seed.seed.world.source,
+            origin: seed.seed.world.origin,
+            confirmation: "unconfirmed",
+          },
+          originalInput: worldBackground,
+          derivation: "local_deterministic_split",
+        });
+      }
+      unmount();
+    },
+  );
 
   it("creates real empty planning even when all optional fields are skipped", async () => {
     const { runtime } = renderPage();
@@ -247,7 +448,7 @@ describe("professional project creation", () => {
       name: "只填世界观",
       section: "人物与世界",
       values: [[/^世界背景/u, "旧城每逢潮汐便会停电"]] as const,
-      factTypes: ["unconfirmed:world_rule"],
+      factTypes: ["unconfirmed:world_setting"],
       preferences: [],
       direction: null,
     },
@@ -267,7 +468,7 @@ describe("professional project creation", () => {
         [/^风格样例或说明/u, "克制写实"],
         [/^禁止项/u, "不新增超自然力量"],
       ] as const,
-      factTypes: ["formal:writing_constraint"],
+      factTypes: ["unconfirmed:writing_constraint"],
       preferences: ["写作风格：克制写实", "叙事视角：第三人称限知"],
       direction: null,
     },
@@ -361,12 +562,19 @@ describe("professional project creation", () => {
     if (!storyProjectId.ok) throw storyProjectId.error;
     const facts = await runtime.story.facts.listByProjectId(storyProjectId.value);
     if (!facts.ok) throw facts.error;
-    const constraint = facts.value.find(
-      (fact) => fact.toSnapshot().factType === "writing_constraint",
+    const constraints = facts.value
+      .map((fact) => fact.toSnapshot())
+      .filter(({ factType }) => factType === "writing_constraint");
+    expect(constraints).toHaveLength(3);
+    expect(constraints.every(({ status, locked }) => status === "unconfirmed" && !locked)).toBe(
+      true,
     );
-    expect(constraint?.toSnapshot()).toMatchObject({ status: "formal", locked: true });
-    expect(constraint?.toSnapshot().contentText).toBe(
-      `禁止项：${boundaries}\n其他创作约束：${otherConstraints}`,
+    expect(constraints.map(({ contentText }) => contentText)).toEqual(
+      expect.arrayContaining([
+        "禁止项：不得把‘坐标’改成魔法提示",
+        "其他创作约束：每章只允许一个视角",
+        "其他创作约束：日期必须写全称",
+      ]),
     );
     expect(facts.value.some((fact) => fact.toSnapshot().factType === "relationship")).toBe(false);
   });
@@ -482,9 +690,10 @@ describe("professional project creation", () => {
           .map((fact) => `${fact.toSnapshot().status}:${fact.toSnapshot().factType}`)
           .sort(),
     ).toEqual([
-      "formal:writing_constraint",
       "unconfirmed:character_profile",
-      "unconfirmed:world_rule",
+      "unconfirmed:world_setting",
+      "unconfirmed:writing_constraint",
+      "unconfirmed:writing_constraint",
     ]);
     const writingDashboard = await resumedRuntime.story.writingFeedback.loadDashboard(project.id);
     expect(writingDashboard.preferences.map(({ preferenceText }) => preferenceText)).toEqual([

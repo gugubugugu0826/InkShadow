@@ -760,6 +760,16 @@ select {
   gap: var(--space-2);
 }
 
+.project-library-page__project-title,
+.workspace-page__chapter-title {
+  display: -webkit-box;
+  min-width: 0;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+}
+
 .project-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(min(17rem, 100%), 1fr));
@@ -1439,6 +1449,20 @@ select {
   gap: var(--space-4);
 }
 
+.data-transfer-heading {
+  flex-wrap: wrap;
+}
+
+.data-transfer-heading > div {
+  min-width: 0;
+  flex: 1 1 22rem;
+}
+
+.data-transfer-heading :is(h2, p),
+.data-transfer-section .ink-button__label {
+  overflow-wrap: anywhere;
+}
+
 .data-transfer-section,
 .import-preview,
 .import-document-list {
@@ -1825,6 +1849,24 @@ select {
 
 .private-export-option small {
   color: var(--text-secondary);
+}
+
+.project-library-page__unfinished-creation {
+  display: grid;
+  justify-items: start;
+  gap: var(--space-2);
+  margin-top: var(--space-3);
+  padding: var(--space-3);
+  border: 0.0625rem solid var(--warning-text);
+  border-radius: var(--radius-sm);
+  background: var(--warning-soft);
+}
+
+.project-library-page__unfinished-creation p {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: var(--font-caption-size);
+  line-height: 1.6;
 }
 
 .model-hub-readiness {
@@ -2936,6 +2978,20 @@ select {
 
   .editor-toolbar__actions {
     justify-content: flex-start;
+  }
+
+  .data-transfer-section {
+    padding: var(--space-3);
+  }
+
+  .data-transfer-section .settings-actions {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .data-transfer-section .settings-actions > :is(button, a) {
+    width: 100%;
+    max-width: 100%;
   }
 
   .desktop-page,
@@ -5068,6 +5124,14 @@ select {
 .chapter-check-evidence li,
 .chapter-check-history li {
   overflow-wrap: anywhere;
+}
+
+.consistency-investigation-task-graph {
+  gap: var(--space-3);
+}
+
+.consistency-investigation-task-graph li {
+  line-height: 1.65;
 }
 
 .chapter-check-evidence li span,

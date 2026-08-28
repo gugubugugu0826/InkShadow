@@ -1854,6 +1854,75 @@ describe("Model Hub text execution service", () => {
     expect(harness.generate).toHaveBeenCalledOnce();
   });
 
+  it("keeps the observed visible character count when a truncated stream omits diagnostics", async () => {
+    const harness = createHarness();
+    const target = await seedTarget(harness.modelHub, {
+      connectionId: "visible-truncation-ledger",
+      catalogEntryId: "visible-truncation-ledger-catalog",
+      modelId: "visible-truncation-ledger-model",
+      inputRate: "1000000",
+      outputRate: "2000000",
+    });
+    await saveRoute(harness.modelHub, {
+      task: "book_start_guidance",
+      primaryCatalogEntryId: target.id,
+      maximumCostMicros: "5000",
+      currency: "USD",
+    });
+    const visiblePartial = "雨幕里，最后一班电车停在无人站台。";
+    harness.generate.mockImplementation((input) => {
+      input.onDelta?.(visiblePartial);
+      throw new ModelCenterError("MODEL_OUTPUT_TRUNCATED", "length", false, {
+        requestId: "visible-truncation-request",
+        httpStatus: 200,
+        finishReason: "length",
+        visibleContentLength: null,
+        reasoningPresent: false,
+        stream: true,
+        inputTokens: 12,
+        outputTokens: 20,
+      });
+    });
+    const invocationId = "019c2000-0000-7000-8000-000000000079";
+
+    await expect(
+      executeModelHubTextTask(
+        harness.dependencies,
+        request({
+          task: "book_start_guidance",
+          invocationId,
+          executionPolicy: SINGLE_ATTEMPT_VISIBLE_PROSE_POLICY,
+        }),
+      ),
+    ).rejects.toMatchObject({
+      code: "MODEL_OUTPUT_TRUNCATED",
+      dispatched: true,
+      failure: {
+        visibleContentLength: Array.from(visiblePartial).length,
+        attempt: 1,
+      },
+    });
+
+    expect(harness.generate).toHaveBeenCalledOnce();
+    expect(harness.generate.mock.calls[0]?.[0].config.retryLimit).toBe(0);
+    await expect(harness.modelHub.findInvocation(invocationId)).resolves.toMatchObject({
+      id: invocationId,
+      task: "book_start_guidance",
+      status: "failed",
+      privacyPolicy: "cloud_allowed",
+      dataDestination: "remote",
+      providerDispatchStartedAt: NOW,
+      inputTokens: 12,
+      outputTokens: 20,
+      estimatedCostMicros: "52",
+      currency: "USD",
+      failure: {
+        visibleContentLength: Array.from(visiblePartial).length,
+        attempt: 1,
+      },
+    });
+  });
+
   it("keeps a manual retry as a separate billed action and never redispatches a terminal invocation", async () => {
     const harness = createHarness();
     const target = await seedTarget(harness.modelHub, {

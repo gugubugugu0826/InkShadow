@@ -8,6 +8,7 @@ import {
 } from "./model-hub-provider-registry";
 import { isAutomaticPureTextOpeningCandidateEligible } from "./model-hub-router";
 import {
+  isRetirementCleanupPendingModelProviderConnection,
   isRetiredModelProviderConnection,
   type ModelCapabilityEvidence,
   type ModelCatalogEntry,
@@ -230,7 +231,8 @@ export async function loadAuthoritativeModelHubHydration(
   const requestedRebindTarget =
     requestedConnection !== undefined &&
     !requestedConnection.enabled &&
-    !isRetiredModelProviderConnection(requestedConnection)
+    !isRetiredModelProviderConnection(requestedConnection) &&
+    !isRetirementCleanupPendingModelProviderConnection(requestedConnection)
       ? requestedConnection
       : undefined;
   const bookStartRoute = routeGroups.find(
@@ -249,7 +251,13 @@ export async function loadAuthoritativeModelHubHydration(
     selectableConnections.find(({ id }) => id === routedCatalogEntry?.connectionId) ??
     selectableConnections[0] ??
     connections.find(
-      (connection) => !connection.enabled && !isRetiredModelProviderConnection(connection),
+      (connection) =>
+        !connection.enabled &&
+        !isRetiredModelProviderConnection(connection) &&
+        !isRetirementCleanupPendingModelProviderConnection(connection) &&
+        connection.connectionStatus === "disabled" &&
+        connection.credentialRef === null &&
+        connection.credentialState === "missing",
     ) ??
     null;
 

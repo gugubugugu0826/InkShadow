@@ -108,6 +108,102 @@ describe("Tauri native model gateway client", () => {
     });
   });
 
+  it("forwards an embedding ledger and reports its native receipt exactly once", async () => {
+    const invocationDispatchLedger = {
+      invocationId: "019f9f4a-b3c7-7350-9226-000000000602",
+      taskSnapshot: "embedding",
+      expectedRevision: 1,
+      connectionId: "provider-1",
+      connectionRevision: 3,
+      catalogEntryId: "catalog-1",
+      catalogEntryRevision: 2,
+      providerKindSnapshot: "custom_openai_compatible",
+      modelIdSnapshot: "embed-1",
+    };
+    const receipt = {
+      invocationId: invocationDispatchLedger.invocationId,
+      dispatchedAt: "2026-08-29T00:00:00.000Z",
+      revision: 2,
+    };
+    tauriMocks.invoke.mockResolvedValue({
+      provider: "open_ai_compatible",
+      endpointOrigin: "https://example.test",
+      model: "embed-1",
+      dimension: 2,
+      vectorCount: 1,
+      embeddings: [[1, 0]],
+      invocationDispatchReceipt: receipt,
+    });
+    const onInvocationDispatchAccepted = vi.fn();
+    const request = {
+      dispatchScope: TEST_DISPATCH_SCOPE,
+      config: {
+        providerId: "provider-1",
+        provider: "open_ai_compatible" as const,
+        baseUrl: "https://example.test/v1",
+        authentication: "none" as const,
+        retryLimit: 0,
+      },
+      model: "embed-1",
+      inputs: ["private one"],
+      invocationDispatchLedger,
+      onInvocationDispatchAccepted,
+    };
+
+    await expect(new TauriNativeModelGatewayClient().embed(request)).resolves.toMatchObject({
+      model: "embed-1",
+      vectorCount: 1,
+    });
+    expect(onInvocationDispatchAccepted).toHaveBeenCalledOnce();
+    expect(onInvocationDispatchAccepted).toHaveBeenCalledWith(receipt);
+    expect(tauriMocks.invoke).toHaveBeenCalledWith("embed_native_model", {
+      request: {
+        dispatchScope: request.dispatchScope,
+        config: request.config,
+        model: request.model,
+        inputs: request.inputs,
+        invocationDispatchLedger,
+      },
+    });
+  });
+
+  it("does not report an embedding receipt when native preflight rejects the request", async () => {
+    tauriMocks.invoke.mockRejectedValue({
+      code: "MODEL_CREDENTIAL_MISSING",
+      message: "missing",
+      retryable: false,
+    });
+    const onInvocationDispatchAccepted = vi.fn();
+
+    await expect(
+      new TauriNativeModelGatewayClient().embed({
+        dispatchScope: TEST_DISPATCH_SCOPE,
+        config: {
+          providerId: "provider-1",
+          provider: "open_ai_compatible",
+          baseUrl: "https://example.test/v1",
+          authentication: "bearer_keyring",
+          retryLimit: 0,
+        },
+        model: "embed-1",
+        inputs: ["private one"],
+        invocationDispatchLedger: {
+          invocationId: "019f9f4a-b3c7-7350-9226-000000000603",
+          taskSnapshot: "embedding",
+          expectedRevision: 1,
+          connectionId: "provider-1",
+          connectionRevision: 1,
+          catalogEntryId: "catalog-1",
+          catalogEntryRevision: 1,
+          providerKindSnapshot: "custom_openai_compatible",
+          modelIdSnapshot: "embed-1",
+        },
+        onInvocationDispatchAccepted,
+      }),
+    ).rejects.toMatchObject({ code: "MODEL_CREDENTIAL_MISSING" });
+    expect(onInvocationDispatchAccepted).not.toHaveBeenCalled();
+  });
+
   it("passes Gemini model resource names through to native embedding", async () => {
     tauriMocks.invoke.mockResolvedValue({
       provider: "gemini",
@@ -138,6 +234,7 @@ describe("Tauri native model gateway client", () => {
   });
 
   it("rejects Anthropic embedding before invoking the native gateway", async () => {
+    const onInvocationDispatchAccepted = vi.fn();
     const error = await new TauriNativeModelGatewayClient()
       .embed({
         dispatchScope: TEST_DISPATCH_SCOPE,
@@ -149,12 +246,25 @@ describe("Tauri native model gateway client", () => {
         },
         model: "claude-sonnet",
         inputs: ["Do not send this input."],
+        invocationDispatchLedger: {
+          invocationId: "019f9f4a-b3c7-7350-9226-000000000608",
+          taskSnapshot: "embedding",
+          expectedRevision: 1,
+          connectionId: "claude-primary",
+          connectionRevision: 1,
+          catalogEntryId: "claude-embedding",
+          catalogEntryRevision: 1,
+          providerKindSnapshot: "anthropic_claude",
+          modelIdSnapshot: "claude-sonnet",
+        },
+        onInvocationDispatchAccepted,
       })
       .catch((cause: unknown) => cause);
 
     expect(error).toMatchObject({ code: "MODEL_OPERATION_UNSUPPORTED" });
     expect(error).toHaveProperty("message", expect.stringContaining("embedding API"));
     expect(tauriMocks.invoke).not.toHaveBeenCalled();
+    expect(onInvocationDispatchAccepted).not.toHaveBeenCalled();
   });
 
   it("rejects malformed native embedding results without echoing input text", async () => {

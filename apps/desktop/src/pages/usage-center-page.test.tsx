@@ -28,7 +28,7 @@ describe("UsageCenterPage", () => {
     ).toBeInTheDocument();
     expect(screen.getAllByText("¥0.12").length).toBeGreaterThan(0);
     expect(screen.getByText("1 次费用未知 · 已知金额均为估算")).toBeInTheDocument();
-    expect(screen.getByText("供应商未返回")).toBeInTheDocument();
+    expect(screen.getByText("内容额度未记录")).toBeInTheDocument();
     expect(screen.getByText("AI 服务记录有 1 次失败或结果不明确、1 次费用未知")).toBeVisible();
     expect(screen.getByText("第一章 雨停以前")).toBeVisible();
     expect(screen.getAllByText("本地运算").length).toBeGreaterThan(0);
@@ -94,6 +94,10 @@ describe("UsageCenterPage", () => {
       providerLabel: "写作模型服务",
       modelId: "writer-model-v1",
       status: "succeeded",
+      invocationId: "capability-probe-public-row",
+      visibleContentLength: 2,
+      sendCount: null,
+      automaticRetryCount: null,
       inputTokens: 11,
       outputTokens: 2,
       cachedInputTokens: 3,
@@ -136,11 +140,65 @@ describe("UsageCenterPage", () => {
     expect(row).toHaveTextContent("writer-model-v1");
     expect(row).toHaveTextContent("输入 11 · 输出 2 · 缓存 3");
     expect(row).toHaveTextContent("费用未知");
-    expect(row).toHaveTextContent("成功");
+    expect(row).toHaveTextContent("已得到完整结果");
     expect(document.body).not.toHaveTextContent("private-connection-id");
     expect(document.body).not.toHaveTextContent("https://api.example.test/v1");
     expect(document.body).not.toHaveTextContent("只回复：OK");
     expect(document.body).not.toHaveTextContent("secret-credential-value");
+  });
+
+  it("shows five truthful result outcomes with visible characters and dispatch facts", async () => {
+    const records: readonly UsageCenterEvent[] = [
+      resultRecord("no-output", "failed", 0, 1),
+      resultRecord("partial-output", "partial", 187, 1),
+      resultRecord("complete-output", "succeeded", 243, 1),
+      resultRecord("pending-review", "ambiguous", null, 1),
+      resultRecord("pre-dispatch-cancelled", "pre_dispatch_cancelled", null, 0),
+    ];
+    const reader: UsageCenterReader = {
+      read: vi.fn<UsageCenterReader["read"]>().mockResolvedValue({
+        ...EMPTY_SNAPSHOT,
+        summary: {
+          ...EMPTY_AGGREGATE,
+          invocationCount: 5,
+          successCount: 1,
+          partialCount: 1,
+          failureCount: 2,
+          cancelledCount: 1,
+          remoteCount: 5,
+          costUnknownCount: 5,
+          tokenUsageUnknownCount: 5,
+        },
+        records,
+        totalMatchingRecords: records.length,
+        facets: {
+          projects: [],
+          tasks: [{ value: "book_start_guidance", label: "开书引导" }],
+          providers: [{ value: "provider", label: "写作模型服务" }],
+          models: [{ value: "model", label: "writer-model" }],
+        },
+      }),
+    };
+    render(<UsageCenterPage reader={reader} now={NOW} />);
+
+    const details = await screen.findByRole("table", { name: "使用明细" });
+    expect(within(details).getByRole("row", { name: /未得到结果/u })).toHaveTextContent(
+      "0 个可见字符",
+    );
+    const partial = within(details).getByRole("row", { name: /已保留部分结果/u });
+    expect(partial).toHaveTextContent("187 个可见字符");
+    expect(partial).toHaveTextContent("发送 1 次 · 自动重试 0 次");
+    expect(partial).toHaveTextContent("返回没有完整结束，已收到的文字仍安全保留");
+    expect(partial).not.toHaveTextContent("供应商未返回");
+    expect(within(details).getByRole("row", { name: /已得到完整结果/u })).toHaveTextContent(
+      "243 个可见字符",
+    );
+    expect(within(details).getByRole("row", { name: /结果待核对/u })).toHaveTextContent(
+      "发送 1 次 · 自动重试 0 次",
+    );
+    expect(within(details).getByRole("row", { name: /发送前安全终止/u })).toHaveTextContent(
+      "发送 0 次 · 自动重试 0 次",
+    );
   });
 
   it("raises unfinished and unknown-cost calls above the neutral summaries", async () => {
@@ -197,6 +255,10 @@ const REMOTE_RECORD: UsageCenterEvent = Object.freeze({
   providerLabel: "DeepSeek",
   modelId: "deepseek-chat",
   status: "succeeded",
+  invocationId: "one",
+  visibleContentLength: 240,
+  sendCount: 1,
+  automaticRetryCount: 0,
   inputTokens: 100,
   outputTokens: 20,
   cachedInputTokens: 10,
@@ -221,6 +283,10 @@ const LOCAL_RECORD: UsageCenterEvent = Object.freeze({
   providerLabel: "本机 Ollama",
   modelId: "nomic-embed-text",
   status: "failed",
+  invocationId: "two",
+  visibleContentLength: 0,
+  sendCount: null,
+  automaticRetryCount: null,
   inputTokens: null,
   outputTokens: null,
   cachedInputTokens: null,
@@ -235,6 +301,7 @@ const LOCAL_RECORD: UsageCenterEvent = Object.freeze({
 const SUMMARY: UsageAggregate = Object.freeze({
   invocationCount: 2,
   successCount: 1,
+  partialCount: 0,
   failureCount: 1,
   cancelledCount: 0,
   activeCount: 0,
@@ -252,6 +319,7 @@ const SUMMARY: UsageAggregate = Object.freeze({
 const EMPTY_AGGREGATE: UsageAggregate = Object.freeze({
   invocationCount: 0,
   successCount: 0,
+  partialCount: 0,
   failureCount: 0,
   cancelledCount: 0,
   activeCount: 0,
@@ -329,3 +397,43 @@ const EMPTY_SNAPSHOT: UsageCenterSnapshot = Object.freeze({
   breakdowns: EMPTY_BREAKDOWNS,
   budgets: [],
 });
+
+function resultRecord(
+  id: string,
+  status: UsageCenterEvent["status"],
+  visibleContentLength: number | null,
+  sendCount: number,
+): UsageCenterEvent {
+  return Object.freeze({
+    id: `hub:${id}`,
+    invocationId: id,
+    source: "model_hub_invocation",
+    occurredAt: "2026-08-08T11:00:00.000Z",
+    projectId: null,
+    projectName: null,
+    chapterId: null,
+    chapterName: null,
+    task: "book_start_guidance",
+    providerId: "provider",
+    providerLabel: "写作模型服务",
+    modelId: "writer-model",
+    status,
+    visibleContentLength,
+    sendCount,
+    automaticRetryCount: 0,
+    inputTokens: null,
+    outputTokens: null,
+    cachedInputTokens: null,
+    costMicros: null,
+    currency: null,
+    costSource: "unknown",
+    privacyPolicy: "cloud_allowed",
+    dataDestination: "remote",
+    errorCode:
+      status === "failed"
+        ? "MODEL_OUTPUT_EMPTY"
+        : status === "partial"
+          ? "MODEL_OUTPUT_TRUNCATED"
+          : null,
+  });
+}

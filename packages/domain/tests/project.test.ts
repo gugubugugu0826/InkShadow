@@ -49,6 +49,19 @@ describe("Project", () => {
     expect(project.revision).toBe(1);
   });
 
+  it("preserves a legacy over-limit name on rehydrate while keeping new writes strict", () => {
+    const legacyName = "旧项目名称".repeat(31);
+    const snapshot = createProject().toSnapshot();
+    const rehydrated = Project.rehydrate({ ...snapshot, name: legacyName });
+
+    expect(rehydrated.ok).toBe(true);
+    if (!rehydrated.ok) return;
+    expect(rehydrated.value.name).toBe(legacyName);
+    expect(rehydrated.value.toSnapshot().name).toBe(legacyName);
+    expect(rehydrated.value.rename("新名称".repeat(41), TRASHED_AT).ok).toBe(false);
+    expect(Project.create({ id: PROJECT_ID, name: "   ", now: CREATED_AT }).ok).toBe(false);
+  });
+
   it("soft deletes and restores with a new deletion generation", () => {
     const trashed = createProject().trash({
       now: TRASHED_AT,

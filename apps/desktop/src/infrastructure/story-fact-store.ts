@@ -1852,11 +1852,14 @@ function isUserContentRevisionMutation(
   next: StoryFactSnapshot,
 ): boolean {
   const clearsDirectLocalDraft = isDirectLocalStagedContentRevision(current, next);
+  const preservesAuthorDraftProvenance = isStructuredAuthorDraftContentRevision(current, next);
   if (
     current.locked ||
     current.status === "branch" ||
-    (current.structuredValue !== null && !clearsDirectLocalDraft) ||
-    next.structuredValue !== null ||
+    (current.structuredValue !== null &&
+      !clearsDirectLocalDraft &&
+      !preservesAuthorDraftProvenance) ||
+    (next.structuredValue !== null && !preservesAuthorDraftProvenance) ||
     next.contentText === null ||
     next.confirmedByActorId === null ||
     next.confirmedAt !== next.updatedAt
@@ -1866,7 +1869,7 @@ function isUserContentRevisionMutation(
   const expected: StoryFactSnapshot = {
     ...current,
     contentText: next.contentText,
-    structuredValue: clearsDirectLocalDraft ? null : current.structuredValue,
+    structuredValue: preservesAuthorDraftProvenance ? current.structuredValue : null,
     confidence: 1,
     status: "formal",
     origin: "user",
@@ -1881,6 +1884,35 @@ function isUserContentRevisionMutation(
     updatedAt: next.updatedAt,
   };
   return JSON.stringify(next) === JSON.stringify(expected);
+}
+
+function isStructuredAuthorDraftContentRevision(
+  current: StoryFactSnapshot,
+  next: StoryFactSnapshot,
+): boolean {
+  return (
+    isStructuredAuthorDraftProvenance(current.structuredValue) &&
+    next.structuredValue !== null &&
+    JSON.stringify(next.structuredValue) === JSON.stringify(current.structuredValue) &&
+    current.status === "unconfirmed" &&
+    current.origin === "user" &&
+    current.needsReview &&
+    !current.userConfirmed &&
+    !current.locked &&
+    !current.deprecated &&
+    current.source.kind === "user_statement" &&
+    current.source.reference.startsWith("user-statement:draft:")
+  );
+}
+
+function isStructuredAuthorDraftProvenance(value: StoryFactSnapshot["structuredValue"]): boolean {
+  if (!isPlainObject(value)) {
+    return false;
+  }
+  return (
+    value.schemaVersion === "inkshadow.local-bulk-setting-draft.v1" ||
+    value.schemaVersion === "inkshadow.professional-setup-fact-draft.v1"
+  );
 }
 
 function isDirectLocalStagedContentRevision(
