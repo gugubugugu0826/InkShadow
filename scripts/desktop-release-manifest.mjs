@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { lstat, readFile, readdir, realpath } from "node:fs/promises";
+import { lstat, readFile, readdir, realpath, stat } from "node:fs/promises";
 import path from "node:path";
 import process from "node:process";
 
@@ -283,12 +283,25 @@ export async function inspectCleanReleaseHead(
   collectReleaseInputs = collectDesktopReleaseSourceFiles,
 ) {
   assertReleaseGitEnvironmentSafe(environment);
-  const normalizedRoot = path.resolve(workspaceRoot);
-  const expectedIdentity = await resolveWorkspaceGitIdentity(normalizedRoot);
-  const repositoryRoot = path.resolve(
-    await runGit(normalizedRoot, ["rev-parse", "--show-toplevel"]),
+  const workspaceIdentity = await resolveUnlinkedDirectoryIdentity(
+    workspaceRoot,
+    "Release workspace",
   );
-  if (comparePlatformPaths(repositoryRoot, normalizedRoot) !== 0) {
+  const normalizedRoot = workspaceIdentity.canonicalPath;
+  const expectedIdentity = await resolveWorkspaceGitIdentity(normalizedRoot);
+  const repositoryIdentity = await resolveUnlinkedDirectoryIdentity(
+    await runGit(normalizedRoot, ["rev-parse", "--show-toplevel"]),
+    "Git repository root",
+  );
+  const physicalIdentityIsAvailable =
+    (workspaceIdentity.device !== 0n || workspaceIdentity.inode !== 0n) &&
+    (repositoryIdentity.device !== 0n || repositoryIdentity.inode !== 0n);
+  if (
+    comparePlatformPaths(repositoryIdentity.canonicalPath, normalizedRoot) !== 0 ||
+    (physicalIdentityIsAvailable &&
+      (repositoryIdentity.device !== workspaceIdentity.device ||
+        repositoryIdentity.inode !== workspaceIdentity.inode))
+  ) {
     throw new Error("Release workspace must be the Git repository root.");
   }
 
@@ -725,6 +738,41 @@ async function canonicalizeGitDirectory(directoryPath, label) {
     throw new Error(`${label} must be a directory.`);
   }
   return canonicalPath;
+}
+
+async function resolveUnlinkedDirectoryIdentity(directoryPath, label) {
+  const resolvedPath = path.resolve(directoryPath);
+  const parsed = path.parse(resolvedPath);
+  const relativePath = path.relative(parsed.root, resolvedPath);
+  const segments = relativePath.split(path.sep).filter(Boolean);
+  let currentPath = parsed.root;
+
+  for (const segment of segments) {
+    currentPath = path.join(currentPath, segment);
+    let metadata;
+    try {
+      metadata = await lstat(currentPath, { bigint: true });
+    } catch (error) {
+      throw new Error(`${label} path is not readable.`, { cause: error });
+    }
+    if (metadata.isSymbolicLink()) {
+      throw new Error(`${label} path must not contain symbolic links or directory junctions.`);
+    }
+    if (!metadata.isDirectory()) {
+      throw new Error(`${label} path must contain directories only.`);
+    }
+  }
+
+  const canonicalPath = await realpath(resolvedPath);
+  const metadata = await stat(canonicalPath, { bigint: true });
+  if (!metadata.isDirectory()) {
+    throw new Error(`${label} must be a directory.`);
+  }
+  return Object.freeze({
+    canonicalPath,
+    device: metadata.dev,
+    inode: metadata.ino,
+  });
 }
 
 async function readFullGitCommitSha(workspaceRoot, runGit) {

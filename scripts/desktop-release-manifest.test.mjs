@@ -9,6 +9,7 @@ import {
   realpath,
   rm,
   symlink,
+  unlink,
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -427,6 +428,45 @@ test("release Git provenance requires one clean, stable, full HEAD", async () =>
       ),
     /HEAD changed during release generation/u,
   );
+});
+
+test("release Git provenance accepts an unlinked Windows namespace alias for the same root", async () => {
+  if (process.platform !== "win32") {
+    return;
+  }
+  const repository = await createMinimalReleaseRepository();
+  try {
+    const namespaceRoot = path.toNamespacedPath(repository.root);
+    assert.notEqual(namespaceRoot, repository.root);
+    const clean = await inspectCleanReleaseHead(namespaceRoot);
+    assert.equal(clean.gitCommitSha, repository.gitCommitSha);
+  } finally {
+    await rm(repository.root, { recursive: true, force: true });
+  }
+});
+
+test("release Git provenance rejects linked workspace roots and linked ancestors", async () => {
+  const repository = await createMinimalReleaseRepository();
+  const aliasHolder = await mkdtemp(path.join(tmpdir(), "inkshadow-release-root-alias-"));
+  const linkType = process.platform === "win32" ? "junction" : "dir";
+  const linkedRoot = path.join(aliasHolder, "linked-root");
+  const linkedParent = path.join(aliasHolder, "linked-parent");
+  try {
+    await symlink(repository.root, linkedRoot, linkType);
+    await assert.rejects(inspectCleanReleaseHead(linkedRoot), /must not contain symbolic links/u);
+    await unlink(linkedRoot);
+
+    await symlink(path.dirname(repository.root), linkedParent, linkType);
+    await assert.rejects(
+      inspectCleanReleaseHead(path.join(linkedParent, path.basename(repository.root))),
+      /must not contain symbolic links/u,
+    );
+  } finally {
+    await unlinkIfPresent(linkedRoot);
+    await unlinkIfPresent(linkedParent);
+    await rm(aliasHolder, { recursive: true, force: true });
+    await rm(repository.root, { recursive: true, force: true });
+  }
 });
 
 test("release Git provenance rejects repository-selection environments and hidden index flags", async () => {
@@ -1079,4 +1119,15 @@ function runGitFixture(arguments_, cwd = workspaceRoot) {
   });
   assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
   return result;
+}
+
+async function unlinkIfPresent(filePath) {
+  try {
+    await unlink(filePath);
+  } catch (error) {
+    if (error instanceof Error && "code" in error && error.code === "ENOENT") {
+      return;
+    }
+    throw error;
+  }
 }
