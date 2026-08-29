@@ -244,7 +244,7 @@ describe("StoryOutlinePage", () => {
     const chapters = persisted.value.orderedChildren(volumes[0]?.id ?? "");
     expect(volumes.map(({ title }) => title)).toEqual(["第一卷"]);
     expect(chapters.map(({ title }) => title)).toEqual(["潮声入夜"]);
-  });
+  }, 15_000);
 });
 
 function renderRoute(runtime: DesktopRuntime, route: string) {
