@@ -4,7 +4,7 @@ use std::{
     path::{Path, PathBuf},
     sync::atomic::{AtomicBool, Ordering},
     sync::Arc,
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 use futures_util::TryStreamExt;
@@ -20,7 +20,10 @@ use sqlx::{
 };
 use tauri::{AppHandle, Manager, State};
 use tauri_plugin_dialog::DialogExt;
-use tokio::sync::{Mutex, MutexGuard};
+use tokio::{
+    sync::{Mutex, MutexGuard},
+    time::Instant,
+};
 
 use crate::local_migrations::{run_local_migrations, LocalMigrationError};
 use crate::path_tickets::{
@@ -1422,7 +1425,7 @@ pub(crate) async fn native_sqlite_begin(
     };
     drop(bridge);
 
-    schedule_transaction_expiration(
+    let _expiration_task = schedule_transaction_expiration(
         Arc::clone(&state.inner),
         session_token,
         transaction_token.clone(),
@@ -1717,12 +1720,13 @@ fn schedule_transaction_expiration(
     max_lifetime: Duration,
     lock_timeout: Duration,
     operation_timeout: Duration,
-) {
+) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         loop {
             let remaining = {
-                let Ok(mut bridge) = tokio::time::timeout(lock_timeout, state.lock()).await else {
-                    return;
+                let mut bridge = match tokio::time::timeout(lock_timeout, state.lock()).await {
+                    Ok(bridge) => bridge,
+                    Err(_) => continue,
                 };
 
                 if bridge.session_token.as_deref() != Some(session_token.as_str()) {
@@ -1755,7 +1759,7 @@ fn schedule_transaction_expiration(
             };
             tokio::time::sleep(remaining).await;
         }
-    });
+    })
 }
 
 impl NativeSqliteBridge {
@@ -4819,7 +4823,34 @@ mod tests {
         assert_eq!(rows[0].get("count"), Some(&JsonValue::from(0)));
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
+    async fn successful_transaction_select_refreshes_idle_activity() {
+        let (mut bridge, session) = open_memory().await;
+        let token = bridge.begin(&session, false).await.expect("begin");
+        let activity_before = bridge
+            .transaction
+            .as_ref()
+            .expect("transaction")
+            .last_activity;
+
+        tokio::time::advance(Duration::from_secs(1)).await;
+        bridge
+            .transaction_select(&session, &token, "SELECT 1 AS value", vec![])
+            .await
+            .expect("refresh activity");
+
+        assert!(
+            bridge
+                .transaction
+                .as_ref()
+                .expect("transaction")
+                .last_activity
+                > activity_before,
+            "a successful transaction read refreshes idle activity"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn background_expiration_uses_the_refreshed_idle_deadline() {
         let (bridge, session) = open_memory().await;
         let state = Arc::new(Mutex::new(bridge));
@@ -4828,7 +4859,7 @@ mod tests {
             bridge.begin(&session, false).await.expect("begin")
         };
         let idle_timeout = Duration::from_millis(40);
-        schedule_transaction_expiration(
+        let expiration_task = schedule_transaction_expiration(
             Arc::clone(&state),
             session.clone(),
             token.clone(),
@@ -4837,25 +4868,91 @@ mod tests {
             Duration::from_secs(1),
             Duration::from_secs(1),
         );
+        tokio::task::yield_now().await;
 
-        tokio::time::sleep(Duration::from_millis(25)).await;
+        tokio::time::advance(Duration::from_millis(25)).await;
         {
             let mut bridge = state.lock().await;
             bridge
-                .transaction_select(&session, &token, "SELECT 1 AS value", vec![])
-                .await
-                .expect("refresh activity");
+                .transaction
+                .as_mut()
+                .expect("transaction")
+                .last_activity = Instant::now();
         }
-        tokio::time::sleep(Duration::from_millis(25)).await;
+        tokio::time::advance(Duration::from_millis(15)).await;
+        tokio::task::yield_now().await;
         assert!(
             state.lock().await.transaction.is_some(),
-            "activity must extend the deadline"
+            "activity must extend the original deadline"
         );
-        tokio::time::sleep(Duration::from_millis(30)).await;
+        tokio::time::advance(Duration::from_millis(24)).await;
         assert!(
-            state.lock().await.transaction.is_none(),
-            "the transaction expires near one refreshed timeout"
+            state.lock().await.transaction.is_some(),
+            "the transaction must remain active before the refreshed deadline"
         );
+        tokio::time::advance(Duration::from_millis(1)).await;
+        tokio::time::resume();
+        expiration_task
+            .await
+            .expect("expiration task must finish at the refreshed deadline");
+        assert!(state.lock().await.transaction.is_none());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn background_expiration_retries_after_bridge_lock_timeout() {
+        let (mut bridge, session) = open_memory().await;
+        bridge
+            .execute(
+                &session,
+                "CREATE TABLE records (id INTEGER PRIMARY KEY)",
+                vec![],
+            )
+            .await
+            .expect("create table");
+        let token = bridge.begin(&session, false).await.expect("begin");
+        bridge
+            .transaction_execute(
+                &session,
+                &token,
+                "INSERT INTO records (id) VALUES (1)",
+                vec![],
+            )
+            .await
+            .expect("insert");
+        let state = Arc::new(Mutex::new(bridge));
+        let owner = state.lock().await;
+        let expiration_task = schedule_transaction_expiration(
+            Arc::clone(&state),
+            session.clone(),
+            token,
+            Duration::from_millis(40),
+            Duration::from_secs(60),
+            Duration::from_millis(10),
+            Duration::from_secs(1),
+        );
+        tokio::task::yield_now().await;
+
+        tokio::time::advance(Duration::from_millis(10)).await;
+        tokio::task::yield_now().await;
+        assert!(
+            !expiration_task.is_finished(),
+            "the expiration watchdog must survive one bridge lock timeout"
+        );
+        tokio::time::advance(Duration::from_millis(30)).await;
+        assert!(owner.transaction.is_some());
+        drop(owner);
+
+        tokio::time::resume();
+        expiration_task
+            .await
+            .expect("expiration task must resume after the bridge lock is released");
+        let mut bridge = state.lock().await;
+        assert!(bridge.transaction.is_none());
+        let rows = bridge
+            .select(&session, "SELECT COUNT(*) AS count FROM records", vec![])
+            .await
+            .expect("select rolled back rows");
+        assert_eq!(rows[0].get("count"), Some(&JsonValue::from(0)));
     }
 
     #[tokio::test]
