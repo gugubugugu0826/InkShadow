@@ -1,14 +1,14 @@
 # 墨影 InkShadow 文档入口
 
-> 当前发布目标：`0.2.14`；发布已获授权，最终同源候选链、远端持续集成、标签、附件回下载复核仍须按顺序完成  
+> 当前发布目标：`0.2.15`；发布已获授权，必须在唯一干净提交完成全部本地门禁、远端持续集成、未签名安装包核验和附件回下载复核后才能形成预发行  
 > 设计基线（Design Baseline）：`DESIGN v0.3.1b`  
-> 最近治理复核：2026-08-28  
-> 公开版本的精确状态以 [GitHub Releases](https://github.com/gugubugugu0826/InkShadow/releases) 为准；既有 `v0.2.12` 及更早标签、Release 与附件保持不可变。  
+> 最近治理复核：2026-08-29  
+> 公开版本的精确状态以 [GitHub Releases](https://github.com/gugubugugu0826/InkShadow/releases) 为准；既有 `v0.2.14` 及更早标签、Release 与附件保持不可变。  
 > 注意：设计版本用于界面与交互验收，不会自动改变应用版本。
 
-0.2.14 当前处理专业创建资料语义、跨版本待确认设定去重、四项选区技能人工闭环、设置跳转、普通界面中文展示和生成中切页保护。当前只向前新增 Data `0079`–`0081`／Tauri `82`–`84`；`0081` 在不放宽项目归属、UTF-16 总长、起止边界和精确摘录校验的前提下，修复长正文多证据写入的递归扫描性能问题。此前干净提交的完整候选链、全仓 3,945 项、Rust 207 项、桌面正式构建与生产 Chromium 26／26 已通过；最终发布源新增 `0081` 后，故事核心 148／148、数据迁移与恢复聚焦 52／52、原生迁移 18／18 已通过，完整同源候选链仍须重新取得退出 0。三份测试结果原件以及 Q01–Q11、P02–P10、R05–R14 原始材料未取得；真实模型、真人和真实安装验证未执行，这些边界将在预发行说明中继续披露。
-当前缺陷矩阵、已执行命令、未执行人工项和发布边界见
-[`execution/2026-08-27-V0214-RELEASE-BLOCKERS.md`](execution/2026-08-27-V0214-RELEASE-BLOCKERS.md)。0.2.13 记录作为冻结历史保留。
+0.2.15 当前修复开书多方案调度与同作品恢复、写作技能真实采用链和个人技能管理、长正文误删保护、版本恢复辨识、规划空状态、原生导出位置与状态、旧人物资料兼容、连接重试、文字与向量能力分流，以及检查页待确认设定说明。普通界面继续去除开发术语；所有 AI 结果仍先与正文隔离，私密章节继续禁止远程发送。本轮不新增数据库迁移，既有用户数据表仍由连续升级、备份与恢复门禁覆盖。
+当前缺陷矩阵、根因、已执行命令、未执行人工项和发布边界见
+[`execution/2026-08-29-V0215-RELEASE.md`](execution/2026-08-29-V0215-RELEASE.md)。0.2.14 及更早记录作为冻结历史保留。
 `0.2.11` 人工复测候选的缺陷矩阵与证据边界继续作为历史记录保留，见
 [`execution/2026-08-24-V0211-BLOCKERS-UI-REMEDIATION.md`](execution/2026-08-24-V0211-BLOCKERS-UI-REMEDIATION.md)。
 
@@ -44,11 +44,12 @@
 | `SUPPORTING_CURRENT`    | [`front-end/README.md`](front-end/README.md)                                                                                               | 当前前端页面、路由、普通/专家体验和接口索引        |
 | `SUPPORTING_CURRENT`    | [`back-end/README.md`](back-end/README.md)                                                                                                 | Cloud、Desktop 原生层、共享包与工程工具索引        |
 | `EVIDENCE_CURRENT`      | [`execution/CURRENT_STATUS.md`](execution/CURRENT_STATUS.md)                                                                               | 当前执行状态；必须同时核对其中绑定的提交与运行日期 |
-| `EVIDENCE_CURRENT`      | [`execution/TEST_RESULTS.md`](execution/TEST_RESULTS.md)                                                                                   | 当前和历史测试证据；失败不得省略                   |
+| `HISTORICAL`            | [`execution/TEST_RESULTS.md`](execution/TEST_RESULTS.md)                                                                                   | 0.2.14 工作树测试快照；不得替代 0.2.15 当前证据    |
 | `EVIDENCE_CURRENT`      | [`execution/RELEASE_CHECKLIST.md`](execution/RELEASE_CHECKLIST.md)                                                                         | 当前版本的构建、打包、发布与外部门禁               |
-| `EVIDENCE_CURRENT`      | [`execution/2026-08-27-V0214-RELEASE-BLOCKERS.md`](execution/2026-08-27-V0214-RELEASE-BLOCKERS.md)                                         | 0.2.14 上线阻断、当前证据与人工发布门禁           |
+| `EVIDENCE_CURRENT`      | [`execution/2026-08-29-V0215-RELEASE.md`](execution/2026-08-29-V0215-RELEASE.md)                                                           | 0.2.15 缺陷矩阵、当前验证与预发行门禁             |
+| `HISTORICAL`            | [`execution/2026-08-27-V0214-RELEASE-BLOCKERS.md`](execution/2026-08-27-V0214-RELEASE-BLOCKERS.md)                                         | 0.2.14 上线阻断与发布历史                         |
 | `HISTORICAL`            | [`execution/2026-08-26-V0213-BLOCKERS-REMEDIATION.md`](execution/2026-08-26-V0213-BLOCKERS-REMEDIATION.md)                                 | 0.2.13 修复与人工候选冻结证据                     |
-| `EVIDENCE_CURRENT`      | [`execution/2026-08-24-V0211-BLOCKERS-UI-REMEDIATION.md`](execution/2026-08-24-V0211-BLOCKERS-UI-REMEDIATION.md)                         | 0.2.11 阻断缺陷、数据兼容与界面修复门禁           |
+| `HISTORICAL`            | [`execution/2026-08-24-V0211-BLOCKERS-UI-REMEDIATION.md`](execution/2026-08-24-V0211-BLOCKERS-UI-REMEDIATION.md)                         | 0.2.11 阻断缺陷、数据兼容与界面修复历史           |
 | `HISTORICAL`            | [`execution/2026-08-25-V0212-RETEST-RELEASE.md`](execution/2026-08-25-V0212-RETEST-RELEASE.md)                                               | 0.2.12 缺陷、门禁与发布历史                       |
 | `HISTORICAL`            | [`execution/2026-08-21-V026-REAL-DEVICE-DEFECT-REMEDIATION.md`](execution/2026-08-21-V026-REAL-DEVICE-DEFECT-REMEDIATION.md)                 | v0.2.6 发布前修复与真机聚焦历史证据                |
 

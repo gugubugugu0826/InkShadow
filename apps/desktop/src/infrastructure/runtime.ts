@@ -2256,7 +2256,7 @@ async function readTauriRuntimeInformation(): Promise<RuntimeInformation> {
 
 function readBrowserRuntimeInformation(): Promise<RuntimeInformation> {
   return Promise.resolve({
-    appVersion: "0.2.14",
+    appVersion: "0.2.15",
     platform: "browser",
     architecture: "web",
     environment: "development",
@@ -2589,7 +2589,7 @@ export async function createDesktopRuntime(): Promise<DesktopRuntime> {
       )
       .catch(() => {
         globalThis.console.error(
-          "[CONSISTENCY_REPAIR_RECOVERY_FAILED] 正文和不可变版本保持不变；中断的修复建议不会自动重发。",
+          "[CONSISTENCY_REPAIR_RECOVERY_FAILED] 正文和不会被改动的历史版本保持不变；中断的修复建议不会自动重发。",
         );
       });
     automaticBackup.start();
@@ -2916,7 +2916,7 @@ async function resolveAuthoritativeGenerationIdentity(
 function generationSourceChanged(): AppError {
   return new AppError({
     code: "BASE_VERSION_CHANGED",
-    message: "当前章节与不可变版本不一致，请重新读取正文后再生成。",
+    message: "当前章节与不会被改动的历史版本不一致，请重新读取正文后再生成。",
     retryable: true,
     actions: ["RETRY", "EXPORT_DRAFT"],
   });
@@ -4895,7 +4895,7 @@ async function commitPreparedNovelSkillSnapshot(
     if (plan.novelSkillPreparation.compiled !== null) {
       throw new ModelCenterError(
         "NOVEL_SKILL_RECEIPT_FAILED",
-        "无法建立本次写作方法与上下文的精确关联，因此没有发送正文。",
+        "无法建立本次写作技能与故事资料的准确关联，因此没有发送正文。",
         true,
       );
     }
@@ -5457,7 +5457,7 @@ function isPreparedGenerationTargetLocal(plan: PreparedGenerationPlan): boolean 
 function privateChapterModelBlocked(): ModelCenterError {
   return new ModelCenterError(
     "PRIVATE_CHAPTER_LOCAL_ONLY",
-    "私密章节只能由已验证的本地模型处理；本次请求在发送 0 字后停止。",
+    "私密章节只在本机处理。没有可用的本地 AI 时，本次生成不会开始。",
   );
 }
 

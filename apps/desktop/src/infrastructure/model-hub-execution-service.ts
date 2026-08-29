@@ -1081,7 +1081,7 @@ async function resolveTextTarget(
   ) {
     throw executionError(
       "PRIVATE_CHAPTER_LOCAL_ONLY",
-      "私密章节只能由已验证的本地模型处理；本次请求在发送 0 字后停止。",
+      "私密章节只在本机处理。没有可用的本地 AI 时，本次生成不会开始。",
     );
   }
   if (

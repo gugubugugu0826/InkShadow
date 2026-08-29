@@ -368,6 +368,9 @@ describe("DataTransferPanel import journey", () => {
       "位置：D:\\作品\\原生回执长篇-定稿.md",
     );
     expect(screen.getByText(/格式：Markdown/u)).toHaveTextContent("文件：原生回执长篇-定稿.md");
+    expect(screen.getByRole("button", { name: "打开文件" })).toBeVisible();
+    expect(screen.getByRole("button", { name: "打开所在文件夹" })).toBeVisible();
+    expect(screen.getByRole("button", { name: "复制路径" })).toBeVisible();
     expect(tauriMocks.invoke).toHaveBeenCalledTimes(2);
     expect(anchorClick).not.toHaveBeenCalled();
 
@@ -411,6 +414,44 @@ describe("DataTransferPanel import journey", () => {
     expect(unknownNotice).not.toHaveTextContent("private");
     expect(tauriMocks.invoke).toHaveBeenCalledTimes(2);
     expect(anchorClick).not.toHaveBeenCalled();
+  });
+
+  it("labels the native dialog wait honestly and cancellation as a safe zero-write outcome", async () => {
+    const development = createDevelopmentRuntime(window.localStorage);
+    const runtime = Object.freeze({ ...development, mode: "tauri" as const });
+    const created = await runtime.useCases.createProject.execute({ name: "等待保存位置" });
+    if (!created.ok) throw created.error;
+    let destinationOpened = false;
+    let resolveDestination: (value: null) => void = () => {
+      throw new Error("保存对话框没有打开。");
+    };
+    tauriMocks.invoke.mockImplementation((command: string) => {
+      if (command !== "native_choose_export_destination") {
+        return Promise.reject(new Error("unexpected native command"));
+      }
+      return new Promise<null>((resolve) => {
+        destinationOpened = true;
+        resolveDestination = resolve;
+      });
+    });
+    const user = userEvent.setup();
+    render(
+      <MemoryRouter>
+        <RuntimeProvider runtime={runtime}>
+          <DataTransferPanel />
+        </RuntimeProvider>
+      </MemoryRouter>,
+    );
+    await screen.findByRole("option", { name: "等待保存位置" });
+
+    await user.click(screen.getByRole("button", { name: "保存 Markdown" }));
+
+    expect(await screen.findByRole("button", { name: "等待你选择保存位置" })).toBeDisabled();
+    expect(destinationOpened).toBe(true);
+    resolveDestination(null);
+    expect(await screen.findByText("已取消保存")).toBeVisible();
+    expect(screen.getByText(/状态：已取消，写入 0 B/u)).toBeVisible();
+    expect(tauriMocks.invoke).toHaveBeenCalledOnce();
   });
 
   it("excludes private chapters by default and refuses a project package that would lose privacy", async () => {

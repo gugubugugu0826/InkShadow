@@ -87,7 +87,7 @@ export async function projectDirectWritingDisclosure(
     sentScopeLabel,
     costLabel:
       estimate === null
-        ? "费用未知"
+        ? "服务商没有提供可计算的单价，实际费用请以服务商账单为准。"
         : `预计 ${formatMicros(estimate.micros, estimate.currency)}（以供应商账单为准）`,
   });
 }

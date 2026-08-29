@@ -1,7 +1,8 @@
 import {
   NOVEL_SKILL_COMPILER_VERSION,
   NOVEL_SKILL_CONTEXT_LAYERS,
-  compileNovelSkills,
+  compileFixedNovelSkillEvaluationArm,
+  isFixedNovelSkillEvaluationConfiguration,
   createCoreNovelSkillDefinitions,
   createGenreNovelSkillDefinitions,
   listNovelSkillEvaluationFixtures,
@@ -608,37 +609,41 @@ async function compileArmSkills(
   baseline: NovelSkillPaidEvaluationContextBaselineProjection,
   definitions: readonly NovelSkillDefinition[],
 ): Promise<CompiledNovelSkills> {
-  const layers = new Set(baseline.availableContextLayers);
-  const genres = new Set((await resolveVerifiedFixture(cell.fixtureId)).fixture.genreTags);
-  const explicitSkillIds = definitions
-    .filter(
-      (definition) =>
-        ["active", "experimental"].includes(definition.status) &&
-        definition.taskTypes.includes(cell.taskType) &&
-        definition.activation.allowedModes.includes(cell.invocationMode) &&
-        (definition.activation.genreTags.length === 0 ||
-          definition.activation.genreTags.some((genre) => genres.has(genre))) &&
-        definition.contextRequirements.requiredLayers.every((layer) => layers.has(layer)),
-    )
-    .map(({ skillId }) => skillId);
-  const compiled = await compileNovelSkills({
+  const genres = (await resolveVerifiedFixture(cell.fixtureId)).fixture.genreTags;
+  return compileNovelSkillPaidEvaluationArmSkills({
     projectId: cell.suiteId,
     taskType: cell.taskType,
     invocationMode: cell.invocationMode,
     maximumSkillTokens: MAXIMUM_SKILL_TOKENS,
-    genreTags: [...genres],
-    explicitSkillIds,
+    genreTags: genres,
     availableContextLayers: baseline.availableContextLayers,
-    allowExperimental: true,
     definitions,
+  });
+}
+
+export async function compileNovelSkillPaidEvaluationArmSkills(input: {
+  readonly projectId: string;
+  readonly taskType: NovelSkillTask;
+  readonly invocationMode: NovelSkillInvocationMode;
+  readonly maximumSkillTokens: number;
+  readonly genreTags: readonly string[];
+  readonly availableContextLayers: readonly NovelSkillContextLayer[];
+  readonly definitions: readonly NovelSkillDefinition[];
+}): Promise<CompiledNovelSkills> {
+  const fixedSkillIds = input.definitions.map(({ skillId }) => skillId);
+  const compiled = await compileFixedNovelSkillEvaluationArm({
+    ...input,
+    explicitSkillIds: fixedSkillIds,
+    allowExperimental: true,
     bindings: [],
   });
-  const selectedIds = compiled.items
-    .filter(({ included }) => included)
-    .map(({ skillId }) => skillId)
-    .sort(compareText);
-  if (!sameStrings(selectedIds, [...explicitSkillIds].sort(compareText))) {
-    throw invalid("The built-in Novel Skill compiler did not reproduce the exact arm selection.");
+  if (
+    !isFixedNovelSkillEvaluationConfiguration(compiled.configuration) ||
+    compiled.configuration.bindings.length !== 0 ||
+    !sameStrings(compiled.configuration.explicitSkillIds, [...fixedSkillIds].sort(compareText)) ||
+    compiled.items.some(({ activationSource }) => activationSource !== "explicit")
+  ) {
+    throw invalid("The built-in Novel Skill compiler did not reproduce the bounded fixed arm.");
   }
   return compiled;
 }

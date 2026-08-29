@@ -115,7 +115,7 @@ export function createModelHubReadinessStore(
           title: ordinary.title,
           description: ordinary.description,
           supportId: readinessSupportId(runtime.ids.next(), runtime.clock.now()),
-          recovery: "请重新读取模型中心状态；如果仍未恢复，请保留支持编号并下载脱敏诊断。",
+          recovery: "请重新读取 AI 写作状态；如果仍未恢复，请记下问题编号并下载脱敏诊断。",
           diagnosticCode: normalized.code,
         });
       const readiness =

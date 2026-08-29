@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { Buffer } from "node:buffer";
 import { spawnSync } from "node:child_process";
 import {
   copyFile,
@@ -33,6 +34,17 @@ import {
   verifyReleaseInputsMatchHead,
   verifyReleaseHeadUnchanged,
 } from "./desktop-release-manifest.mjs";
+import {
+  EXPECTED_FILE_DESCRIPTION,
+  EXPECTED_PE_MACHINE,
+  EXPECTED_PRODUCT_NAME,
+  EXPECTED_RELEASE_VERSION,
+  createWindowsPowerShellEnvironment,
+  decodeWindowsInstallerMetadata,
+  normalizeWindowsVersion,
+  validateInstallerMetadata,
+  validateTauriConfiguration,
+} from "./check-windows-installer-version.mjs";
 
 const workspaceRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const releaseCommitSha = "a".repeat(40);
@@ -46,10 +58,134 @@ const expectedUnsignedReleaseCandidateSteps = [
     arguments: ["--filter", "@inkshadow/desktop", "tauri:package:unsigned:prebuilt"],
   },
   {
+    label: "Windows installer version verification",
+    arguments: ["release:verify:installer-version"],
+  },
+  {
     label: "packaged release provenance verification",
     arguments: ["release:verify:unsigned"],
   },
 ];
+
+test("0.2.15 authoritative application versions stay aligned", async () => {
+  const [rootSource, desktopSource, tauriSource, cargoManifest, cargoLock, runtime] =
+    await Promise.all([
+      readFile(path.join(workspaceRoot, "package.json"), "utf8"),
+      readFile(path.join(workspaceRoot, "apps", "desktop", "package.json"), "utf8"),
+      readFile(path.join(workspaceRoot, "apps", "desktop", "src-tauri", "tauri.conf.json"), "utf8"),
+      readFile(path.join(workspaceRoot, "apps", "desktop", "src-tauri", "Cargo.toml"), "utf8"),
+      readFile(path.join(workspaceRoot, "apps", "desktop", "src-tauri", "Cargo.lock"), "utf8"),
+      readFile(
+        path.join(workspaceRoot, "apps", "desktop", "src", "infrastructure", "runtime.ts"),
+        "utf8",
+      ),
+    ]);
+  const rootManifest = JSON.parse(rootSource);
+  const desktopManifest = JSON.parse(desktopSource);
+  const tauriConfiguration = JSON.parse(tauriSource);
+  const expectedVersion = "0.2.15";
+  assert.equal(rootManifest.version, expectedVersion);
+  assert.equal(desktopManifest.version, expectedVersion);
+  assert.equal(tauriConfiguration.version, expectedVersion);
+  assert.equal(/^\s*version\s*=\s*"([^"]+)"\s*$/mu.exec(cargoManifest)?.[1], expectedVersion);
+  assert.match(
+    cargoLock,
+    /\[\[package\]\]\r?\nname = "inkshadow-desktop"\r?\nversion = "0\.2\.15"/u,
+  );
+  assert.match(runtime, /appVersion:\s*"0\.2\.15"/u);
+  assert.equal(
+    rootManifest.scripts["release:verify:installer-version"],
+    "node scripts/check-windows-installer-version.mjs",
+  );
+  assert.deepEqual(UNSIGNED_RELEASE_CANDIDATE_STEPS, expectedUnsignedReleaseCandidateSteps);
+});
+
+test("Windows installer contract accepts only the 0.2.15 branded AMD64 unsigned package", () => {
+  assert.doesNotThrow(() =>
+    validateTauriConfiguration({
+      productName: EXPECTED_PRODUCT_NAME,
+      version: EXPECTED_RELEASE_VERSION,
+    }),
+  );
+  const validMetadata = {
+    ProductName: EXPECTED_PRODUCT_NAME,
+    FileDescription: EXPECTED_FILE_DESCRIPTION,
+    ProductVersion: `${EXPECTED_RELEASE_VERSION}.0`,
+    FileVersion: EXPECTED_RELEASE_VERSION,
+    ApplicationMachine: EXPECTED_PE_MACHINE,
+    SignatureStatus: "NotSigned",
+  };
+  assert.doesNotThrow(() => validateInstallerMetadata(validMetadata));
+  assert.deepEqual(
+    decodeWindowsInstallerMetadata(
+      Buffer.from(JSON.stringify(validMetadata), "utf8").toString("base64"),
+    ),
+    validMetadata,
+  );
+  assert.throws(() => decodeWindowsInstallerMetadata("īӰ InkShadow"), /canonical Base64/u);
+  assert.equal(normalizeWindowsVersion("0.2.15.0"), EXPECTED_RELEASE_VERSION);
+  assert.equal(normalizeWindowsVersion("0.2.15"), EXPECTED_RELEASE_VERSION);
+});
+
+test("Windows installer inspection does not inherit an incompatible PowerShell module path", () => {
+  const environment = createWindowsPowerShellEnvironment(
+    {
+      Path: "C:\\Windows\\System32",
+      PSModulePath: "C:\\Program Files\\PowerShell\\Modules",
+      PSMODULEPATH: "C:\\shadowed-module-path",
+      INKSHADOW_INSTALLER_PATH: "stale-installer",
+      INKSHADOW_APPLICATION_PATH: "stale-application",
+    },
+    "C:\\release\\墨影 InkShadow_0.2.15_x64-setup.exe",
+    "C:\\release\\inkshadow-desktop.exe",
+  );
+
+  assert.equal(
+    Object.keys(environment).some((key) => key.toLowerCase() === "psmodulepath"),
+    false,
+  );
+  assert.equal(environment.Path, "C:\\Windows\\System32");
+  assert.equal(
+    environment.INKSHADOW_INSTALLER_PATH,
+    "C:\\release\\墨影 InkShadow_0.2.15_x64-setup.exe",
+  );
+  assert.equal(environment.INKSHADOW_APPLICATION_PATH, "C:\\release\\inkshadow-desktop.exe");
+});
+
+test("Windows installer contract rejects wrong identity, version, architecture and signature", () => {
+  assert.throws(
+    () => validateTauriConfiguration({ productName: "InkShadow", version: "0.2.15" }),
+    /product name/u,
+  );
+  assert.throws(
+    () => validateTauriConfiguration({ productName: EXPECTED_PRODUCT_NAME, version: "0.2.14" }),
+    /release version/u,
+  );
+  const validMetadata = {
+    ProductName: EXPECTED_PRODUCT_NAME,
+    FileDescription: EXPECTED_FILE_DESCRIPTION,
+    ProductVersion: "0.2.15.0",
+    FileVersion: "0.2.15.0",
+    ApplicationMachine: EXPECTED_PE_MACHINE,
+    SignatureStatus: "NotSigned",
+  };
+  for (const [field, value, expectedMessage] of [
+    ["ProductName", "InkShadow", /ProductName/u],
+    ["FileDescription", "InkShadow installer", /FileDescription/u],
+    ["ProductVersion", "0.2.14.0", /ProductVersion and FileVersion/u],
+    ["FileVersion", "0.2.14.0", /ProductVersion and FileVersion/u],
+    ["ApplicationMachine", "I386", /machine must be AMD64/u],
+    ["SignatureStatus", "Valid", /NotSigned/u],
+  ]) {
+    assert.throws(
+      () => validateInstallerMetadata({ ...validMetadata, [field]: value }),
+      expectedMessage,
+      `${field} must be rejected`,
+    );
+  }
+  assert.equal(normalizeWindowsVersion("0.2.15.1"), null);
+  assert.equal(normalizeWindowsVersion("not-a-version"), null);
+});
 
 const requiredFiles = [
   ".editorconfig",
@@ -81,6 +217,7 @@ const requiredFiles = [
   "scripts/assert-clean-release-head.mjs",
   "scripts/run-unsigned-release-candidate.mjs",
   "scripts/check-desktop-release.mjs",
+  "scripts/check-windows-installer-version.mjs",
   "scripts/desktop-release-manifest.mjs",
   "scripts/desktop-release-manifest.test.mjs",
   "scripts/run-e2e.mjs",
@@ -387,7 +524,7 @@ test("unsigned candidate keeps one clean HEAD through Tauri packaging", async ()
   const initial = Object.freeze({ gitCommitSha: releaseCommitSha });
   const completedSteps = [];
   const output = [];
-  const stableStates = [initial, initial, initial, initial, initial, initial];
+  const stableStates = [initial, initial, initial, initial, initial, initial, initial];
   const completed = await runUnsignedReleaseCandidate(workspaceRoot, {
     inspectReleaseHead: async () => stableStates.shift(),
     runStep: async (_root, step) => completedSteps.push(step.label),

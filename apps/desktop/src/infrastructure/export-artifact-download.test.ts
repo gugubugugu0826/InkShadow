@@ -146,6 +146,7 @@ describe("downloadBrowserExportArtifact", () => {
   });
 
   it("uses a one-time native destination and accepts only a verified write receipt", async () => {
+    const destinationStates: string[] = [];
     tauriMocks.invoke
       .mockResolvedValueOnce({
         ticket: "a".repeat(64),
@@ -166,7 +167,11 @@ describe("downloadBrowserExportArtifact", () => {
         mediaType: "text/markdown",
         content: "第一章\n雨夜。",
       },
-      { format: "markdown", mode: "tauri" },
+      {
+        format: "markdown",
+        mode: "tauri",
+        onDestinationPromptChange: (open) => destinationStates.push(open ? "open" : "closed"),
+      },
     );
 
     expect(receipt).toEqual({
@@ -194,6 +199,7 @@ describe("downloadBrowserExportArtifact", () => {
         contentBase64: "56ys5LiA56ugCumbqOWknOOAgg==",
       },
     });
+    expect(destinationStates).toEqual(["open", "closed"]);
   });
 
   it("keeps cancellation at zero writes and marks a dispatched native write as unknown", async () => {

@@ -619,7 +619,7 @@ export function FineTuningGovernancePage({
               description="只显示治理摘要和时间；精确值见高级诊断。"
             />
             {dashboard?.audit.length === 0 ? (
-              <EmptyState title="暂无审计事件" description="治理操作完成后会在此留下记录。" />
+              <EmptyState title="暂无操作记录" description="治理操作完成后会在此留下记录。" />
             ) : (
               <ol className="fine-tuning-governance-page__audit-list">
                 {dashboard?.audit.map((event) => (

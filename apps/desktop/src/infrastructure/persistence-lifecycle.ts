@@ -13,7 +13,8 @@ export type PersistenceFlushHandlerResult =
     }>
   | Readonly<{
       status: "blocked";
-      code: "COMPOSITION_ACTIVE";
+      code:
+        "COMPOSITION_ACTIVE" | "LARGE_DELETION_REQUIRES_CONFIRMATION" | "EDITOR_REPLACEMENT_ACTIVE";
       message: string;
     }>;
 
@@ -46,7 +47,10 @@ export type PersistenceFlushOutcome =
       status: "blocked";
       blockers: readonly Readonly<{
         handlerId: string;
-        code: "COMPOSITION_ACTIVE";
+        code:
+          | "COMPOSITION_ACTIVE"
+          | "LARGE_DELETION_REQUIRES_CONFIRMATION"
+          | "EDITOR_REPLACEMENT_ACTIVE";
         message: string;
       }>[];
     }>

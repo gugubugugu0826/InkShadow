@@ -354,7 +354,7 @@ describe("C3 opening journey durability regressions", () => {
     const observedStages: string[] = [];
     const waitingDispatchReceipts: (readonly (string | null)[])[] = [];
     let reservationCount = 0;
-    let releaseFinalReservation!: () => void;
+    let releaseFirstReservation!: () => void;
     vi.spyOn(harness.runtime.creativeJourneys, "update").mockImplementation(
       async (record, expectedRevision, turn) => {
         const run = readOpeningJourneyRun(record.snapshot.openingRun);
@@ -384,9 +384,9 @@ describe("C3 opening journey durability regressions", () => {
     );
     vi.spyOn(harness.runtime.modelHub, "startInvocation").mockImplementation(async (input) => {
       reservationCount += 1;
-      if (reservationCount === 3) {
+      if (reservationCount === 1) {
         await new Promise<void>((resolve) => {
-          releaseFinalReservation = resolve;
+          releaseFirstReservation = resolve;
         });
       }
       return originalStartInvocation(input);
@@ -410,9 +410,9 @@ describe("C3 opening journey durability regressions", () => {
     await user.click(within(dialog).getByRole("button", { name: "确认并发送最多 3 个生成请求" }));
     await waitFor(() => expect(document.body).toHaveTextContent("正在保存本次生成信息"));
     expect(harness.generate).not.toHaveBeenCalled();
-    releaseFinalReservation();
+    releaseFirstReservation();
 
-    await waitFor(() => expect(harness.generate).toHaveBeenCalledTimes(3), {
+    await waitFor(() => expect(harness.generate).toHaveBeenCalledTimes(1), {
       timeout: 15_000,
     });
     await waitFor(() => expect(document.body).toHaveTextContent("已向所选服务发送，正在等待结果"));
@@ -425,6 +425,17 @@ describe("C3 opening journey durability regressions", () => {
     expect(waitingDispatchReceipts.length).toBeGreaterThan(0);
     expect(waitingDispatchReceipts[0]?.length).toBeGreaterThan(0);
     expect(waitingDispatchReceipts[0]?.every((receipt) => receipt !== null)).toBe(true);
+
+    await act(async () => {
+      releases[0]?.();
+      await Promise.resolve();
+    });
+    await waitFor(() => expect(harness.generate).toHaveBeenCalledTimes(2));
+    await act(async () => {
+      releases[1]?.();
+      await Promise.resolve();
+    });
+    await waitFor(() => expect(harness.generate).toHaveBeenCalledTimes(3));
 
     const [active] = await harness.runtime.creativeJourneys.listActive("idea");
     const run = readOpeningJourneyRun(active?.snapshot.openingRun);
@@ -440,14 +451,14 @@ describe("C3 opening journey durability regressions", () => {
       ),
     ).toBe(true);
 
-    releases.forEach((release) => release());
+    releases[2]?.();
     await waitFor(async () => {
       const [settled] = await harness.runtime.creativeJourneys.listActive("idea");
       expect(readOpeningJourneyRun(settled?.snapshot.openingRun)?.stage).toBe("completed");
     });
   }, 30_000);
 
-  it("settles all three slots with zero sends when the second invocation reservation fails", async () => {
+  it("keeps completed slots and continues sequentially when one invocation reservation fails", async () => {
     const harness = createProviderRuntime();
     let reservationCount = 0;
     const user = userEvent.setup();
@@ -483,11 +494,11 @@ describe("C3 opening journey durability regressions", () => {
       terminalSuggestions = (record?.snapshot.openingSuggestions ?? []) as readonly Readonly<{
         status: string;
       }>[];
-      expect(terminalRun?.stage).toBe("failed");
+      expect(terminalRun?.stage).toBe("completed");
       expect(terminalSuggestions).toHaveLength(3);
-      expect(terminalSuggestions.every(({ status }) => status === "failed")).toBe(true);
+      expect(terminalSuggestions.map(({ status }) => status)).toEqual(["ready", "failed", "ready"]);
     });
-    expect(harness.generate).not.toHaveBeenCalled();
+    expect(harness.generate).toHaveBeenCalledTimes(2);
     const [terminalRecord] = await harness.runtime.creativeJourneys.listActive("idea");
     const persistedTerminalRun = readOpeningJourneyRun(terminalRecord?.snapshot.openingRun);
     const invocations = await Promise.all(
@@ -495,12 +506,11 @@ describe("C3 opening journey durability regressions", () => {
         harness.runtime.modelHub.findInvocation(requestId),
       ),
     );
-    expect(invocations[0]).toMatchObject({
-      status: "failed",
-      providerDispatchStartedAt: null,
-    });
+    expect(invocations[0]).toMatchObject({ status: "succeeded" });
+    expect(typeof invocations[0]?.providerDispatchStartedAt).toBe("string");
     expect(invocations[1]).toBeNull();
-    expect(invocations[2]).toBeNull();
+    expect(invocations[2]).toMatchObject({ status: "succeeded" });
+    expect(typeof invocations[2]?.providerDispatchStartedAt).toBe("string");
   }, 30_000);
 
   it("keeps the run in invocation reservation when the durable dispatch receipt cannot be written", async () => {
@@ -571,7 +581,7 @@ describe("C3 opening journey durability regressions", () => {
     await user.click(screen.getByRole("button", { name: "生成第一段" }));
     const dialog = await screen.findByRole("dialog", { name: "生成首批三个开头" });
     await user.click(within(dialog).getByRole("button", { name: "确认并发送最多 3 个生成请求" }));
-    await waitFor(() => expect(harness.generate).toHaveBeenCalledTimes(3), {
+    await waitFor(() => expect(harness.generate).toHaveBeenCalledTimes(1), {
       timeout: 15_000,
     });
     const [pending] = await harness.runtime.creativeJourneys.listActive("idea");
@@ -597,7 +607,8 @@ describe("C3 opening journey durability regressions", () => {
     const card = heading.closest(".ink-card");
     if (!(card instanceof HTMLElement)) throw new Error("没有找到可恢复的开书卡片。");
     await user.click(within(card).getByRole("button", { name: "继续这次构思" }));
-    await waitFor(() => expect(screen.getByText(/生成仍在进行，3 个方案尚未返回/u)).toBeVisible());
+    await waitFor(() => expect(screen.getByText(/生成仍在进行，1 个方案尚未返回/u)).toBeVisible());
+    expect(screen.getAllByText("未发送")).toHaveLength(2);
 
     resumedClockMs = Date.parse(pendingRun.deadlineAt) + 1_000;
     await waitFor(
@@ -612,10 +623,15 @@ describe("C3 opening journey durability regressions", () => {
       },
       { timeout: 3_500 },
     );
-    expect(harness.generate).toHaveBeenCalledTimes(3);
+    expect(harness.generate).toHaveBeenCalledTimes(1);
+    const invocations = await Promise.all(
+      pendingRun.requestIds.map((requestId) => resumedRuntime.modelHub.findInvocation(requestId)),
+    );
+    expect(typeof invocations[0]?.providerDispatchStartedAt).toBe("string");
+    expect(invocations.slice(1)).toEqual([null, null]);
   }, 30_000);
 
-  it("fails closed with zero dispatch when confirmation happens after the persisted deadline", async () => {
+  it("starts the provider deadline at confirmation even after a long confirmation wait", async () => {
     const harness = createProviderRuntime();
     let clockMs = Date.now();
     const runtime: DesktopRuntime = Object.freeze({
@@ -646,22 +662,19 @@ describe("C3 opening journey durability regressions", () => {
       async () => {
         const settled = await runtime.creativeJourneys.findById(pending.id);
         const settledRun = readOpeningJourneyRun(settled?.snapshot.openingRun);
-        expect(settledRun?.stage).toBe("failed");
+        expect(settledRun?.stage).toBe("completed");
+        expect(Date.parse(settledRun?.deadlineAt ?? "")).toBeGreaterThan(clockMs);
         const task = (await runtime.taskCenter.load()).tasks.find(
           ({ id }) => id === settledRun?.taskId,
         );
-        expect(task).toMatchObject({
-          status: "failed",
-          maxAttempts: 1,
-          failure: { requestId: settledRun?.supportId, retryable: false },
-        });
+        expect(task).toMatchObject({ status: "succeeded", maxAttempts: 1 });
       },
       { timeout: 15_000 },
     );
-    expect(harness.generate).not.toHaveBeenCalled();
+    expect(harness.generate).toHaveBeenCalledTimes(3);
   }, 30_000);
 
-  it("uses the click deadline after a late confirmation and fences every late provider result", async () => {
+  it("uses the click deadline and fences the one in-flight late result before later slots dispatch", async () => {
     const harness = createProviderRuntime();
     let clockMs = Date.now();
     const runtime: DesktopRuntime = Object.freeze({
@@ -696,30 +709,15 @@ describe("C3 opening journey durability regressions", () => {
     }
     clockMs = Date.parse(pendingRun.deadlineAt) - 1_000;
     await user.click(within(dialog).getByRole("button", { name: "确认并发送最多 3 个生成请求" }));
-    await waitFor(() => expect(harness.generate).toHaveBeenCalledTimes(3), { timeout: 15_000 });
+    await waitFor(() => expect(harness.generate).toHaveBeenCalledTimes(1), { timeout: 15_000 });
+    const confirmed = await runtime.creativeJourneys.findById(pending.id);
+    const confirmedRun = readOpeningJourneyRun(confirmed?.snapshot.openingRun);
+    if (confirmedRun === null) throw new Error("确认后没有保存新的发送截止时间。 ");
+    expect(Date.parse(confirmedRun.deadlineAt)).toBeGreaterThan(clockMs);
 
-    const originalFindInvocation = runtime.modelHub.findInvocation.bind(runtime.modelHub);
-    let invocationReads = 0;
-    let markInvocationReadsReached!: () => void;
-    let releaseInvocationReads!: () => void;
-    const invocationReadsReached = new Promise<void>((resolve) => {
-      markInvocationReadsReached = resolve;
-    });
-    const invocationReadGate = new Promise<void>((resolve) => {
-      releaseInvocationReads = resolve;
-    });
-    vi.spyOn(runtime.modelHub, "findInvocation").mockImplementation(async (invocationId) => {
-      const invocation = await originalFindInvocation(invocationId);
-      invocationReads += 1;
-      if (invocationReads === 3) markInvocationReadsReached();
-      await invocationReadGate;
-      return invocation;
-    });
-    releases.forEach((release) => release());
-    await invocationReadsReached;
-    clockMs = Date.parse(pendingRun.deadlineAt) + 1;
-    releaseInvocationReads();
+    clockMs = Date.parse(confirmedRun.deadlineAt) + 1;
     await act(async () => {
+      releases[0]?.();
       await Promise.resolve();
       await Promise.resolve();
     });
@@ -741,6 +739,8 @@ describe("C3 opening journey durability regressions", () => {
     );
 
     const afterLateResults = await runtime.creativeJourneys.findById(pending.id);
+    const firstRequestId = pendingRun.requestIds[0];
+    if (firstRequestId === undefined) throw new Error("没有保存第一个开书请求标识。");
     expect(readOpeningJourneyRun(afterLateResults?.snapshot.openingRun)?.stage).toBe(
       "result_pending",
     );
@@ -755,15 +755,21 @@ describe("C3 opening journey durability regressions", () => {
           noticeCode: string | null;
         }>[]
       | undefined;
-    expect(lateHistory).toHaveLength(3);
-    for (const requestId of pendingRun.requestIds) {
-      expect(lateHistory?.find(({ id }) => id === requestId)).toMatchObject({
-        status: "review",
-        text: `截止后返回 ${requestId}`,
-        noticeCode: "OPENING_RESULT_PENDING_REVIEW",
+    expect(lateHistory).toHaveLength(1);
+    expect(lateHistory?.find(({ id }) => id === firstRequestId)).toMatchObject({
+      status: "review",
+      text: `截止后返回 ${firstRequestId}`,
+      noticeCode: "OPENING_RESULT_PENDING_REVIEW",
+    });
+    for (const requestId of pendingRun.requestIds.slice(1)) {
+      const invocation = await runtime.modelHub.findInvocation(requestId);
+      expect(invocation).toMatchObject({
+        status: "failed",
+        providerDispatchStartedAt: null,
       });
+      expect(["MODEL_TIMEOUT", "IDEA_OPERATION_SUPERSEDED"]).toContain(invocation?.errorCode);
     }
-    expect(harness.generate).toHaveBeenCalledTimes(3);
+    expect(harness.generate).toHaveBeenCalledTimes(1);
   }, 30_000);
 
   it("reconciles the one task after a crash between journey terminalization and task settlement", async () => {
@@ -1294,7 +1300,8 @@ describe("C3 opening journey durability regressions", () => {
           autoRetryCount: 0,
         });
       });
-      expect(cancelGeneration).not.toHaveBeenCalled();
+      expect(cancelGeneration).toHaveBeenCalledTimes(1);
+      expect(cancelGeneration).toHaveBeenCalledWith(requestId);
 
       if (lateResult.resolve === null) {
         throw new Error("迟到结果解析器未准备好。");
@@ -1322,7 +1329,8 @@ describe("C3 opening journey durability regressions", () => {
         ).toMatchObject({ status: "failed", maxAttempts: 1 });
       });
       expect(harness.generate).toHaveBeenCalledOnce();
-      expect(cancelGeneration).not.toHaveBeenCalled();
+      expect(cancelGeneration).toHaveBeenCalledTimes(1);
+      expect(cancelGeneration).toHaveBeenCalledWith(requestId);
       const invocation = await harness.runtime.modelHub.findInvocation(requestId);
       expect(invocation).toMatchObject({
         status: "timed_out",
@@ -1708,7 +1716,7 @@ describe("C3 opening journey durability regressions", () => {
     expect(harness.generate).not.toHaveBeenCalled();
   }, 30_000);
 
-  it("persists isolated provider results after the page leaves without accepting正文", async () => {
+  it("persists the in-flight provider result and recovers unsent slots after the page leaves", async () => {
     const harness = createProviderRuntime();
     const releases: (() => void)[] = [];
     const user = userEvent.setup();
@@ -1730,14 +1738,41 @@ describe("C3 opening journey durability regressions", () => {
     await user.click(screen.getByRole("button", { name: "生成第一段" }));
     const dialog = await screen.findByRole("dialog", { name: "生成首批三个开头" });
     await user.click(within(dialog).getByRole("button", { name: "确认并发送最多 3 个生成请求" }));
-    await waitFor(() => expect(harness.generate).toHaveBeenCalledTimes(3), { timeout: 15_000 });
+    await waitFor(() => expect(harness.generate).toHaveBeenCalledTimes(1), { timeout: 15_000 });
     const [pending] = await harness.runtime.creativeJourneys.listActive("idea");
     const pendingRun = readOpeningJourneyRun(pending?.snapshot.openingRun);
     if (pending === undefined || pendingRun === null) throw new Error("没有保存发送中的开书旅程。");
+    const firstRequestId = pendingRun.requestIds[0];
+    if (firstRequestId === undefined) throw new Error("没有保存第一个开书请求标识。");
     expect(pendingRun.stage).toBe("provider_waiting");
 
     view.unmount();
-    releases.forEach((release) => release());
+    await act(async () => {
+      releases[0]?.();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    await waitFor(async () => {
+      const persisted = await harness.runtime.creativeJourneys.findById(pending.id);
+      expect(persisted?.snapshot.openingSuggestions).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            id: firstRequestId,
+            status: "ready",
+            dispatchState: "succeeded",
+          }),
+        ]),
+      );
+    });
+    renderJourney(harness.runtime);
+    const heading = await screen.findByRole("heading", {
+      name: "最后一间邮局在闭馆后收到三封尚未写出的信。",
+      level: 3,
+    });
+    const card = heading.closest(".ink-card");
+    if (!(card instanceof HTMLElement)) throw new Error("没有找到离页后的开书恢复卡片。 ");
+    await user.click(within(card).getByRole("button", { name: "继续这次构思" }));
 
     await waitFor(async () => {
       const terminal = await harness.runtime.creativeJourneys.findById(pending.id);
@@ -1746,7 +1781,11 @@ describe("C3 opening journey durability regressions", () => {
       expect(terminal?.snapshot.preview).toBe("");
       expect(terminal?.snapshot.openingSuggestions).toEqual(
         expect.arrayContaining([
-          expect.objectContaining({ status: "ready", dispatchState: "succeeded" }),
+          expect.objectContaining({
+            id: firstRequestId,
+            status: "ready",
+            text: `离页后隔离开头 ${firstRequestId}`,
+          }),
         ]),
       );
       const task = (await harness.runtime.taskCenter.load()).tasks.find(
@@ -1754,7 +1793,14 @@ describe("C3 opening journey durability regressions", () => {
       );
       expect(task).toMatchObject({ status: "succeeded", maxAttempts: 1 });
     });
-    expect(harness.generate).toHaveBeenCalledTimes(3);
+    expect(harness.generate).toHaveBeenCalledTimes(1);
+    for (const requestId of pendingRun.requestIds.slice(1)) {
+      expect(await harness.runtime.modelHub.findInvocation(requestId)).toMatchObject({
+        status: "failed",
+        errorCode: "IDEA_OPERATION_SUPERSEDED",
+        providerDispatchStartedAt: null,
+      });
+    }
   }, 30_000);
 
   it("settles a dispatched batch at its persisted deadline after the page is gone", async () => {
@@ -1771,7 +1817,7 @@ describe("C3 opening journey durability regressions", () => {
     await user.click(screen.getByRole("button", { name: "生成第一段" }));
     const dialog = await screen.findByRole("dialog", { name: "生成首批三个开头" });
     await user.click(within(dialog).getByRole("button", { name: "确认并发送最多 3 个生成请求" }));
-    await waitFor(() => expect(harness.generate).toHaveBeenCalledTimes(3), { timeout: 15_000 });
+    await waitFor(() => expect(harness.generate).toHaveBeenCalledTimes(1), { timeout: 15_000 });
     const [pending] = await harness.runtime.creativeJourneys.listActive("idea");
     const pendingRun = readOpeningJourneyRun(pending?.snapshot.openingRun);
     if (pending === undefined || pendingRun === null) {
@@ -1800,7 +1846,8 @@ describe("C3 opening journey durability regressions", () => {
     const card = heading.closest(".ink-card");
     if (!(card instanceof HTMLElement)) throw new Error("没有找到后台截止恢复卡片。");
     await user.click(within(card).getByRole("button", { name: "继续这次构思" }));
-    await waitFor(() => expect(screen.getByText(/生成仍在进行，3 个方案尚未返回/u)).toBeVisible());
+    await waitFor(() => expect(screen.getByText(/生成仍在进行，1 个方案尚未返回/u)).toBeVisible());
+    expect(screen.getAllByText("未发送")).toHaveLength(2);
     resumed.unmount();
 
     await waitFor(
@@ -1828,10 +1875,11 @@ describe("C3 opening journey durability regressions", () => {
               typeof invocation.providerDispatchStartedAt === "string",
           ),
         ).toBe(true);
+        expect(invocations.slice(1)).toEqual([null, null]);
       },
       { timeout: 8_000 },
     );
-    expect(harness.generate).toHaveBeenCalledTimes(3);
+    expect(harness.generate).toHaveBeenCalledTimes(1);
   }, 30_000);
 
   it("fails closed when a legacy opening contains a pending slot from another batch", async () => {
@@ -2023,6 +2071,29 @@ describe("C3 opening journey durability regressions", () => {
 
 function createProviderRuntime() {
   const base = createDevelopmentRuntime(window.localStorage);
+  const publishConnectionCommit = base.modelHub.publishConnectionCommit.bind(base.modelHub);
+  vi.spyOn(base.modelHub, "publishConnectionCommit").mockImplementation(async (input) => {
+    const published = await publishConnectionCommit(input);
+    for (const catalogEntry of published.catalog) {
+      await base.modelHub.recordCapabilityScan({
+        scanId: base.ids.next(),
+        catalogEntryId: catalogEntry.id,
+        scanKind: "provider_metadata",
+        status: "succeeded",
+        evidenceVersion: "controlled-text-gateway-v1",
+        evidence: [
+          {
+            id: base.ids.next(),
+            capability: "text_generation",
+            verdict: "supported",
+            evidenceSource: "provider_metadata",
+            evidenceSummary: "合成测试网关明确声明为纯文字生成模型。",
+          },
+        ],
+      });
+    }
+    return published;
+  });
   const generate = vi.fn((input: Parameters<NativeModelGatewayClient["generate"]>[0]) =>
     Promise.resolve({ text: `供应商开头 ${input.generationId}`, usage: null }),
   );

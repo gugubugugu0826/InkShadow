@@ -3042,6 +3042,30 @@ class GenerationNovelSkillPersistence implements NovelSkillRuntimePersistence {
     return Promise.resolve(value);
   }
 
+  public createDefinitionWithBinding(
+    definition: NovelSkillDefinition,
+    binding: ProjectNovelSkillBinding,
+  ) {
+    this.definitions.set(`${definition.skillId}@${definition.version}`, definition);
+    this.bindings.set(`${binding.projectId}:${binding.skillId}`, binding);
+    return Promise.resolve(Object.freeze({ definition, binding }));
+  }
+
+  public createVersionAndRepinBinding(
+    definition: NovelSkillDefinition,
+    binding: ProjectNovelSkillBinding,
+    expectedRevision: number,
+  ) {
+    const key = `${binding.projectId}:${binding.skillId}`;
+    const current = this.bindings.get(key);
+    if ((current?.revision ?? 0) !== expectedRevision) {
+      return Promise.reject(new Error("Novel Skill test binding revision changed."));
+    }
+    this.definitions.set(`${definition.skillId}@${definition.version}`, definition);
+    this.bindings.set(key, binding);
+    return Promise.resolve(Object.freeze({ definition, binding }));
+  }
+
   public listDefinitions(): Promise<readonly NovelSkillDefinition[]> {
     return Promise.resolve([...this.definitions.values()]);
   }

@@ -24,7 +24,14 @@ import {
   modelHubCapabilityProbeSupportId,
   modelHubTextCapabilityProbeFailureMetadata,
 } from "./model-hub-text-capability-probe";
-import { isAutomaticPureTextOpeningCandidateEligible } from "./model-hub-router";
+import {
+  recommendModelHubCapabilityProbeKind,
+  type ModelHubCapabilityProbeKind,
+} from "./model-hub-capability-probe-kind";
+import {
+  isAutomaticPureTextOpeningCandidateEligible,
+  resolveModelCapabilityVerdict,
+} from "./model-hub-router";
 import {
   isRetiredModelProviderConnection,
   type ModelCatalogEntry,
@@ -260,7 +267,7 @@ export async function connectQuickModelProvider(
     if (availableCatalog.length === 0) {
       throw quickError(
         "QUICK_MODEL_CATALOG_NOT_SAVED",
-        "模型目录没有安全保存。请重试；已有项目和正文不会受到影响。",
+        "可用模型列表没有安全保存。请重试；已有项目和正文不会受到影响。",
       );
     }
     if (published.commit !== null) {
@@ -485,6 +492,7 @@ export async function inspectQuickBookStartRouteProbe(
 ): Promise<QuickBookStartProbeDisclosure> {
   assertDesktopGateway(runtime);
   const target = await readQuickBookStartTarget(runtime, input);
+  await assertQuickBookStartTextCapability(runtime, target);
   const disclosure = await quickBookStartProbeDisclosure(
     target.connection,
     target.catalogEntry,
@@ -502,9 +510,7 @@ export async function selectQuickBookStartCatalogEntry(
   runtime: DesktopRuntime,
   result: QuickModelConnectionResult,
 ): Promise<ModelCatalogEntry | null> {
-  const available = result.catalog.filter(
-    ({ availability, lifecycle }) => availability === "available" && lifecycle !== "deprecated",
-  );
+  const available = await listQuickBookStartTextCatalogEntries(runtime, result);
   const route = await runtime.modelHub.findTaskRoute("book_start_guidance");
   const routed =
     route?.enabled === true
@@ -523,6 +529,29 @@ export async function selectQuickBookStartCatalogEntry(
         now,
       ),
     ) ?? null
+  );
+}
+
+/**
+ * Returns only catalog entries whose text-generation purpose is supported by
+ * current capability evidence or exact maintained provider metadata. Unknown
+ * and vector-only targets remain connected in Model Hub but cannot enter the
+ * quick pure-text opening flow.
+ */
+export async function listQuickBookStartTextCatalogEntries(
+  runtime: DesktopRuntime,
+  result: QuickModelConnectionResult,
+): Promise<readonly ModelCatalogEntry[]> {
+  const available = result.catalog.filter(
+    ({ availability, lifecycle }) => availability === "available" && lifecycle !== "deprecated",
+  );
+  const kinds = await Promise.all(
+    available.map((catalogEntry) =>
+      resolveQuickBookStartCapabilityKind(runtime, result.connection, catalogEntry),
+    ),
+  );
+  return Object.freeze(
+    available.filter((_catalogEntry, index) => kinds[index] === "text_generation"),
   );
 }
 
@@ -570,6 +599,7 @@ export async function configureQuickBookStartRoute(
     );
   }
   const { connection, catalogEntry } = input.targetSnapshot;
+  await assertQuickBookStartTextCapability(runtime, input.targetSnapshot);
   const disclosure = await quickBookStartProbeDisclosure(
     connection,
     catalogEntry,
@@ -582,7 +612,6 @@ export async function configureQuickBookStartRoute(
     );
   }
   const expectedDispatchIdentity = modelHubFinalDispatchIdentity({ connection, catalogEntry });
-
   const probeScanId = runtime.ids.next();
   const probeInvocationId = input.invocationId;
   try {
@@ -777,7 +806,65 @@ async function assertCurrentQuickBookStartTarget(
     throw new ModelHubFinalDispatchError();
   }
   assertModelHubFinalDispatchUnchanged(expectedIdentity, modelHubFinalDispatchIdentity(current));
+  await assertQuickBookStartTextCapability(runtime, current);
   return current;
+}
+
+async function assertQuickBookStartTextCapability(
+  runtime: DesktopRuntime,
+  target: Readonly<{ connection: ModelProviderConnection; catalogEntry: ModelCatalogEntry }>,
+): Promise<void> {
+  const kind = await resolveQuickBookStartCapabilityKind(
+    runtime,
+    target.connection,
+    target.catalogEntry,
+  );
+  if (kind === "text_generation") return;
+  const supportId = modelHubCapabilityProbeSupportId({
+    id: runtime.ids.next(),
+    startedAt: runtime.clock.now(),
+  });
+  if (kind === "embedding") {
+    throw new QuickModelConnectionError(
+      "QUICK_MODEL_TEXT_CAPABILITY_MISMATCH",
+      "所选模型用于查找相关故事资料，不能作为文字开书模型。本次没有向模型服务发送内容，请选择已确认支持文字生成的模型。",
+      false,
+      supportId,
+      "probe_preparation",
+      0,
+    );
+  }
+  throw new QuickModelConnectionError(
+    "QUICK_MODEL_TEXT_CAPABILITY_UNKNOWN",
+    "所选模型的文字生成能力尚未确认。本次没有向模型服务发送内容，请先到完整模型中心核对能力。",
+    false,
+    supportId,
+    "probe_preparation",
+    0,
+  );
+}
+
+async function resolveQuickBookStartCapabilityKind(
+  runtime: DesktopRuntime,
+  connection: ModelProviderConnection,
+  catalogEntry: ModelCatalogEntry,
+): Promise<ModelHubCapabilityProbeKind | null> {
+  const evidence = await runtime.modelHub.listCapabilityEvidence(catalogEntry.id);
+  const now = runtime.clock.now();
+  const textVerdict = resolveModelCapabilityVerdict({
+    catalogEntryId: catalogEntry.id,
+    capability: "text_generation",
+    evidence,
+    now,
+  });
+  if (textVerdict === "unsupported") return null;
+  return recommendModelHubCapabilityProbeKind({
+    providerKind: connection.providerKind,
+    modelId: catalogEntry.providerModelId,
+    capabilityEvidence: evidence,
+    requestedTask: null,
+    now,
+  });
 }
 
 async function readQuickBookStartTarget(
@@ -835,7 +922,7 @@ async function quickBookStartProbeDisclosure(
     privacy: local
       ? "固定验证只发给这台电脑上的模型，不发送作品正文或灵感。"
       : "固定验证会发到所选供应商；不包含作品正文、灵感、设定或凭据。供应商留存与训练政策以其当前条款为准。",
-    sends: Object.freeze(["固定短句“只回复：OK”", "最多 64 个输出内容额度"]),
+    sends: Object.freeze(["固定短句“只回复：OK”", "AI 最多返回 64 个文字量单位（不是金额）"]),
     maximumProviderCalls: 1,
     automaticRetryCount: 0,
     estimatedMaximumCostMicros: null,
@@ -1080,7 +1167,7 @@ function normalizeQuickProbeError(
   if (!dispatched) {
     return new QuickModelConnectionError(
       normalized.code,
-      "模型能力检查在本机准备时停止，没有向模型服务发送内容，也不会自动重试；连接和模型目录仍然保留。",
+      "模型能力检查在本机准备时停止，没有向模型服务发送内容，也不会自动重试；连接和可用模型列表仍然保留。",
       normalized.retryable,
       supportId,
       "probe_preparation",

@@ -20,6 +20,7 @@ import {
 } from "./novel-skill.js";
 
 export const NOVEL_SKILL_COMPILER_VERSION = "novel-skill-compiler@1";
+export const MAX_NOVEL_SKILLS_PER_INVOCATION = 6;
 
 export interface CompileNovelSkillsInput {
   readonly projectId: string;
@@ -79,6 +80,19 @@ interface RuleOwner {
 export async function compileNovelSkills(
   input: CompileNovelSkillsInput,
 ): Promise<CompiledNovelSkills> {
+  return compileNovelSkillsWithScope(input, false);
+}
+
+export async function compileFixedNovelSkillEvaluationArm(
+  input: CompileNovelSkillsInput,
+): Promise<CompiledNovelSkills> {
+  return compileNovelSkillsWithScope(input, true);
+}
+
+async function compileNovelSkillsWithScope(
+  input: CompileNovelSkillsInput,
+  fixedEvaluationArm: boolean,
+): Promise<CompiledNovelSkills> {
   requireCompileBounds(input);
   const definitions = await resolveDefinitions(input.definitions, input.bindings);
   const bindings = validateBindings(input.bindings, input.projectId, definitions);
@@ -90,6 +104,9 @@ export async function compileNovelSkills(
         `Explicit novel skill '${skillId}' is not available in the supplied registry.`,
       );
     }
+  }
+  if (fixedEvaluationArm) {
+    requireFixedEvaluationArm(input, definitions, bindings);
   }
 
   const availableLayers = new Set(input.availableContextLayers);
@@ -103,10 +120,12 @@ export async function compileNovelSkills(
       input,
       availableLayers,
       genreTags,
+      fixedEvaluationArm,
     );
   });
 
   resolveExclusiveGroups(decisions);
+  applySkillCountBudget(decisions, fixedEvaluationArm ? 64 : MAX_NOVEL_SKILLS_PER_INVOCATION);
   applySkillBudget(decisions, input.maximumSkillTokens, input.invocationMode);
 
   const selectedDecisions = decisions.filter(({ included }) => included);
@@ -212,6 +231,7 @@ function initialDecision(
   input: CompileNovelSkillsInput,
   availableLayers: ReadonlySet<NovelSkillContextLayer>,
   genreTags: ReadonlySet<string>,
+  fixedEvaluationArm: boolean,
 ): MutableDecision {
   const taskOverride = binding?.taskOverrides[input.taskType];
   const enabled = taskOverride?.enabled ?? binding?.enabled ?? definition.defaultEnabled;
@@ -247,7 +267,7 @@ function initialDecision(
   } else if (
     definition.contextRequirements.requiredLayers.some((layer) => !availableLayers.has(layer))
   ) {
-    if (explicit) {
+    if (explicit && binding === null && !fixedEvaluationArm) {
       throw new NovelSkillError(
         "NOVEL_SKILL_REQUIRED_CONTEXT_MISSING",
         `Explicit novel skill '${definition.skillId}' is missing required context.`,
@@ -279,32 +299,51 @@ function resolveExclusiveGroups(decisions: readonly MutableDecision[]): void {
     entries.push(decision);
     groups.set(group, entries);
   }
-  for (const [group, entries] of groups) {
+  for (const entries of groups.values()) {
     if (entries.length < 2) {
       continue;
     }
     const ordered = [...entries].sort(compareDecisions);
     const winner = ordered[0];
-    const runnerUp = ordered[1];
-    if (winner === undefined || runnerUp === undefined) {
+    if (winner === undefined) {
       continue;
     }
-    if (winner.explicit && runnerUp.explicit) {
+    const runnerUp = ordered[1];
+    if (runnerUp === undefined) {
+      continue;
+    }
+    const bothProjectBound =
+      winner.explicit && runnerUp.explicit && winner.binding !== null && runnerUp.binding !== null;
+    if (winner.explicit && runnerUp.explicit && !bothProjectBound) {
       throw new NovelSkillError(
         "NOVEL_SKILL_CONFLICT",
-        `Explicit novel skills conflict in exclusive group '${group}'.`,
+        "Explicit novel skills conflict in the same exclusive group.",
       );
     }
-    if (winner.definition.precedence === runnerUp.definition.precedence) {
+    if (winner.definition.precedence === runnerUp.definition.precedence && !bothProjectBound) {
       throw new NovelSkillError(
         "NOVEL_SKILL_CONFLICT",
-        `Novel skill exclusive group '${group}' has an unresolved equal-precedence conflict.`,
+        "Novel skill exclusive group has an unresolved equal-precedence conflict.",
       );
     }
     for (const discarded of ordered.slice(1)) {
       discarded.included = false;
       discarded.reason = "conflict";
     }
+  }
+}
+
+function applySkillCountBudget(decisions: readonly MutableDecision[], maximum: number): void {
+  const eligible = decisions.filter(({ included }) => included).sort(compareDecisions);
+  if (eligible.slice(maximum).some(({ explicit, binding }) => explicit && binding === null)) {
+    throw new NovelSkillError(
+      "NOVEL_SKILL_BUDGET_EXCEEDED",
+      `At most ${String(maximum)} ad-hoc explicit novel skills may be used in one invocation.`,
+    );
+  }
+  for (const decision of eligible.slice(maximum)) {
+    decision.included = false;
+    decision.reason = "token_budget_exhausted";
   }
 }
 
@@ -325,13 +364,12 @@ function applySkillBudget(
       continue;
     }
     decision.included = false;
-    if (decision.explicit) {
+    if (decision.explicit && decision.binding === null) {
       throw new NovelSkillError(
         "NOVEL_SKILL_BUDGET_EXCEEDED",
         `Explicit novel skill '${decision.definition.skillId}' exceeds the reserved skill budget.`,
       );
     }
-    decision.included = false;
     decision.reason = "token_budget_exhausted";
   }
 }
@@ -551,6 +589,44 @@ function buildConfiguration(
   };
   canonicalNovelSkillConfiguration(configuration);
   return Object.freeze(configuration);
+}
+
+export function isFixedNovelSkillEvaluationConfiguration(
+  configuration: NovelSkillConfigurationSnapshot,
+): boolean {
+  const explicit = new Set(configuration.explicitSkillIds);
+  return (
+    configuration.experimentalAllowed &&
+    configuration.bindings.length === 0 &&
+    configuration.consideredDefinitions.length > 0 &&
+    explicit.size === configuration.consideredDefinitions.length &&
+    configuration.consideredDefinitions.every(
+      ({ skillId, kind }) => kind !== "custom" && explicit.has(skillId),
+    )
+  );
+}
+
+function requireFixedEvaluationArm(
+  input: CompileNovelSkillsInput,
+  definitions: readonly NovelSkillDefinition[],
+  bindings: ReadonlyMap<string, ProjectNovelSkillBinding>,
+): void {
+  const explicit = new Set(input.explicitSkillIds);
+  if (
+    !input.allowExperimental ||
+    bindings.size !== 0 ||
+    definitions.length === 0 ||
+    explicit.size !== definitions.length ||
+    definitions.some(
+      ({ skillId, ownerScope, kind }) =>
+        ownerScope !== "builtin" || kind === "custom" || !explicit.has(skillId),
+    )
+  ) {
+    throw new NovelSkillError(
+      "NOVEL_SKILL_INVALID",
+      "Fixed evaluation arms must contain only the complete immutable built-in definition set.",
+    );
+  }
 }
 
 function toInvocationItem(decision: MutableDecision): NovelSkillInvocationItem {

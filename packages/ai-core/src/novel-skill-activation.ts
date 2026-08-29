@@ -152,7 +152,7 @@ export function projectNovelSkillRecommendationsFromSeed(
         ? "confirmed_signal"
         : "tentative_signal",
       requiresAuthorConfirmation: true,
-      reason: `ProjectSeed 的${fieldLabels}出现了与“${rule.displayName}”相关的信号；这只是一项待作者确认的写作方法建议。`,
+      reason: `作品的${fieldLabels}出现了与“${rule.displayName}”相关的信号；这只是一项待作者确认的写作技能建议。`,
       evidence: Object.freeze(evidence),
     });
     return [recommendation];

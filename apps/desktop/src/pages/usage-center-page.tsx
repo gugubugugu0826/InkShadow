@@ -155,7 +155,9 @@ export function UsageCenterPage({ reader, now = currentDate }: UsageCenterPagePr
         <div>
           <p className="page-heading__eyebrow">只读的本地 AI 服务记录</p>
           <h1>模型使用与费用</h1>
-          <p>查看智能创作做了什么、使用了哪个模型、消耗了多少内容额度，以及可确认的费用估算。</p>
+          <p>
+            查看智能创作做了什么、使用了哪个模型、发送和返回了多少文字量，以及可确认的费用估算。
+          </p>
         </div>
         <div className="page-heading__actions">
           <Button
@@ -173,7 +175,12 @@ export function UsageCenterPage({ reader, now = currentDate }: UsageCenterPagePr
 
       <InlineAlert
         title="记录只存本机"
-        description="这里不保存正文、提示词或接口密钥。金额是按本地价格元数据计算的估算，不代表供应商最终账单；缺少内容额度回执或价格时会明确显示“费用未知”。"
+        description={
+          <div>
+            <p>这里不保存正文、提示词或接口密钥。已知金额是本机估算，不代表最终账单。</p>
+            <p>服务商没有提供可计算的单价，实际费用请以服务商账单为准。</p>
+          </div>
+        }
       />
 
       <PageStateBoundary
@@ -229,7 +236,7 @@ export function UsageCenterPage({ reader, now = currentDate }: UsageCenterPagePr
                 description={
                   hasDimensionFilters
                     ? "换一个作品、任务、供应商或模型，或者清除筛选。"
-                    : "完成一次真实智能创作任务后，这里会显示供应商、模型、内容额度、费用和隐私去向。"
+                    : "完成一次真实智能创作任务后，这里会显示供应商、模型、文字量、费用和隐私去向。"
                 }
                 {...(hasDimensionFilters
                   ? {
@@ -364,7 +371,7 @@ function UsageSummaryCards({ summary }: { readonly summary: UsageAggregate }) {
         title={formatCostTotals(summary.costTotals, summary.invocationCount)}
         description={
           summary.costUnknownCount > 0
-            ? `${String(summary.costUnknownCount)} 次费用未知 · 已知金额均为估算`
+            ? `${String(summary.costUnknownCount)} 次暂时无法估算 · 已知金额均为估算`
             : "已知金额均为估算，不是供应商账单"
         }
       />
@@ -373,11 +380,11 @@ function UsageSummaryCards({ summary }: { readonly summary: UsageAggregate }) {
         description={`${formatInteger(summary.successCount)} 次完整结果 · ${formatInteger(summary.partialCount)} 次部分结果 · ${formatInteger(summary.failureCount)} 次失败或待核对 · ${formatInteger(summary.activeCount)} 次进行中`}
       />
       <SummaryCard
-        title={`${formatInteger(summary.inputTokens + summary.outputTokens)} 个内容额度`}
+        title={`${formatInteger(summary.inputTokens + summary.outputTokens)} 个文字量单位`}
         description={
           summary.tokenUsageUnknownCount > 0
-            ? `输入 ${formatInteger(summary.inputTokens)} · 输出 ${formatInteger(summary.outputTokens)} · ${String(summary.tokenUsageUnknownCount)} 次未知`
-            : `输入 ${formatInteger(summary.inputTokens)} · 输出 ${formatInteger(summary.outputTokens)}`
+            ? `发送给 AI 的文字量 ${formatInteger(summary.inputTokens)} · AI 返回的文字量 ${formatInteger(summary.outputTokens)} · ${String(summary.tokenUsageUnknownCount)} 次未记录 · 这不是金额`
+            : `发送给 AI 的文字量 ${formatInteger(summary.inputTokens)} · AI 返回的文字量 ${formatInteger(summary.outputTokens)} · 这不是金额`
         }
       />
       <SummaryCard
@@ -389,25 +396,19 @@ function UsageSummaryCards({ summary }: { readonly summary: UsageAggregate }) {
 }
 
 function UsageAttentionSummary({ summary }: { readonly summary: UsageAggregate }) {
-  if (
-    summary.partialCount === 0 &&
-    summary.failureCount === 0 &&
-    summary.activeCount === 0 &&
-    summary.costUnknownCount === 0
-  ) {
+  if (summary.partialCount === 0 && summary.failureCount === 0 && summary.activeCount === 0) {
     return null;
   }
   const facts = [
     summary.partialCount > 0 ? `${formatInteger(summary.partialCount)} 次已保留部分结果` : null,
     summary.failureCount > 0 ? `${formatInteger(summary.failureCount)} 次失败或结果不明确` : null,
     summary.activeCount > 0 ? `${formatInteger(summary.activeCount)} 次尚未终结` : null,
-    summary.costUnknownCount > 0 ? `${formatInteger(summary.costUnknownCount)} 次费用未知` : null,
   ].filter((fact): fact is string => fact !== null);
   return (
     <InlineAlert
       tone={summary.failureCount > 0 ? "error" : "warning"}
       title={`AI 服务记录有 ${facts.join("、")}`}
-      description="请在下方明细按作品、章节和任务核对。结果需要核对的记录不会自动重发；费用未知也不会按 0 计算。"
+      description="请在下方明细按作品、章节和任务核对。请求状态不确定时不会自动重发。"
     />
   );
 }
@@ -506,7 +507,7 @@ function BreakdownPanel({
             <TableRow>
               <TableHead>{breakdownHeading(dimension)}</TableHead>
               <TableHead>次数</TableHead>
-              <TableHead>内容额度</TableHead>
+              <TableHead>文字量（不是金额）</TableHead>
               <TableHead>费用估算</TableHead>
               <TableHead>结果</TableHead>
               <TableHead>本地</TableHead>
@@ -560,7 +561,7 @@ function UsageDetailsTable({ snapshot }: { readonly snapshot: UsageCenterSnapsho
               <TableHead>时间</TableHead>
               <TableHead>作品 / 章节 / 任务</TableHead>
               <TableHead>供应商 / 模型</TableHead>
-              <TableHead>内容额度</TableHead>
+              <TableHead>文字量（不是金额）</TableHead>
               <TableHead>费用估算</TableHead>
               <TableHead>结果</TableHead>
               <TableHead>隐私去向</TableHead>
@@ -669,7 +670,7 @@ function periodRange(
 
 function formatCostTotals(totals: readonly UsageCostTotal[], invocationCount: number): string {
   if (totals.length === 0) {
-    return invocationCount === 0 ? "—" : "费用未知";
+    return invocationCount === 0 ? "—" : "暂时无法估算";
   }
   return totals.map((total) => formatMoney(total.currency, total.micros)).join(" + ");
 }
@@ -685,7 +686,7 @@ function formatMoney(currency: string, microsValue: string): string {
 
 function formatRecordCost(record: UsageCenterEvent): string {
   if (record.costMicros === null || record.currency === null) {
-    return "费用未知";
+    return "服务商未提供费用信息";
   }
   const formatted = formatMoney(record.currency, record.costMicros);
   return record.costMicros === "0" ? `${formatted}（费用记录为 0）` : formatted;
@@ -693,13 +694,13 @@ function formatRecordCost(record: UsageCenterEvent): string {
 
 function formatRecordTokens(record: UsageCenterEvent): string {
   if (record.inputTokens === null || record.outputTokens === null) {
-    return "内容额度未记录";
+    return "文字量未记录（不是金额）";
   }
   const cached =
     record.cachedInputTokens !== null && record.cachedInputTokens > 0
-      ? ` · 缓存 ${formatInteger(record.cachedInputTokens)}`
+      ? ` · 缓存文字量 ${formatInteger(record.cachedInputTokens)}`
       : "";
-  return `输入 ${formatInteger(record.inputTokens)} · 输出 ${formatInteger(record.outputTokens)}${cached}`;
+  return `发送给 AI 的文字量 ${formatInteger(record.inputTokens)} · AI 返回的文字量 ${formatInteger(record.outputTokens)}${cached}`;
 }
 
 function formatDateTime(timestamp: string): string {
@@ -729,7 +730,7 @@ function statusLabel(status: UsageEventStatus): string {
     failed: "未得到结果",
     cancelled: "已取消",
     pre_dispatch_cancelled: "发送前安全终止",
-    ambiguous: "结果待核对",
+    ambiguous: "请求可能已经发出，暂时无法确认结果",
     not_dispatched: "发送前失败",
   }[status];
 }

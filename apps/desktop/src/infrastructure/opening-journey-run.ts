@@ -169,9 +169,17 @@ export function advanceOpeningJourneyRun(
     readonly stage: OpeningJourneyRunStage;
     readonly now: string;
     readonly failureCode?: string | null;
+    /** Starts the bounded Provider execution window after explicit confirmation. */
+    readonly timeoutMs?: number;
   },
 ): OpeningJourneyRunV1 {
   const now = normalizeTimestamp(input.now, "opening run stage");
+  if (
+    input.timeoutMs !== undefined &&
+    (input.stage !== "confirmed" || !Number.isSafeInteger(input.timeoutMs) || input.timeoutMs < 1)
+  ) {
+    throw new Error("Opening journey execution timeout can only start at confirmation.");
+  }
   if (current.stage === input.stage) return current;
   if (TERMINAL_STAGES.has(current.stage)) {
     throw new Error("A terminal opening journey run cannot advance again.");
@@ -187,6 +195,10 @@ export function advanceOpeningJourneyRun(
     ...current,
     stage: input.stage,
     stageStartedAt: now,
+    deadlineAt:
+      input.timeoutMs === undefined
+        ? current.deadlineAt
+        : new Date(Date.parse(now) + input.timeoutMs).toISOString(),
     terminalAt: terminal ? now : null,
     failureCode: input.failureCode ?? null,
     autoRetryCount: 0 as const,
@@ -311,6 +323,7 @@ export async function checkpointOpeningJourneyRun(
     readonly stage: OpeningJourneyRunStage;
     readonly now: string;
     readonly failureCode?: string | null;
+    readonly timeoutMs?: number;
   },
 ): Promise<CreativeJourneyRecord> {
   let latest = await store.findById(journeyId);

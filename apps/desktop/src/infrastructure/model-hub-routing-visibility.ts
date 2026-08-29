@@ -441,7 +441,7 @@ export function capabilityLabel(capability: string): string {
     vision: "图片理解",
     translation: "翻译",
     tool_calling: "工具调用",
-    token_counting: "内容额度计数",
+    token_counting: "文字量计算",
     streaming: "流式输出",
     long_context: "长上下文",
   });

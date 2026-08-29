@@ -706,7 +706,7 @@ export class GovernedCreativeExtensionsRuntime {
         blocking(
           "EXTENSION_ROUTE_MISSING",
           "缺少模型路由",
-          "请先为此服务配置模型、地址与固定价格快照。",
+          "请先为此服务配置模型、地址与固定价格记录。",
         ),
       );
     }
@@ -792,7 +792,7 @@ export class GovernedCreativeExtensionsRuntime {
         code: "EXTENSION_REMOTE_CONSENT_REQUIRED",
         level: "action",
         title: "需要一次性远程发送确认",
-        detail: `正文与所列设置将发送到 ${effectiveRoute.baseUrl}；确认仅绑定本次项目、版本、模型、价格快照和请求指纹。`,
+        detail: `正文与所列设置将发送到 ${effectiveRoute.baseUrl}；确认仅绑定本次项目、版本、模型、价格记录和本次请求。`,
       });
     } else if (route !== null) {
       checks.push({
@@ -806,7 +806,7 @@ export class GovernedCreativeExtensionsRuntime {
       code: "EXTENSION_COST_ESTIMATE",
       level: "notice",
       title: "费用为内部估算台账",
-      detail: `本次最多预留 ${String(maximumCostMicros)} 微单位 ${effectiveRoute.pricing.currency}；有可靠用量时按服务方报告的输入/输出 token 与固定价格快照计算，用量未知时按最大预留保守结算。两者都是内部台账，不代表服务方账单。`,
+      detail: `本次最多预留 ${String(maximumCostMicros)} 微单位 ${effectiveRoute.pricing.currency}；有可靠用量时按服务方报告的发送和返回文字量与固定价格记录计算，用量未知时按最大预留保守结算。两者都是内部记录，不代表服务方账单。`,
     });
     if (effectiveRoute.location === "remote") {
       checks.push({
@@ -1261,7 +1261,7 @@ function validateRoute(route: GovernedCreativeExtensionRoute): string | null {
     route.pricing.outputMicrosPerMillionTokens < 0 ||
     !/^[A-Z]{3}$/u.test(route.pricing.currency)
   ) {
-    return "固定价格快照无效。";
+    return "固定价格记录无效。";
   }
   return null;
 }

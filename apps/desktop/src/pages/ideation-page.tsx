@@ -760,7 +760,7 @@ function IdeationLanding(props: {
         <div className="ideation-page__section-heading">
           <div>
             <h2 id="active-ideation-drafts">活跃构思草稿</h2>
-            <p>恢复时会重新读取最新修订，不会用列表快照静默覆盖。</p>
+            <p>恢复时会重新读取最新内容，不会用列表中的旧状态静默覆盖。</p>
           </div>
           <Button
             size="sm"

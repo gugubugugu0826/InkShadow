@@ -301,8 +301,8 @@ export function NovelSkillPaidEvaluationPanel({
     >
       <div className="section-heading">
         <div>
-          <h2 id="novel-skill-paid-evaluation-title">内置小说 Skill 付费 A/B 评测</h2>
-          <p>仅供专家验证写作方法；不会改变正文、已接受版本或作者默认设置。</p>
+          <h2 id="novel-skill-paid-evaluation-title">内置写作技能付费对照验证</h2>
+          <p>仅供专家验证写作技能；不会改变正文、已接受版本或作者默认设置。</p>
         </div>
         <Badge tone="warning">专家功能 · 默认不运行</Badge>
       </div>
@@ -310,7 +310,7 @@ export function NovelSkillPaidEvaluationPanel({
       <InlineAlert
         tone="warning"
         title="这是固定 192 次的商业模型评测"
-        description="仅在你完成本地预检、逐币种确认硬顶并单独点击“手动开始”后才会调用。全程无 fallback、无自动 retry；取消或崩溃后不会自动重发。"
+        description="仅在你完成本地预检、逐币种确认最高费用并单独点击“手动开始”后才会调用。全程不会自动改用备用模型，也不会自动重试；取消或崩溃后不会自动重发。"
       />
 
       <ol aria-label="付费评测四步进度">
@@ -446,7 +446,7 @@ export function NovelSkillPaidEvaluationPanel({
                 disabled={operationDisabled}
                 onChange={(event) => setCommercialTermsAccepted(event.currentTarget.checked)}
               />{" "}
-              我确认固定 192 次调用、上述逐币种硬顶、无 fallback、无自动 retry。
+              我确认固定 192 次调用、上述逐币种最高费用、不会自动改用备用模型，也不会自动重试。
             </label>
             <p className="candidate-panel__hint">
               保存授权不会开始评测。授权完成后仍需你单独点击“手动开始”。
@@ -493,7 +493,9 @@ export function NovelSkillPaidEvaluationPanel({
             </div>
           </CardHeader>
           <CardContent>
-            <p>每次只处理一个已锁定单元；失败会停下并保留证据，不会 fallback，也不会自动 retry。</p>
+            <p>
+              每次只处理一个已锁定单元；失败会停下并保留证据，不会自动改用备用模型，也不会自动重试。
+            </p>
             {snapshot.phase === "running_waiting" && (
               <Button
                 loading={busyAction === "start"}
@@ -562,7 +564,7 @@ export function NovelSkillPaidEvaluationPanel({
         <InlineAlert
           tone="info"
           title="付费调用与人工盲评均已完成"
-          description="结果仍需按预先锁定的判断规则复核；完成状态不会自动开启任何写作方法。"
+          description="结果仍需按预先锁定的判断规则复核；完成状态不会自动开启任何写作技能。"
         />
       )}
     </section>

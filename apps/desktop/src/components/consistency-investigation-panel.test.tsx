@@ -28,6 +28,7 @@ describe("ConsistencyInvestigationPanel", () => {
       catalogEntryId: "internal-catalog-id",
       modelId: "deepseek-v4-flash",
       dataDestination: "remote",
+      includesPrivateContent: false,
       maximumModelCalls: 1,
       maximumToolSteps: 5,
       automaticRetryCount: 0,
@@ -56,6 +57,7 @@ describe("ConsistencyInvestigationPanel", () => {
       providerKind: "deepseek",
       modelId: "deepseek-v4-flash",
       dataDestination: "remote",
+      includesPrivateContent: false,
       taskLabel: "正文修复",
       estimatedInputTokens: 1_200,
       maximumOutputTokens: 8_192,
@@ -105,6 +107,11 @@ describe("ConsistencyInvestigationPanel", () => {
     await user.click(screen.getByRole("button", { name: "查看范围与费用" }));
     expect(prepare).toHaveBeenCalledTimes(1);
     expect(run).not.toHaveBeenCalled();
+    expect(await screen.findByRole("heading", { name: "发送确认摘要", level: 3 })).toBeVisible();
+    expect(screen.getByText(/模型：我的长篇模型 · deepseek-v4-flash/u)).toBeVisible();
+    expect(screen.getByText(/私密内容：不包含私密章节/u)).toBeVisible();
+    expect(screen.getByText("最长等待")).not.toBeVisible();
+    await user.click(screen.getByText("查看详细信息"));
     expect(await screen.findByText("我的长篇模型 · deepseek-v4-flash")).toBeInTheDocument();
     expect(screen.queryByText(/deepseek ·/u)).not.toBeInTheDocument();
     expect(screen.queryByText("internal-connection-id")).not.toBeInTheDocument();
@@ -142,6 +149,13 @@ describe("ConsistencyInvestigationPanel", () => {
       targetChapterId: finding.evidence[0]?.chapterId,
     });
     expect(runRepairCandidate).not.toHaveBeenCalled();
+    expect(
+      await screen.findByRole("heading", { name: "修复建议发送确认摘要", level: 3 }),
+    ).toBeVisible();
+    expect(screen.getByText(/模型：我的修复模型 · deepseek-v4-flash/u)).toBeVisible();
+    expect(screen.getByText(/私密内容：不包含私密章节/u)).toBeVisible();
+    expect(screen.getByText("精确 1 次；自动重试 0 次")).not.toBeVisible();
+    await user.click(screen.getByText("查看详细信息"));
     expect(await screen.findByText("精确 1 次；自动重试 0 次")).toBeInTheDocument();
     expect(screen.getByText("我的修复模型 · deepseek-v4-flash")).toBeInTheDocument();
     expect(screen.getByText("接口密钥、密码或其他凭据")).toBeInTheDocument();
@@ -204,6 +218,7 @@ describe("ConsistencyInvestigationPanel", () => {
       catalogEntryId: "internal-catalog-id",
       modelId: "deepseek-v4-flash",
       dataDestination: "local",
+      includesPrivateContent: true,
       maximumModelCalls: 1,
       maximumToolSteps: 5,
       automaticRetryCount: 0,
@@ -236,6 +251,7 @@ describe("ConsistencyInvestigationPanel", () => {
 
     render(<ConsistencyInvestigationPanel projectId={PROJECT_ID} runtime={runtime} />);
     await user.click(screen.getByRole("button", { name: "查看范围与费用" }));
+    expect(screen.getByText(/私密内容：包含私密章节，只在本机处理/u)).toBeVisible();
     expect(await screen.findByText("仅发送到当前已验证的本机模型")).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "不发送并取消" }));
 
@@ -290,6 +306,7 @@ describe("ConsistencyInvestigationPanel", () => {
       catalogEntryId: "internal-catalog-id",
       modelId: "deepseek-v4-flash",
       dataDestination: "remote",
+      includesPrivateContent: false,
       maximumModelCalls: 1,
       maximumToolSteps: 5,
       automaticRetryCount: 0,

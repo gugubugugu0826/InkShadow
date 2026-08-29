@@ -301,9 +301,12 @@ export {
   type ProjectNovelSkillBinding,
 } from "./novel-skill.js";
 export {
+  MAX_NOVEL_SKILLS_PER_INVOCATION,
   NOVEL_SKILL_COMPILER_VERSION,
+  compileFixedNovelSkillEvaluationArm,
   compileNovelSkills,
   estimateNovelSkillPromptTokens,
+  isFixedNovelSkillEvaluationConfiguration,
   renderNovelSkillPromptSection,
   type CompileNovelSkillsInput,
   type CompiledNovelSkillRule,

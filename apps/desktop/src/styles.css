@@ -261,6 +261,10 @@ select {
   text-decoration: none;
 }
 
+.desktop-topbar__ai-status[data-tone="success"] .ink-badge {
+  border-color: var(--success-text);
+}
+
 .desktop-topbar__ai-status:focus-visible {
   outline: 0.125rem solid var(--focus-ring);
   outline-offset: 0.125rem;
@@ -1799,6 +1803,25 @@ select {
 
 .editor-toolbar__title {
   min-width: 0;
+}
+
+.editor-toolbar__chapter-identity {
+  display: flex;
+  max-width: min(100%, 48rem);
+  flex-wrap: wrap;
+  gap: var(--space-1) var(--space-3);
+  align-items: center;
+  margin-top: var(--space-1);
+  padding: var(--space-2) var(--space-3);
+  border: 0.0625rem solid var(--accent-border);
+  border-radius: var(--radius-md);
+  background: var(--accent-soft);
+  color: var(--text-secondary);
+  font-size: var(--font-caption-size);
+}
+
+.editor-toolbar__chapter-identity strong {
+  color: var(--accent-text);
 }
 
 .editor-toolbar__privacy {

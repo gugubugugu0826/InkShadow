@@ -43,7 +43,7 @@ describe("StudioUsagePage", () => {
       screen.getByText("实际收费以模型供应商账单为准；当前版本尚未实现供应商侧权威账单对账。"),
     ).toBeInTheDocument();
     expect(
-      screen.getByText("内部额度按预约时锁定的服务端价格快照计算，不代表供应商最终账单。"),
+      screen.getByText("内部额度按预约时锁定的服务端价格记录计算，不代表供应商最终账单。"),
     ).toBeInTheDocument();
 
     const monthly = screen.getByLabelText(/^月度额度（币种单位）/u);

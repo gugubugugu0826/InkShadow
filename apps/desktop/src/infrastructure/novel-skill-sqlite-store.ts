@@ -1,7 +1,9 @@
 import {
   canonicalNovelSkillDefinition,
+  compileFixedNovelSkillEvaluationArm,
   compileNovelSkills,
   hashNovelSkillConfiguration,
+  isFixedNovelSkillEvaluationConfiguration,
   renderNovelSkillPromptSection,
   validateNovelSkillConfigurationSnapshot,
   validateNovelSkillDefinition,
@@ -36,6 +38,16 @@ export interface NovelSkillInvocationSnapshotRecord {
   readonly createdAt: string;
 }
 
+export interface IsolatedNovelSkillDefinitionRecord {
+  readonly recordNumber: number;
+  readonly reason: "用户技能记录已损坏";
+}
+
+export interface NovelSkillDefinitionReadResult {
+  readonly definitions: readonly NovelSkillDefinition[];
+  readonly isolatedRecords: readonly IsolatedNovelSkillDefinitionRecord[];
+}
+
 export interface CommitNovelSkillInvocationInput {
   readonly snapshotId: string;
   readonly projectId: string;
@@ -45,6 +57,11 @@ export interface CommitNovelSkillInvocationInput {
   readonly invocationMode: NovelSkillInvocationMode;
   readonly compiled: CompiledNovelSkills;
   readonly createdAt: string;
+}
+
+export interface NovelSkillDefinitionBindingCommitResult {
+  readonly definition: NovelSkillDefinition;
+  readonly binding: ProjectNovelSkillBinding;
 }
 
 export type NovelSkillStoreErrorCode =
@@ -141,24 +158,7 @@ export class NovelSkillSqliteStore {
   public async insertDefinition(value: NovelSkillDefinition): Promise<NovelSkillDefinition> {
     try {
       const definition = await verifyNovelSkillDefinition(value);
-      await this.executor.execute(
-        `INSERT OR IGNORE INTO novel_skill_definitions (
-           skill_id, version, display_name, summary, kind, owner_scope, status,
-           default_enabled, precedence, task_types_json, activation_json,
-           context_requirements_json, instructions_json, output_contract_json,
-           validation_json, definition_hash, provenance_url, provenance_commit,
-           provenance_license, created_at
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        definitionBindings(definition),
-      );
-      const stored = await this.findDefinition(definition.skillId, definition.version);
-      if (stored?.definitionHash !== definition.definitionHash) {
-        throw storeError(
-          "NOVEL_SKILL_DEFINITION_CONFLICT",
-          "An immutable novel skill version already exists with different content.",
-        );
-      }
-      return stored;
+      return await insertDefinitionRecord(this.executor, definition);
     } catch (error: unknown) {
       throw normalizeStoreError(
         error,
@@ -203,91 +203,53 @@ export class NovelSkillSqliteStore {
     }
   }
 
+  public async listDefinitionsWithIsolation(): Promise<NovelSkillDefinitionReadResult> {
+    try {
+      const rows = await this.executor.select<DefinitionRow>(
+        `${DEFINITION_SELECT} ORDER BY skill_id, version`,
+      );
+      const definitions: NovelSkillDefinition[] = [];
+      const isolatedRecords: IsolatedNovelSkillDefinitionRecord[] = [];
+      for (const [index, row] of rows.entries()) {
+        try {
+          definitions.push(await hydrateDefinition(row));
+        } catch (error: unknown) {
+          if (row.owner_scope !== "user" || row.kind !== "custom") throw error;
+          isolatedRecords.push(
+            Object.freeze({
+              recordNumber: index + 1,
+              reason: "用户技能记录已损坏" as const,
+            }),
+          );
+          globalThis.console.error(
+            "[NOVEL_SKILL_CUSTOM_RECORD_ISOLATED] One user skill record was excluded from compilation.",
+            { recordNumber: index + 1 },
+          );
+        }
+      }
+      return Object.freeze({
+        definitions: Object.freeze(definitions),
+        isolatedRecords: Object.freeze(isolatedRecords),
+      });
+    } catch (error: unknown) {
+      throw normalizeStoreError(
+        error,
+        "NOVEL_SKILL_STORE_CORRUPT",
+        "Stored novel skill definitions could not be read safely.",
+      );
+    }
+  }
+
   public async saveBinding(
     value: ProjectNovelSkillBinding,
     expectedRevision: number,
   ): Promise<ProjectNovelSkillBinding> {
     try {
       const binding = validateProjectNovelSkillBinding(value);
-      requireUuidV7(binding.projectId, "projectId");
-      if (!Number.isSafeInteger(expectedRevision) || expectedRevision < 0) {
-        throw storeError("NOVEL_SKILL_STORE_INVALID", "Expected binding revision is invalid.");
-      }
-      return await this.executor.transaction(async (transaction) => {
-        const projectRows = await transaction.select<{ readonly status: string }>(
-          "SELECT status FROM projects WHERE id = ?",
-          [binding.projectId],
-        );
-        if (projectRows[0]?.status !== "active") {
-          throw storeError(
-            "NOVEL_SKILL_STORE_INVALID",
-            "Novel skill bindings can only be saved for an active project.",
-          );
-        }
-        const existingRows = await transaction.select<BindingRow>(
-          `${BINDING_SELECT} WHERE project_id = ? AND skill_id = ?`,
-          [binding.projectId, binding.skillId],
-        );
-        const existing = existingRows[0];
-        if (existing === undefined) {
-          if (expectedRevision !== 0 || binding.revision !== 1) {
-            throw storeError(
-              "NOVEL_SKILL_BINDING_CONFLICT",
-              "Novel skill binding creation revision does not match.",
-            );
-          }
-          await transaction.execute(
-            `INSERT INTO project_novel_skill_bindings (
-             project_id, skill_id, pinned_version, enabled, activation_mode,
-             task_overrides_json, revision, created_at, updated_at
-           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-            bindingBindings(binding),
-          );
-        } else {
-          const stored = hydrateBinding(existing);
-          if (
-            stored.revision !== expectedRevision ||
-            binding.revision !== expectedRevision + 1 ||
-            binding.createdAt !== stored.createdAt
-          ) {
-            throw storeError(
-              "NOVEL_SKILL_BINDING_CONFLICT",
-              "Novel skill binding was changed by another revision.",
-            );
-          }
-          const result = await transaction.execute(
-            `UPDATE project_novel_skill_bindings
-           SET pinned_version = ?, enabled = ?, activation_mode = ?,
-               task_overrides_json = ?, revision = ?, updated_at = ?
-           WHERE project_id = ? AND skill_id = ? AND revision = ?`,
-            [
-              binding.pinnedVersion,
-              binding.enabled ? 1 : 0,
-              binding.activationMode,
-              JSON.stringify(binding.taskOverrides),
-              binding.revision,
-              binding.updatedAt,
-              binding.projectId,
-              binding.skillId,
-              expectedRevision,
-            ],
-          );
-          if (result.rowsAffected !== 1) {
-            throw storeError(
-              "NOVEL_SKILL_BINDING_CONFLICT",
-              "Novel skill binding update lost its revision race.",
-            );
-          }
-        }
-        const saved = await transaction.select<BindingRow>(
-          `${BINDING_SELECT} WHERE project_id = ? AND skill_id = ?`,
-          [binding.projectId, binding.skillId],
-        );
-        if (saved[0] === undefined) {
-          throw storeError("NOVEL_SKILL_STORE_CORRUPT", "Saved novel skill binding is missing.");
-        }
-        return hydrateBinding(saved[0]);
-      });
+      validateBindingWrite(binding, expectedRevision);
+      return await this.executor.transaction(async (transaction) =>
+        saveBindingRecord(transaction, binding, expectedRevision),
+      );
     } catch (error: unknown) {
       throw normalizeStoreError(
         error,
@@ -295,6 +257,32 @@ export class NovelSkillSqliteStore {
         "Novel skill binding input was rejected.",
       );
     }
+  }
+
+  public async createDefinitionWithBinding(
+    definitionValue: NovelSkillDefinition,
+    bindingValue: ProjectNovelSkillBinding,
+  ): Promise<NovelSkillDefinitionBindingCommitResult> {
+    return await this.commitCustomDefinitionAndBinding(definitionValue, bindingValue, 0, true);
+  }
+
+  public async createVersionAndRepinBinding(
+    definitionValue: NovelSkillDefinition,
+    bindingValue: ProjectNovelSkillBinding,
+    expectedRevision: number,
+  ): Promise<NovelSkillDefinitionBindingCommitResult> {
+    if (expectedRevision < 1) {
+      throw storeError(
+        "NOVEL_SKILL_BINDING_CONFLICT",
+        "An existing project binding is required before creating a new custom version.",
+      );
+    }
+    return await this.commitCustomDefinitionAndBinding(
+      definitionValue,
+      bindingValue,
+      expectedRevision,
+      false,
+    );
   }
 
   public async listBindings(projectId: string): Promise<readonly ProjectNovelSkillBinding[]> {
@@ -310,6 +298,37 @@ export class NovelSkillSqliteStore {
         error,
         "NOVEL_SKILL_STORE_CORRUPT",
         "Stored novel skill bindings could not be read.",
+      );
+    }
+  }
+
+  private async commitCustomDefinitionAndBinding(
+    definitionValue: NovelSkillDefinition,
+    bindingValue: ProjectNovelSkillBinding,
+    expectedRevision: number,
+    creatingBinding: boolean,
+  ): Promise<NovelSkillDefinitionBindingCommitResult> {
+    try {
+      const definition = await verifyNovelSkillDefinition(definitionValue);
+      const binding = validateProjectNovelSkillBinding(bindingValue);
+      validateBindingWrite(binding, expectedRevision);
+      requireCustomDefinitionBinding(definition, binding);
+      if (creatingBinding !== (expectedRevision === 0 && binding.revision === 1)) {
+        throw storeError(
+          "NOVEL_SKILL_BINDING_CONFLICT",
+          "Custom definition and project binding revisions do not describe one mutation.",
+        );
+      }
+      return await this.executor.transaction(async (transaction) => {
+        const savedDefinition = await insertDefinitionRecord(transaction, definition);
+        const savedBinding = await saveBindingRecord(transaction, binding, expectedRevision);
+        return Object.freeze({ definition: savedDefinition, binding: savedBinding });
+      });
+    } catch (error: unknown) {
+      throw normalizeStoreError(
+        error,
+        "NOVEL_SKILL_STORE_INVALID",
+        "Custom novel skill definition and project binding were not saved.",
       );
     }
   }
@@ -589,7 +608,7 @@ async function replayCompiledConfiguration(
     bindingSource === "persisted_bindings"
       ? await loadPersistedReplayBindings(executor, projectId, configuration)
       : buildSnapshotReplayBindings(projectId, configuration, createdAt);
-  return compileNovelSkills({
+  const replayInput = {
     projectId,
     taskType: configuration.taskType,
     invocationMode: configuration.invocationMode,
@@ -600,7 +619,10 @@ async function replayCompiledConfiguration(
     allowExperimental: configuration.experimentalAllowed,
     definitions,
     bindings,
-  });
+  };
+  return isFixedNovelSkillEvaluationConfiguration(configuration)
+    ? compileFixedNovelSkillEvaluationArm(replayInput)
+    : compileNovelSkills(replayInput);
 }
 
 async function loadReplayDefinitions(
@@ -942,6 +964,139 @@ function hydrateItem(row: ItemRow): NovelSkillInvocationItem {
       error,
     );
   }
+}
+
+async function insertDefinitionRecord(
+  executor: TransactionExecutor,
+  definition: NovelSkillDefinition,
+): Promise<NovelSkillDefinition> {
+  await executor.execute(
+    `INSERT OR IGNORE INTO novel_skill_definitions (
+       skill_id, version, display_name, summary, kind, owner_scope, status,
+       default_enabled, precedence, task_types_json, activation_json,
+       context_requirements_json, instructions_json, output_contract_json,
+       validation_json, definition_hash, provenance_url, provenance_commit,
+       provenance_license, created_at
+     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    definitionBindings(definition),
+  );
+  const rows = await executor.select<DefinitionRow>(
+    `${DEFINITION_SELECT} WHERE skill_id = ? AND version = ?`,
+    [definition.skillId, definition.version],
+  );
+  const stored = rows[0] === undefined ? null : await hydrateDefinition(rows[0]);
+  if (stored?.definitionHash !== definition.definitionHash) {
+    throw storeError(
+      "NOVEL_SKILL_DEFINITION_CONFLICT",
+      "An immutable novel skill version already exists with different content.",
+    );
+  }
+  return stored;
+}
+
+function validateBindingWrite(binding: ProjectNovelSkillBinding, expectedRevision: number): void {
+  requireUuidV7(binding.projectId, "projectId");
+  if (!Number.isSafeInteger(expectedRevision) || expectedRevision < 0) {
+    throw storeError("NOVEL_SKILL_STORE_INVALID", "Expected binding revision is invalid.");
+  }
+}
+
+function requireCustomDefinitionBinding(
+  definition: NovelSkillDefinition,
+  binding: ProjectNovelSkillBinding,
+): void {
+  if (definition.ownerScope !== "user" || definition.kind !== "custom") {
+    throw storeError(
+      "NOVEL_SKILL_STORE_INVALID",
+      "Only a user-owned custom definition can use the custom atomic mutation path.",
+    );
+  }
+  if (binding.skillId !== definition.skillId || binding.pinnedVersion !== definition.version) {
+    throw storeError(
+      "NOVEL_SKILL_STORE_INVALID",
+      "The project binding must pin the exact custom definition being committed.",
+    );
+  }
+}
+
+async function saveBindingRecord(
+  executor: TransactionExecutor,
+  binding: ProjectNovelSkillBinding,
+  expectedRevision: number,
+): Promise<ProjectNovelSkillBinding> {
+  const projectRows = await executor.select<{ readonly status: string }>(
+    "SELECT status FROM projects WHERE id = ?",
+    [binding.projectId],
+  );
+  if (projectRows[0]?.status !== "active") {
+    throw storeError(
+      "NOVEL_SKILL_STORE_INVALID",
+      "Novel skill bindings can only be saved for an active project.",
+    );
+  }
+  const existingRows = await executor.select<BindingRow>(
+    `${BINDING_SELECT} WHERE project_id = ? AND skill_id = ?`,
+    [binding.projectId, binding.skillId],
+  );
+  const existing = existingRows[0];
+  if (existing === undefined) {
+    if (expectedRevision !== 0 || binding.revision !== 1) {
+      throw storeError(
+        "NOVEL_SKILL_BINDING_CONFLICT",
+        "Novel skill binding creation revision does not match.",
+      );
+    }
+    await executor.execute(
+      `INSERT INTO project_novel_skill_bindings (
+         project_id, skill_id, pinned_version, enabled, activation_mode,
+         task_overrides_json, revision, created_at, updated_at
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      bindingBindings(binding),
+    );
+  } else {
+    const stored = hydrateBinding(existing);
+    if (
+      stored.revision !== expectedRevision ||
+      binding.revision !== expectedRevision + 1 ||
+      binding.createdAt !== stored.createdAt
+    ) {
+      throw storeError(
+        "NOVEL_SKILL_BINDING_CONFLICT",
+        "Novel skill binding was changed by another revision.",
+      );
+    }
+    const result = await executor.execute(
+      `UPDATE project_novel_skill_bindings
+       SET pinned_version = ?, enabled = ?, activation_mode = ?,
+           task_overrides_json = ?, revision = ?, updated_at = ?
+       WHERE project_id = ? AND skill_id = ? AND revision = ?`,
+      [
+        binding.pinnedVersion,
+        binding.enabled ? 1 : 0,
+        binding.activationMode,
+        JSON.stringify(binding.taskOverrides),
+        binding.revision,
+        binding.updatedAt,
+        binding.projectId,
+        binding.skillId,
+        expectedRevision,
+      ],
+    );
+    if (result.rowsAffected !== 1) {
+      throw storeError(
+        "NOVEL_SKILL_BINDING_CONFLICT",
+        "Novel skill binding update lost its revision race.",
+      );
+    }
+  }
+  const saved = await executor.select<BindingRow>(
+    `${BINDING_SELECT} WHERE project_id = ? AND skill_id = ?`,
+    [binding.projectId, binding.skillId],
+  );
+  if (saved[0] === undefined) {
+    throw storeError("NOVEL_SKILL_STORE_CORRUPT", "Saved novel skill binding is missing.");
+  }
+  return hydrateBinding(saved[0]);
 }
 
 function definitionBindings(definition: NovelSkillDefinition): readonly (string | number | null)[] {

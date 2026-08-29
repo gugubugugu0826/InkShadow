@@ -1,5 +1,6 @@
 import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { Project, parseIsoUtcTimestamp, type IsoUtcTimestamp } from "@inkshadow/domain";
 import { ToastProvider } from "@inkshadow/ui";
 import { MemoryRouter } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -10,6 +11,12 @@ import { RuntimeProvider } from "../runtime-context";
 import { ProjectsPage } from "./projects-page";
 
 const IMPORT_JOURNEY_STORAGE_KEY = "inkshadow.import-rewrite-journey.v2";
+
+function timestamp(value: string): IsoUtcTimestamp {
+  const parsed = parseIsoUtcTimestamp(value);
+  if (!parsed.ok) throw parsed.error;
+  return parsed.value;
+}
 
 function renderPage(runtime: DesktopRuntime) {
   return render(
@@ -84,6 +91,35 @@ describe("ProjectsPage library states", () => {
 
     await user.click(screen.getByRole("button", { name: "查看归档" }));
     expect(await screen.findByRole("heading", { name: "雾港来信", level: 2 })).toBeVisible();
+  });
+
+  it("shows creation time, completion state, and recovery state for historical duplicate titles", async () => {
+    const runtime = createDevelopmentRuntime(window.localStorage);
+    const first = await createProject(runtime, "同名作品");
+    const secondResult = Project.rehydrate({
+      ...first.toSnapshot(),
+      id: runtime.ids.next(),
+      createdAt: timestamp("2024-01-02T03:04:05.000Z"),
+      updatedAt: timestamp("2024-02-03T04:05:06.000Z"),
+    });
+    if (!secondResult.ok) throw secondResult.error;
+    const historicalDuplicates = [first, secondResult.value] as const;
+    vi.spyOn(runtime.useCases.listProjects, "execute").mockResolvedValue({
+      ok: true,
+      value: historicalDuplicates,
+    });
+
+    renderPage(runtime);
+
+    const headings = await screen.findAllByRole("heading", { name: "同名作品", level: 2 });
+    expect(headings).toHaveLength(2);
+    for (const heading of headings) {
+      const card = heading.closest<HTMLElement>(".ink-card");
+      if (card === null) throw new Error("同名作品缺少作品卡片。 ");
+      expect(within(card).getByText(/创建于/u)).toBeVisible();
+      expect(within(card).getByText(/更新于/u)).toBeVisible();
+      expect(within(card).getByText("进行中")).toBeVisible();
+    }
   });
 
   it("offers clear-search and archived-project paths for a real no-result query", async () => {

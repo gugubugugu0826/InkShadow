@@ -55,6 +55,9 @@ jobs:
       - name: Test
         run: pnpm test
 
+      - name: Test release and repository scripts
+        run: pnpm test:scripts
+
       - name: Install Playwright browser
         run: pnpm exec playwright install chromium
 
@@ -156,6 +159,9 @@ jobs:
 
       - name: Package the exercised frontend as an unsigned NSIS installer
         run: pnpm --filter @inkshadow/desktop tauri:package:unsigned:prebuilt
+
+      - name: Verify installer product and file versions
+        run: pnpm release:verify:installer-version
 
       - name: Upload unsigned installer
         uses: actions/upload-artifact@v4

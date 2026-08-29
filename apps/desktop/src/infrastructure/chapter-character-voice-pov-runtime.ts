@@ -431,7 +431,7 @@ function readableSkipExplanation(reason: string): string {
     chapter_project_mismatch: "章节不属于当前项目，因此没有读取其内容。",
     current_version_not_found: "找不到章节当前保存版本。请先重新保存章节。",
     current_version_scope_mismatch: "当前版本与所选项目或章节不匹配。",
-    current_version_content_mismatch: "章节内容与当前不可变版本不一致，请先完成保存。",
+    current_version_content_mismatch: "章节内容与当前不会被改动的历史版本不一致，请先完成保存。",
     current_version_hash_mismatch: "当前版本哈希不匹配，为避免引用错误内容，本次检查已停止。",
     fact_project_mismatch: "相关事实不属于当前项目，已安全排除。",
     not_user_confirmed_formal: "只有用户已确认的正式事实才可以参与声纹和知识边界判断。",

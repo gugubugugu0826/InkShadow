@@ -407,6 +407,7 @@ describe("DesktopShell", () => {
     const status = rendered.container.querySelector(".desktop-topbar__ai-status");
     if (!(status instanceof HTMLElement)) throw new Error("Expected the AI status link.");
     await waitFor(() => expect(status).toHaveTextContent("AI 基础连接可用"));
+    expect(status).toHaveAttribute("data-tone", "success");
 
     recordSafeGenerationPreflightFailureDiagnostic(runtime, {
       taskType: "continuation",
@@ -421,7 +422,7 @@ describe("DesktopShell", () => {
     expect(status).toHaveAttribute("href", "/settings#model-center");
     expect(status).toHaveAccessibleName(
       expect.stringMatching(
-        /续写受影响.*隐私规则.*当前章节明确调整隐私.*本地模型.*正文、不可变版本和隔离建议均未改变/u,
+        /续写受影响.*隐私规则.*当前章节明确调整隐私.*本地模型.*正文、不会被改动的历史版本和隔离建议均未改变/u,
       ),
     );
 
@@ -456,7 +457,9 @@ describe("DesktopShell", () => {
     });
     await waitFor(() => expect(status).toHaveAttribute("href", `/projects/${projectId}/context`));
     expect(status).toHaveAccessibleName(
-      expect.stringMatching(/上下文未能安全整理.*本次参考.*正文、不可变版本和隔离建议均未改变/u),
+      expect.stringMatching(
+        /上下文未能安全整理.*本次参考.*正文、不会被改动的历史版本和隔离建议均未改变/u,
+      ),
     );
 
     recordSafeGenerationPreflightDiagnostic(runtime, {

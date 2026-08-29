@@ -3,7 +3,6 @@ import path from "node:path";
 
 import {
   NOVEL_SKILL_CONTEXT_LAYERS,
-  compileNovelSkills,
   createCoreNovelSkillDefinitions,
   createGenreNovelSkillDefinitions,
   createNovelSkillEvaluationExecutionPlan,
@@ -21,6 +20,7 @@ import {
   hashNovelSkillEvaluationModelIdentity,
 } from "./novel-skill-evaluation-sqlite-store.js";
 import { NovelSkillSqliteStore } from "./novel-skill-sqlite-store.js";
+import { compileNovelSkillPaidEvaluationArmSkills } from "./novel-skill-paid-evaluation-payload-authority.js";
 
 const migration = [
   "0001_core.sql",
@@ -670,17 +670,14 @@ async function prepareSkillArmEvidence(executor: NodeSqliteExecutor, fixtureId: 
     ...(await createCoreNovelSkillDefinitions()),
     ...(await createGenreNovelSkillDefinitions()),
   ];
-  const compiled = await compileNovelSkills({
+  const compiled = await compileNovelSkillPaidEvaluationArmSkills({
     projectId: EVALUATION_PROJECT_ID,
     taskType: cell.task_type,
     invocationMode: cell.invocation_mode,
     maximumSkillTokens: 100_000,
     genreTags: JSON.parse(cell.genre_tags_json) as string[],
-    explicitSkillIds: definitions.map(({ skillId }) => skillId),
     availableContextLayers: NOVEL_SKILL_CONTEXT_LAYERS,
-    allowExperimental: true,
     definitions,
-    bindings: [],
   });
   const snapshotId = "019f9f4a-b3c7-7350-8000-000000000076";
   await new NovelSkillSqliteStore(executor).commitInvocationBeforeDispatch({

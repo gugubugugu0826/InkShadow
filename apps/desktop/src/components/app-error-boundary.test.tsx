@@ -61,7 +61,7 @@ describe("AppErrorBoundary", () => {
     );
 
     expect(screen.getByRole("heading", { name: "这个页面暂时没有正常打开" })).toBeVisible();
-    expect(await screen.findByText(/支持编号：UI-/u)).toBeVisible();
+    expect(await screen.findByText(/问题编号：UI-.*联系支持时提供/u)).toBeVisible();
     expect(screen.queryByText(sensitiveMessage)).not.toBeInTheDocument();
     expect(screen.getByText(/已保存的正文、版本和本地备份不会/u)).toBeVisible();
 
@@ -134,7 +134,7 @@ describe("AppErrorBoundary", () => {
       </AppErrorBoundary>,
     );
 
-    expect(await screen.findByText(/支持编号：UI-/u)).toBeVisible();
+    expect(await screen.findByText(/问题编号：UI-.*联系支持时提供/u)).toBeVisible();
     expect(screen.queryByText("private remote detail")).not.toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "返回创作首页" }));

@@ -30,7 +30,8 @@ use model_gateway::{
     CommandError, ModelGatewayState, NativeImageDestinationState,
 };
 use native_export_artifact::{
-    native_choose_export_destination, native_write_export_artifact, NativeExportDestinationState,
+    native_choose_export_destination, native_open_export_artifact, native_write_export_artifact,
+    NativeExportDestinationState,
 };
 use native_sqlite::{
     native_choose_backup_destination, native_choose_pre_restore_backup_destination,
@@ -503,6 +504,7 @@ pub fn run() {
             choose_native_image_destination,
             generate_native_image_to_file,
             native_choose_export_destination,
+            native_open_export_artifact,
             native_write_export_artifact,
             start_native_generation,
             cancel_native_generation,

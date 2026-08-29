@@ -29,15 +29,15 @@ describe("quick AI connection drawer", () => {
 
     expect(await screen.findByText("当前 AI 状态：连接失败")).toBeVisible();
     const failureCopy = await screen.findByText(
-      /支持编号：墨影-[0-9]{14}-[A-Z0-9]{6}.*请重新读取模型中心状态/u,
+      /问题编号：墨影-[0-9]{14}-[A-Z0-9]{6}.*请重新读取 AI 写作状态/u,
     );
-    const supportId = /支持编号：(墨影-[0-9]{14}-[A-Z0-9]{6})/u.exec(failureCopy.textContent)?.[1];
+    const supportId = /问题编号：(墨影-[0-9]{14}-[A-Z0-9]{6})/u.exec(failureCopy.textContent)?.[1];
     expect(supportId).toBeDefined();
 
     await user.click(screen.getByRole("button", { name: "重新读取模型中心状态" }));
 
     await waitFor(() => {
-      expect(screen.getByText(new RegExp(`支持编号：${supportId ?? ""}`, "u"))).toBeVisible();
+      expect(screen.getByText(new RegExp(`问题编号：${supportId ?? ""}`, "u"))).toBeVisible();
     });
     expect(harness.generate).not.toHaveBeenCalled();
   });
@@ -234,7 +234,7 @@ describe("quick AI connection drawer", () => {
     renderDrawer(harness.runtime);
 
     expect(await screen.findByText(/暂时无法检查本机已保存的接口密钥/u)).toBeVisible();
-    expect(screen.getByText(/支持编号：墨影-[0-9]{14}-[A-Z0-9]{6}/u)).toBeVisible();
+    expect(screen.getByText(/问题编号：墨影-[0-9]{14}-[A-Z0-9]{6}/u)).toBeVisible();
     expect(document.body).not.toHaveTextContent("CREDENTIAL_STORE_UNAVAILABLE");
   });
 
@@ -446,6 +446,31 @@ describe("quick AI connection drawer", () => {
     expect(harness.generate).not.toHaveBeenCalled();
   }, 30_000);
 
+  it("offers only confirmed text models and hides vector or unknown-capability entries", async () => {
+    const harness = createTauriHarness(
+      {},
+      {
+        models: [
+          { id: "text-embedding-3-small", displayName: "text-embedding-3-small" },
+          { id: "unknown-account-model", displayName: "Unknown account model" },
+          { id: "gpt-5.6-sol", displayName: "GPT-5.6 Sol" },
+        ],
+      },
+    );
+    const user = userEvent.setup();
+    renderDrawer(harness.runtime);
+    await user.click(screen.getByRole("radio", { name: /^OpenAI官方云端 API$/u }));
+    fireEvent.change(screen.getByLabelText(/^接口密钥/u), { target: { value: "good-key" } });
+    await user.click(screen.getByRole("button", { name: "测试连接并查找模型" }));
+
+    const modelSelect = await screen.findByLabelText("开书使用的模型");
+    expect(modelSelect).toHaveDisplayValue("GPT-5.6 Sol · gpt-5.6-sol");
+    expect(screen.getByRole("option", { name: "GPT-5.6 Sol · gpt-5.6-sol" })).toBeVisible();
+    expect(screen.queryByRole("option", { name: /embedding/iu })).toBeNull();
+    expect(screen.queryByRole("option", { name: /Unknown account model/iu })).toBeNull();
+    expect(harness.generate).not.toHaveBeenCalled();
+  }, 30_000);
+
   it("labels a pre-dispatch probe failure as local preparation with a stable support number", async () => {
     const harness = createTauriHarness({}, { probePreparationFails: true });
     const user = userEvent.setup();
@@ -466,7 +491,7 @@ describe("quick AI connection drawer", () => {
       await screen.findByRole("heading", { name: "模型能力检查未发送" }, ASYNC_UI_TIMEOUT),
     ).toBeVisible();
     expect(screen.getByText(/没有向模型服务发送内容/u)).toBeVisible();
-    expect(screen.getByText(/支持编号：墨影-[0-9]{14}-[A-Z0-9]{4,8}/u)).toBeVisible();
+    expect(screen.getByText(/问题编号：墨影-[0-9]{14}-[A-Z0-9]{4,8}/u)).toBeVisible();
     expect(screen.queryByText(/检查网络、Key 和账号权限/u)).toBeNull();
     expect(screen.queryByText("连接没成功")).toBeNull();
     expect(screen.getByRole("link", { name: "打开完整模型中心排查" })).toHaveAttribute(
@@ -742,16 +767,22 @@ function createTauriHarness(
       ? { supportsNativeInvocationDispatchLedger: true as const }
       : {}),
     checkConnection,
-    listModels: (config) =>
-      Promise.resolve({
-        provider: config.provider,
-        models: options.models ?? [
-          { id: "novel-model", displayName: "Novel Model" },
-          ...(options.twoModels === true
-            ? [{ id: "backup-novel", displayName: "Backup Novel" }]
-            : []),
-        ],
-      }),
+    listModels: (config) => {
+      const defaults = config.baseUrl.includes("api.deepseek.com")
+        ? [
+            { id: "deepseek-v4-flash", displayName: "DeepSeek V4 Flash" },
+            ...(options.twoModels === true
+              ? [{ id: "deepseek-v4-pro", displayName: "DeepSeek V4 Pro" }]
+              : []),
+          ]
+        : [
+            { id: "gpt-5.6-sol", displayName: "GPT-5.6 Sol" },
+            ...(options.twoModels === true
+              ? [{ id: "gpt-5.6-terra", displayName: "GPT-5.6 Terra" }]
+              : []),
+          ];
+      return Promise.resolve({ provider: config.provider, models: options.models ?? defaults });
+    },
     generate,
     cancelGeneration: () => Promise.resolve(false),
     embed: base.modelGateway.embed.bind(base.modelGateway),

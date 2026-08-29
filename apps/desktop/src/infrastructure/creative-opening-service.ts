@@ -162,6 +162,8 @@ export type CreativeOpeningDestination =
 export interface CreativeOpeningProjectContext {
   readonly projectId: string;
   readonly chapterId: string;
+  /** Author-selected writing skills for this opening action only; never persisted as bindings. */
+  readonly explicitNovelSkillIds?: readonly string[];
 }
 
 interface PreparedCreativeOpeningProjectContext extends CreativeOpeningProjectContext {
@@ -255,74 +257,58 @@ function takeRememberedCreativeOpeningProviderAction(
   return prepared;
 }
 
-async function reserveCreativeOpeningInvocations(
+async function reserveCreativeOpeningInvocation(
   runtime: DesktopRuntime,
   input: ExecuteCreativeOpeningProviderActionInput,
-  prepared: PreparedCreativeOpeningProviderAction,
-): Promise<readonly ModelInvocationFact[]> {
-  const reservations: ModelInvocationFact[] = [];
-  try {
-    for (const call of prepared.calls) {
-      const inspection = call.inspection;
-      const reservationFence: { accepting: boolean } = { accepting: true };
-      const reservationIsStillAccepted = (): boolean => reservationFence.accepting;
-      const observedInvocation: { value: ModelInvocationFact | null } = { value: null };
-      const timeoutFailure = creativeOpeningPreparationTimeout();
-      const reservationWork = (async () => {
-        const invocation = await runtime.modelHub.startInvocation({
-          id: call.request.requestId,
-          task: "book_start_guidance",
-          routeTask: "book_start_guidance",
-          connectionId: inspection.connectionId,
-          catalogEntryId: inspection.catalogEntryId,
-          providerKindSnapshot: inspection.providerKind,
-          modelIdSnapshot: inspection.modelId,
-          routeReason: inspection.selectionKind,
-          attempt: inspection.attempt,
-          privacyPolicy: inspection.privacyPolicy,
-          dataDestination: inspection.dataDestination,
-          maximumCostMicros: inspection.pricing.maximumCostMicros,
-          currency: inspection.pricing.maximumCostCurrency,
-        });
-        observedInvocation.value = invocation;
-        if (!reservationIsStillAccepted()) {
-          await settleCreativeOpeningReservationFailure(runtime, invocation, timeoutFailure);
-          throw timeoutFailure;
-        }
-        await input.onInvocationPrepared?.(call.request.requestId, {
-          invocationId: invocation.id,
-          connectionId: invocation.connectionId,
-          modelId: invocation.modelIdSnapshot,
-        });
-        if (!reservationIsStillAccepted()) {
-          await settleCreativeOpeningReservationFailure(runtime, invocation, timeoutFailure);
-          throw timeoutFailure;
-        }
-        return invocation;
-      })();
-      try {
-        const invocation = await settleCreativeOpeningPreparation(runtime, () => reservationWork);
-        reservationFence.accepting = false;
-        reservations.push(invocation);
-      } catch (cause: unknown) {
-        reservationFence.accepting = false;
-        if (
-          observedInvocation.value !== null &&
-          !reservations.some(({ id }) => id === observedInvocation.value?.id)
-        ) {
-          reservations.push(observedInvocation.value);
-        }
-        void reservationWork.catch(() => undefined);
-        throw cause;
-      }
+  call: PreparedCreativeOpeningProviderCall,
+): Promise<ModelInvocationFact> {
+  const inspection = call.inspection;
+  const reservationFence: { accepting: boolean } = { accepting: true };
+  const reservationIsStillAccepted = (): boolean => reservationFence.accepting;
+  const observedInvocation: { value: ModelInvocationFact | null } = { value: null };
+  const timeoutFailure = creativeOpeningPreparationTimeout();
+  const reservationWork = (async () => {
+    const invocation = await runtime.modelHub.startInvocation({
+      id: call.request.requestId,
+      task: "book_start_guidance",
+      routeTask: "book_start_guidance",
+      connectionId: inspection.connectionId,
+      catalogEntryId: inspection.catalogEntryId,
+      providerKindSnapshot: inspection.providerKind,
+      modelIdSnapshot: inspection.modelId,
+      routeReason: inspection.selectionKind,
+      attempt: inspection.attempt,
+      privacyPolicy: inspection.privacyPolicy,
+      dataDestination: inspection.dataDestination,
+      maximumCostMicros: inspection.pricing.maximumCostMicros,
+      currency: inspection.pricing.maximumCostCurrency,
+    });
+    observedInvocation.value = invocation;
+    if (!reservationIsStillAccepted()) {
+      await settleCreativeOpeningReservationFailure(runtime, invocation, timeoutFailure);
+      throw timeoutFailure;
     }
-    return Object.freeze(reservations);
+    await input.onInvocationPrepared?.(call.request.requestId, {
+      invocationId: invocation.id,
+      connectionId: invocation.connectionId,
+      modelId: invocation.modelIdSnapshot,
+    });
+    if (!reservationIsStillAccepted()) {
+      await settleCreativeOpeningReservationFailure(runtime, invocation, timeoutFailure);
+      throw timeoutFailure;
+    }
+    return invocation;
+  })();
+  try {
+    const invocation = await settleCreativeOpeningPreparation(runtime, () => reservationWork);
+    reservationFence.accepting = false;
+    return invocation;
   } catch (cause: unknown) {
-    await Promise.allSettled(
-      reservations.map((invocation) =>
-        settleCreativeOpeningReservationFailure(runtime, invocation, cause),
-      ),
-    );
+    reservationFence.accepting = false;
+    if (observedInvocation.value !== null) {
+      await settleCreativeOpeningReservationFailure(runtime, observedInvocation.value, cause);
+    }
+    void reservationWork.catch(() => undefined);
     throw cause;
   }
 }
@@ -371,73 +357,116 @@ export async function executeCreativeOpeningProviderAction(
   if (prepared.disclosure.fingerprint !== input.disclosureFingerprint) {
     throw creativeOpeningDisclosureChanged();
   }
-  const reservations = await reserveCreativeOpeningInvocations(runtime, input, prepared);
-  const settled = await Promise.allSettled(
-    requests.map((request, index) =>
-      settleCreativeOpeningSlot(runtime, request.requestId, async (settlement) => {
-        settlement.assertPending();
-        const call = prepared.calls[index];
-        if (call?.request.requestId !== request.requestId) {
-          throw invalidCreativeOpeningAction("开头位置与已确认请求不一致。");
-        }
-        const reservedInvocation = reservations[index];
-        if (reservedInvocation?.id !== request.requestId) {
-          throw new Error("这个开头位置与已保存的发送信息不一致。");
-        }
-        try {
-          const result = await generateCreativeOpeningInternal(
-            runtime,
-            {
-              idea: input.idea,
-              ...(input.direction === undefined ? {} : { direction: input.direction }),
-              answers: input.answers ?? {},
-              openingAngle: call.request.openingAngle,
-              ...(call.request.partialOpening === null
-                ? {}
-                : { partialOpening: call.request.partialOpening }),
-              requestId: call.request.requestId,
-              projectContext: input.projectContext,
-              assertBeforeProviderDispatch: () => {
-                settlement.assertPending();
-                input.assertBeforeProviderDispatch?.(call.request.requestId);
-              },
-              onProviderDispatchStarted: async (invocationId) => {
-                if (settlement.isPending()) {
-                  await input.onProviderDispatchStarted?.(call.request.requestId, invocationId);
-                  settlement.assertPending();
-                }
-              },
-              onDelta: (text) => {
-                if (settlement.isPending()) {
-                  input.onDelta?.(call.request.requestId, text);
-                }
-              },
-            },
-            Object.freeze({
-              inspection: call.inspection,
-              sourceFingerprint: call.sourceFingerprint,
-              messages: call.messages,
-              preparedProjectContext: call.preparedProjectContext,
-              reservedInvocation,
-            }),
-          );
-          if (!settlement.isPending()) {
-            await input.onLateResult?.(result);
+  const settled: PromiseSettledResult<CreativeOpeningResult>[] = [];
+  // Opening prose is intentionally dispatched one slot at a time. Many writing
+  // providers expose a single practical long-response lane even when their API
+  // accepts concurrent HTTP requests. Reserving just before each slot also means
+  // a later local reservation stall can never hold an earlier ready slot hostage.
+  for (const [index, request] of requests.entries()) {
+    let reservedInvocation: ModelInvocationFact | null = null;
+    let providerResultReceived = false;
+    try {
+      const call = prepared.calls[index];
+      if (call?.request.requestId !== request.requestId) {
+        throw invalidCreativeOpeningAction("开头位置与已确认请求不一致。");
+      }
+      reservedInvocation = await reserveCreativeOpeningInvocation(runtime, input, call);
+      const value = await settleCreativeOpeningSlot(
+        runtime,
+        request.requestId,
+        () => providerResultReceived,
+        async (settlement) => {
+          settlement.assertPending();
+          if (reservedInvocation?.id !== request.requestId) {
+            throw new Error("这个开头位置与已保存的发送信息不一致。");
           }
-          settlement.assertPending();
-          // Await the exact slot checkpoint, but do not let its rejection stop the
-          // other confirmed calls. The aggregate error is surfaced only after
-          // every slot has independently reached a provider/local terminal.
-          await input.onResult?.(result, settlement);
-          settlement.assertPending();
-          return result;
-        } catch (cause: unknown) {
-          await settleCreativeOpeningReservationFailure(runtime, reservedInvocation, cause);
-          throw cause;
-        }
-      }),
-    ),
-  );
+          try {
+            const result = await generateCreativeOpeningInternal(
+              runtime,
+              {
+                idea: input.idea,
+                ...(input.direction === undefined ? {} : { direction: input.direction }),
+                answers: input.answers ?? {},
+                openingAngle: call.request.openingAngle,
+                ...(call.request.partialOpening === null
+                  ? {}
+                  : { partialOpening: call.request.partialOpening }),
+                requestId: call.request.requestId,
+                projectContext: input.projectContext,
+                assertBeforeProviderDispatch: () => {
+                  settlement.assertPending();
+                  input.assertBeforeProviderDispatch?.(call.request.requestId);
+                },
+                onProviderDispatchStarted: async (invocationId) => {
+                  if (settlement.isPending()) {
+                    await input.onProviderDispatchStarted?.(call.request.requestId, invocationId);
+                    settlement.assertPending();
+                  }
+                },
+                onDelta: (text) => {
+                  if (settlement.isPending()) {
+                    input.onDelta?.(call.request.requestId, text);
+                  }
+                },
+              },
+              Object.freeze({
+                inspection: call.inspection,
+                sourceFingerprint: call.sourceFingerprint,
+                messages: call.messages,
+                preparedProjectContext: call.preparedProjectContext,
+                reservedInvocation,
+              }),
+            );
+            providerResultReceived = true;
+            if (!settlement.isPending()) {
+              await input.onLateResult?.(result);
+            }
+            settlement.assertPending();
+            // Await the exact slot checkpoint, but do not let its rejection stop the
+            // other confirmed calls. The aggregate error is surfaced only after
+            // every slot has independently reached a provider/local terminal.
+            await input.onResult?.(result, settlement);
+            settlement.assertPending();
+            return result;
+          } catch (cause: unknown) {
+            await settleCreativeOpeningReservationFailure(runtime, reservedInvocation, cause);
+            throw cause;
+          }
+        },
+      );
+      settled.push({ status: "fulfilled", value });
+    } catch (reason: unknown) {
+      if (reservedInvocation !== null) {
+        await settleCreativeOpeningReservationFailure(runtime, reservedInvocation, reason);
+      }
+      settled.push({ status: "rejected", reason });
+      const cancellationAttempt = creativeOpeningCancellationAttempt(reason);
+      if (cancellationAttempt !== null && cancellationAttempt.requestId !== request.requestId) {
+        throw creativeOpeningTimeoutScopeMismatch();
+      }
+      const cancellationConfirmed =
+        cancellationAttempt === null ? true : await cancellationAttempt.outcome;
+      const invocationAfterCancellationFailure = cancellationConfirmed
+        ? null
+        : await runtime.modelHub.findInvocation(request.requestId).catch(() => null);
+      const cancellationFailedAfterDispatch =
+        !cancellationConfirmed &&
+        invocationAfterCancellationFailure?.providerDispatchStartedAt !== null;
+      if (cancellationFailedAfterDispatch) {
+        const affectedRequestIds = Object.freeze([
+          ...new Set([
+            ...settled.flatMap((outcome) =>
+              outcome.status === "rejected"
+                ? creativeOpeningTimedOutRequestIds(outcome.reason)
+                : [],
+            ),
+            ...requests.slice(index + 1).map(({ requestId }) => requestId),
+          ]),
+        ]);
+        throw creativeOpeningSettlementTimeout(affectedRequestIds);
+      }
+    }
+  }
   const rejected = settled.flatMap((outcome, index) => {
     if (outcome.status === "fulfilled") return [];
     const request = requests[index];
@@ -535,6 +564,7 @@ async function settleCreativeOpeningPreparation<Result>(
 async function settleCreativeOpeningSlot<Result>(
   runtime: DesktopRuntime,
   requestId: string,
+  providerResultReceived: () => boolean,
   operation: (settlement: CreativeOpeningSlotSettlement) => Promise<Result>,
 ): Promise<Result> {
   let pending = true;
@@ -547,7 +577,16 @@ async function settleCreativeOpeningSlot<Result>(
       }
       pending = false;
       recordSafeGenerationErrorCode(runtime, "MODEL_TIMEOUT");
-      reject(timeoutError);
+      if (providerResultReceived()) {
+        reject(timeoutError);
+        return;
+      }
+      const cancellationOutcome = Promise.resolve()
+        .then(() => runtime.modelGateway.cancelGeneration(requestId))
+        .catch(() => false);
+      reject(
+        attachCreativeOpeningCancellationAttempt(timeoutError, requestId, cancellationOutcome),
+      );
     }, CREATIVE_OPENING_SLOT_SETTLEMENT_TIMEOUT_MS);
     cancelTimeout = () => globalThis.clearTimeout(timeoutHandle);
   });
@@ -566,6 +605,41 @@ async function settleCreativeOpeningSlot<Result>(
     pending = false;
     cancelTimeout();
   }
+}
+
+interface CreativeOpeningCancellationAttemptCarrier {
+  readonly providerCancellationRequestId: string;
+  readonly providerCancellationOutcome: Promise<boolean>;
+}
+
+function creativeOpeningCancellationAttempt(
+  cause: unknown,
+): Readonly<{ requestId: string; outcome: Promise<boolean> }> | null {
+  if (
+    typeof cause !== "object" ||
+    cause === null ||
+    !("providerCancellationRequestId" in cause) ||
+    !("providerCancellationOutcome" in cause) ||
+    typeof cause.providerCancellationRequestId !== "string" ||
+    !(cause.providerCancellationOutcome instanceof Promise)
+  ) {
+    return null;
+  }
+  return Object.freeze({
+    requestId: cause.providerCancellationRequestId,
+    outcome: cause.providerCancellationOutcome,
+  });
+}
+
+function attachCreativeOpeningCancellationAttempt<ErrorType extends Error>(
+  error: ErrorType,
+  requestId: string,
+  outcome: Promise<boolean>,
+): ErrorType & CreativeOpeningCancellationAttemptCarrier {
+  return Object.assign(error, {
+    providerCancellationRequestId: requestId,
+    providerCancellationOutcome: outcome,
+  });
 }
 
 interface CreativeOpeningTimedOutRequestCarrier {
@@ -927,7 +1001,7 @@ function creativeOpeningSendingScope(input: {
       input.direction === null ? null : `本轮方向（${String(input.direction.length)} 个字符）`,
       answerCount === 0 ? null : `${String(answerCount)} 项作者已填写偏好`,
       `${String(input.calls.length)} 个独立开头请求及其固定创作角度`,
-      includedContextCount === 0 ? null : "当前空白作品中本次编译明确选中的来源与实验性写作方法",
+      includedContextCount === 0 ? null : "当前空白作品中本次明确选中的故事资料与写作技能",
       partialCharacters === 0
         ? null
         : `作者明确选择的未完整开头（${String(partialCharacters)} 个字符）`,
@@ -1380,7 +1454,8 @@ function staleCreativeOpeningTrace(): ModelCenterError {
 }
 
 const CREATIVE_OPENING_CONTEXT_TOKEN_BUDGET = 32_000;
-const CREATIVE_OPENING_SKILL_TOKEN_BUDGET = 1_200;
+/** Fits the two complete opt-in opening skills with headroom; no skill text is truncated. */
+const CREATIVE_OPENING_SKILL_TOKEN_BUDGET = 2_000;
 
 async function prepareCreativeOpeningProjectContext(
   runtime: DesktopRuntime,
@@ -1421,10 +1496,19 @@ async function prepareCreativeOpeningProjectContext(
   }
   const privacyReceipt = await runtime.projectContextPrivacy.inspect(projectId.value);
   runtime.projectContextPrivacy.assertChapterMatches(privacyReceipt, chapter);
-  const reservedSkillTokens = await runtime.novelSkills.getReservedTokens({
+  const explicitNovelSkillIds =
+    input.explicitNovelSkillIds === undefined
+      ? undefined
+      : Object.freeze([...input.explicitNovelSkillIds]);
+  const runtimeReservedSkillTokens = await runtime.novelSkills.getReservedTokens({
     projectId: projectId.value,
     taskType: "book_start_guidance",
+    ...(explicitNovelSkillIds === undefined ? {} : { explicitSkillIds: explicitNovelSkillIds }),
   });
+  const reservedSkillTokens =
+    explicitNovelSkillIds === undefined || explicitNovelSkillIds.length === 0
+      ? Math.min(runtimeReservedSkillTokens, CREATIVE_OPENING_SKILL_TOKEN_BUDGET)
+      : CREATIVE_OPENING_SKILL_TOKEN_BUDGET;
   const currentTask: ContextCandidate = Object.freeze({
     id: `creative-opening-task:${input.requestId}`,
     layer: "current_task",
@@ -1458,16 +1542,16 @@ async function prepareCreativeOpeningProjectContext(
     taskType: "book_start_guidance",
     invocationMode: "draft",
     maximumSkillTokens:
-      reservedSkillTokens === 0
-        ? CREATIVE_OPENING_SKILL_TOKEN_BUDGET
-        : Math.min(reservedSkillTokens, CREATIVE_OPENING_SKILL_TOKEN_BUDGET),
+      reservedSkillTokens === 0 ? CREATIVE_OPENING_SKILL_TOKEN_BUDGET : reservedSkillTokens,
     availableContextLayers: Object.freeze([
       ...new Set(compiled.entries.filter(({ included }) => included).map(({ layer }) => layer)),
     ]),
+    ...(explicitNovelSkillIds === undefined ? {} : { explicitSkillIds: explicitNovelSkillIds }),
   });
   return Object.freeze({
     projectId: projectId.value,
     chapterId: chapterId.value,
+    ...(explicitNovelSkillIds === undefined ? {} : { explicitNovelSkillIds }),
     chapterVersionId: chapter.currentVersionId,
     compiled,
     privacyReceipt,
@@ -1766,8 +1850,8 @@ function buildOpeningMessages(
     .join("\n");
   const baseSystemMessage =
     partialOpening === null
-      ? "你是长篇小说开篇助手。根据作者的一句话灵感写一段 500 至 900 字、可直接继续修改的小说开头。只输出正文，不要标题、分析、设定表、Markdown 围栏或元评论。不要把推测写成已经确认的长期设定；聚焦具体场景、人物行动和一个能推动下一段的问题。"
-      : "你是长篇小说开篇助手。续写作者明确选择的未完整开头，只输出从已有文字结尾之后开始的新正文。不要复述已有文字，不要标题、分析、设定表、Markdown 围栏或元评论；让补全后的开头形成一个可继续修改的完整场景。";
+      ? "你是故事或文章的开篇助手。根据作者的一句话灵感写一段 500 至 900 字、可直接继续修改的开头。只输出正文，不要标题、分析、设定表、Markdown 围栏或元评论。不要把推测写成已经确认的长期设定；聚焦具体场景、人物行动和一个能推动下一段的问题。"
+      : "你是故事或文章的开篇助手。续写作者明确选择的未完整开头，只输出从已有文字结尾之后开始的新正文。不要复述已有文字，不要标题、分析、设定表、Markdown 围栏或元评论；让补全后的开头形成一个可继续修改的完整场景。";
   const systemMessage =
     novelSkillPromptSection === null
       ? baseSystemMessage

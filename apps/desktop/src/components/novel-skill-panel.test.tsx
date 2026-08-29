@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { act, render, screen, waitFor } from "@testing-library/react";
+import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 
@@ -13,7 +13,7 @@ import { NovelSkillPanel } from "./novel-skill-panel";
 const PROJECT_ID = "019f9f4a-b3c7-7350-9226-000000000001";
 
 describe("NovelSkillPanel", () => {
-  it("keeps experimental methods visibly default-off and lets the author enable then disable one", async () => {
+  it("separates built-in and project-enabled writing skills and lets the author enable then disable one", async () => {
     const user = userEvent.setup();
     let enabled = false;
     const listProjectState = vi.fn(() => Promise.resolve(projectState(enabled)));
@@ -31,16 +31,97 @@ describe("NovelSkillPanel", () => {
 
     render(<NovelSkillPanel projectId={PROJECT_ID} runtime={runtime} />);
 
-    expect(await screen.findByText("写作方法（实验）")).toBeVisible();
-    expect(screen.getByText("尚未完成真实双模型对照评测")).toBeVisible();
-    expect(screen.getByText("未开启")).toBeVisible();
-    await user.click(screen.getByRole("button", { name: "实验性开启场景推进" }));
+    expect(await screen.findByText("写作技能")).toBeVisible();
+    expect(screen.getByRole("heading", { name: "内置技能" })).toBeVisible();
+    expect(screen.getByRole("heading", { name: "当前项目已启用" })).toBeVisible();
+    expect(screen.getByText("未启用")).toBeVisible();
+    const skillCard = screen.getByRole("button", { name: "启用场景推进" }).closest(".ink-card");
+    if (!(skillCard instanceof HTMLElement)) throw new Error("找不到写作技能卡片。");
+    expect(within(skillCard).getByText("适用于当前任务：续写")).toBeVisible();
+    await user.selectOptions(
+      screen.getByRole("combobox", { name: /当前要做的事/u }),
+      "outline_planning",
+    );
+    expect(within(skillCard).getByText("不适用于当前任务")).toBeVisible();
+    await user.click(screen.getByRole("button", { name: "启用场景推进" }));
     expect(setMethodEnabled).toHaveBeenCalledWith(PROJECT_ID, "core.scene_craft", true);
-    expect(await screen.findByText("实验中")).toBeVisible();
-    await user.click(screen.getByRole("button", { name: "关闭场景推进" }));
+    expect(await screen.findByText("已启用")).toBeVisible();
+    await user.click(screen.getByRole("button", { name: "停用场景推进" }));
     expect(setMethodEnabled).toHaveBeenLastCalledWith(PROJECT_ID, "core.scene_craft", false);
-    expect(await screen.findByText("未开启")).toBeVisible();
+    expect(await screen.findByText("未启用")).toBeVisible();
     expect(screen.queryByText("core.scene_craft")).not.toBeInTheDocument();
+  });
+
+  it("offers creation, safe import preview, editing, copying, archiving and export for user skills", async () => {
+    const user = userEvent.setup();
+    const customState: NovelSkillProjectState = {
+      availability: { status: "ready", reason: null },
+      evaluationStatus: "not_evaluated",
+      methods: [
+        {
+          skillId: "custom.user.1234abcd",
+          displayName: "克制对白",
+          summary: "让对白简短，并用动作承接情绪。",
+          version: "1.0.0",
+          kind: "custom",
+          ownerScope: "user",
+          status: "active",
+          enabled: true,
+          archived: false,
+          appliesToContinuation: true,
+          taskTypes: ["continuation", "rewrite"],
+        },
+      ],
+    };
+    const duplicateCustomSkill = vi.fn(() => Promise.resolve(customState));
+    const archiveCustomSkill = vi.fn(() => Promise.resolve(customState));
+    const exportCustomSkill = vi.fn(() =>
+      Promise.resolve(
+        JSON.stringify({
+          schema: "inkshadow-writing-skill",
+          schemaVersion: 1,
+          skill: {
+            sourceSkillId: "custom.user.1234abcd",
+            displayName: "克制对白",
+            summary: "让对白简短，并用动作承接情绪。",
+            taskTypes: ["continuation", "rewrite"],
+            rules: ["对白尽量简短。"],
+            prohibitions: [],
+            precedence: 500,
+            projectScope: "current_project",
+          },
+        }),
+      ),
+    );
+    const runtime = {
+      listProjectState: vi.fn(() => Promise.resolve(customState)),
+      duplicateCustomSkill,
+      archiveCustomSkill,
+      exportCustomSkill,
+    } as Pick<
+      NovelSkillRuntimePort,
+      "listProjectState" | "duplicateCustomSkill" | "archiveCustomSkill" | "exportCustomSkill"
+    > as NovelSkillRuntimePort;
+
+    render(<NovelSkillPanel projectId={PROJECT_ID} runtime={runtime} />);
+
+    expect(await screen.findByRole("heading", { name: "我的技能" })).toBeVisible();
+    expect(screen.getByRole("button", { name: "创建技能" })).toBeVisible();
+    expect(screen.getByRole("button", { name: "导入技能" })).toBeVisible();
+    expect(screen.getByRole("button", { name: "编辑" })).toBeVisible();
+    expect(screen.getByRole("button", { name: "复制" })).toBeVisible();
+    expect(screen.getByRole("button", { name: "归档" })).toBeVisible();
+    expect(screen.getByRole("button", { name: "导出" })).toBeVisible();
+
+    await user.click(screen.getByRole("button", { name: "复制" }));
+    expect(duplicateCustomSkill).toHaveBeenCalledWith(PROJECT_ID, "custom.user.1234abcd");
+    await user.click(screen.getByRole("button", { name: "导出" }));
+    expect(
+      (await screen.findByLabelText(/导出的写作技能/u)).getAttribute("value") ??
+        (await screen.findByLabelText(/导出的写作技能/u)).textContent,
+    ).toContain("inkshadow-writing-skill");
+    await user.click(screen.getByRole("button", { name: "归档" }));
+    expect(archiveCustomSkill).toHaveBeenCalledWith(PROJECT_ID, "custom.user.1234abcd");
   });
 
   it("does not let a slow result from the previous project overwrite the current project", async () => {
@@ -90,7 +171,7 @@ describe("NovelSkillPanel", () => {
       "listProjectState" | "setMethodEnabled"
     > as NovelSkillRuntimePort;
     const { rerender } = render(<NovelSkillPanel projectId={PROJECT_ID} runtime={runtime} />);
-    await user.click(await screen.findByRole("button", { name: "实验性开启旧项目方法" }));
+    await user.click(await screen.findByRole("button", { name: "启用旧项目方法" }));
 
     rerender(<NovelSkillPanel projectId={nextProjectId} runtime={runtime} />);
     expect(await screen.findByText("新项目方法")).toBeVisible();
@@ -101,7 +182,7 @@ describe("NovelSkillPanel", () => {
 
     expect(screen.queryByText("旧项目方法")).not.toBeInTheDocument();
     expect(screen.getByText("新项目方法")).toBeVisible();
-    expect(screen.getByRole("button", { name: "实验性开启新项目方法" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "启用新项目方法" })).toBeEnabled();
   });
 
   it("states that browser demo does not apply methods or fabricate receipts", async () => {
@@ -110,7 +191,7 @@ describe("NovelSkillPanel", () => {
         Promise.resolve({
           availability: {
             status: "unavailable" as const,
-            reason: "浏览器演示不会应用写作方法，也不会生成写作方法收据。",
+            reason: "浏览器演示不会应用或保存写作技能采用记录。",
           },
           evaluationStatus: "not_evaluated" as const,
           methods: [],
@@ -120,8 +201,8 @@ describe("NovelSkillPanel", () => {
 
     render(<NovelSkillPanel projectId={PROJECT_ID} runtime={runtime} />);
 
-    expect(await screen.findByText(/浏览器演示不会应用写作方法/u)).toBeVisible();
-    expect(screen.queryByRole("button", { name: /实验性开启/u })).not.toBeInTheDocument();
+    expect(await screen.findByText(/浏览器演示不会应用或保存写作技能/u)).toBeVisible();
+    expect(screen.queryByRole("button", { name: /启用/u })).not.toBeInTheDocument();
   });
 
   it("does not expose an uncontrolled runtime error in the ordinary writing-method UI", async () => {
@@ -148,9 +229,12 @@ function projectState(enabled: boolean, displayName = "场景推进"): NovelSkil
         summary: "让场景围绕可感知的目标、阻力和变化前进。",
         version: "1.0.0",
         kind: "core",
+        ownerScope: "builtin",
         status: "experimental",
         enabled,
+        archived: false,
         appliesToContinuation: true,
+        taskTypes: ["continuation"],
       },
     ],
   };

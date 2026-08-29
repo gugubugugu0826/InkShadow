@@ -83,7 +83,10 @@ async function createProjectWithChapter(
   const chapterDialog = page.getByRole("dialog", { name: "新建章节" });
   await chapterDialog.getByRole("textbox", { name: "章节标题" }).fill(chapterTitle);
   await chapterDialog.getByRole("button", { name: "创建章节" }).click();
-  await page.getByLabel(chapterTitle).getByRole("link", { name: "继续写作", exact: true }).click();
+  await page
+    .getByLabel(chapterTitle)
+    .getByRole("link", { name: `继续写第 1 章《${chapterTitle}》`, exact: true })
+    .click();
   await expect(page.getByRole("heading", { level: 1, name: chapterTitle })).toBeVisible();
 
   const routeMatch = /#\/projects\/([^/]+)\/chapters\/([^/?#]+)/u.exec(page.url());

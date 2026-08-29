@@ -103,7 +103,7 @@ describe("ProjectMaterialsPage", () => {
       throw new Error("找不到素材卡片。");
     }
     await user.click(within(materialCard).getByRole("button", { name: "删除并保留引用" }));
-    expect(screen.getByText(/当前影响：1 条章节引用。引用保留最小出处快照/u)).toBeInTheDocument();
+    expect(screen.getByText(/当前影响：1 条章节引用。引用保留最小出处信息/u)).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "确认删除" }));
 
     await waitFor(() => {

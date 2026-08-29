@@ -33,7 +33,7 @@ describe("NovelSkillPaidEvaluationPanel", () => {
 
     render(<NovelSkillPaidEvaluationPanel targets={TARGETS} port={port} />);
 
-    expect(screen.queryByText("内置小说 Skill 付费 A/B 评测")).not.toBeInTheDocument();
+    expect(screen.queryByText("内置写作技能付费对照验证")).not.toBeInTheDocument();
     expect(initialize).not.toHaveBeenCalled();
     expectEveryPortMethodToHaveNoCalls(port);
   });
@@ -108,7 +108,7 @@ describe("NovelSkillPaidEvaluationPanel", () => {
     );
 
     expect(screen.getByText("这是固定 192 次的商业模型评测")).toBeVisible();
-    expect(screen.getByText(/无 fallback、无自动 retry/u)).toBeVisible();
+    expect(screen.getByText(/不会自动改用备用模型，也不会自动重试/u)).toBeVisible();
     expect(screen.getByText(/取消或崩溃后不会自动重发/u)).toBeVisible();
     expect(screen.getByText("0 / 192")).toBeVisible();
     expect(screen.getByText("0 / 2,496")).toBeVisible();

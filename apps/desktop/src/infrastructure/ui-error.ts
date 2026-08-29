@@ -66,7 +66,7 @@ function databaseErrorPresentation(error: AppError): OrdinaryUiError | null {
     error.details.databaseCode === "SQLITE_COMMIT_OUTCOME_UNKNOWN"
   ) {
     return {
-      title: "写入结果需要核对",
+      title: "暂时无法确认是否已保存",
       description:
         "本机暂时无法确认这次写入是否已经完成。请重新打开当前页面，核对正文、版本和 AI 建议草稿状态；系统不会自动再次提交。",
     };

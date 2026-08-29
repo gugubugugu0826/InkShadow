@@ -146,7 +146,7 @@ export class ModelHubLocalEvaluationService {
         throw new ModelHubLocalEvaluationError(
           "MODEL_EVALUATION_UNAVAILABLE",
           cause instanceof ModelHubExecutionError && cause.dispatched
-            ? "基础评测请求已发出，但结果需要核对。请先查看服务商后台记录，避免重复发送。"
+            ? "基础评测请求可能已经发出，暂时无法确认结果。请先查看服务商后台记录，避免重复发送。"
             : "基础评测未完成，请检查模型分工与连接后重试。",
           true,
         );

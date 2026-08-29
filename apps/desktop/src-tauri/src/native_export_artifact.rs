@@ -1,6 +1,7 @@
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
+    process::Command,
     sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
@@ -10,7 +11,7 @@ use rand::RngCore;
 use same_file::Handle;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use tauri::{AppHandle, State};
+use tauri::{AppHandle, Manager, State};
 use tauri_plugin_dialog::DialogExt;
 use tokio::{fs, io::AsyncWriteExt};
 
@@ -23,6 +24,7 @@ const MAX_ACTIVE_EXPORT_DESTINATIONS: usize = 32;
 const MAX_FILE_NAME_BYTES: usize = 255;
 const MAX_PATH_BYTES: usize = 32_767;
 const TOKEN_HEX_BYTES: usize = 64;
+const OPENABLE_EXPORT_EXTENSIONS: &[&str] = &["txt", "md", "json", "epub", "docx", "pdf"];
 
 #[derive(Clone, Default)]
 pub(crate) struct NativeExportDestinationState {
@@ -116,6 +118,20 @@ pub(crate) struct WriteExportArtifactRequest {
     content_base64: String,
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+enum ExportOpenAction {
+    OpenFile,
+    ShowInFolder,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct OpenExportArtifactRequest {
+    path: String,
+    action: ExportOpenAction,
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ExportArtifactReceipt {
@@ -136,13 +152,19 @@ pub(crate) async fn native_choose_export_destination(
     validate_choose_request(&request)?;
     let format = request.format;
     let default_file_name = request.default_file_name;
+    let documents_directory = app.path().document_dir().ok();
     let selected = tauri::async_runtime::spawn_blocking(move || {
-        app.dialog()
+        let dialog = app
+            .dialog()
             .file()
             .set_title("保存墨影导出文件")
             .set_file_name(default_file_name)
-            .add_filter(format.filter_label(), format.extensions())
-            .blocking_save_file()
+            .add_filter(format.filter_label(), format.extensions());
+        let dialog = match documents_directory {
+            Some(directory) => dialog.set_directory(directory),
+            None => dialog,
+        };
+        dialog.blocking_save_file()
     })
     .await
     .map_err(|_| export_destination_error())?
@@ -195,6 +217,75 @@ pub(crate) async fn native_write_export_artifact(
         status: "success",
         verified: true,
     })
+}
+
+#[tauri::command]
+pub(crate) async fn native_open_export_artifact(
+    request: OpenExportArtifactRequest,
+) -> Result<(), CommandError> {
+    let path = validate_open_export_path(&request.path)?;
+    tauri::async_runtime::spawn_blocking(move || spawn_export_action(&path, request.action))
+        .await
+        .map_err(|_| export_open_error())?
+        .map_err(|_| export_open_error())
+}
+
+fn validate_open_export_path(path: &str) -> Result<PathBuf, CommandError> {
+    if path.is_empty()
+        || path.len() > MAX_PATH_BYTES
+        || path.chars().any(char::is_control)
+        || !Path::new(path).is_absolute()
+    {
+        return Err(export_open_error());
+    }
+    let extension = Path::new(path)
+        .extension()
+        .and_then(|value| value.to_str())
+        .map(str::to_ascii_lowercase)
+        .ok_or_else(export_open_error)?;
+    if !OPENABLE_EXPORT_EXTENSIONS.contains(&extension.as_str()) {
+        return Err(export_open_error());
+    }
+    let canonical = std::fs::canonicalize(path).map_err(|_| export_open_error())?;
+    let metadata = std::fs::metadata(&canonical).map_err(|_| export_open_error())?;
+    if !metadata.is_file()
+        || canonical
+            .as_os_str()
+            .to_string_lossy()
+            .chars()
+            .any(char::is_control)
+    {
+        return Err(export_open_error());
+    }
+    Ok(canonical)
+}
+
+#[cfg(target_os = "windows")]
+fn spawn_export_action(path: &Path, action: ExportOpenAction) -> std::io::Result<()> {
+    let mut command = Command::new("explorer.exe");
+    if action == ExportOpenAction::ShowInFolder {
+        command.arg("/select,");
+    }
+    command.arg(path).spawn().map(|_| ())
+}
+
+#[cfg(target_os = "macos")]
+fn spawn_export_action(path: &Path, action: ExportOpenAction) -> std::io::Result<()> {
+    let mut command = Command::new("open");
+    if action == ExportOpenAction::ShowInFolder {
+        command.arg("-R");
+    }
+    command.arg(path).spawn().map(|_| ())
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn spawn_export_action(path: &Path, action: ExportOpenAction) -> std::io::Result<()> {
+    let target = if action == ExportOpenAction::ShowInFolder {
+        path.parent().unwrap_or(path)
+    } else {
+        path
+    };
+    Command::new("xdg-open").arg(target).spawn().map(|_| ())
 }
 
 impl ExportDestinationRegistry {
@@ -613,14 +704,23 @@ fn export_save_outcome_unknown_error() -> CommandError {
     )
 }
 
+fn export_open_error() -> CommandError {
+    CommandError::new(
+        "EXPORT_OPEN_FAILED",
+        "The saved export artifact could not be opened.",
+        true,
+        vec!["OPEN_EXPORT_LOCATION"],
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use std::{fs as std_fs, path::PathBuf};
 
     use super::{
-        random_token, safe_receipt_path, validate_choose_request, write_and_verify,
-        write_and_verify_with_hooks, ChooseExportDestinationRequest, ExportDestinationRegistry,
-        ExportFormat, TOKEN_HEX_BYTES,
+        random_token, safe_receipt_path, validate_choose_request, validate_open_export_path,
+        write_and_verify, write_and_verify_with_hooks, ChooseExportDestinationRequest,
+        ExportDestinationRegistry, ExportFormat, TOKEN_HEX_BYTES,
     };
 
     #[test]
@@ -677,6 +777,24 @@ mod tests {
             })
             .is_err());
         }
+    }
+
+    #[test]
+    fn saved_export_actions_accept_only_existing_supported_files() {
+        let directory = TestDirectory::create();
+        let markdown = directory.0.join("作品定稿.md");
+        std_fs::write(&markdown, b"verified export").expect("write supported export");
+        assert_eq!(
+            validate_open_export_path(markdown.to_string_lossy().as_ref())
+                .expect("validate supported export"),
+            std_fs::canonicalize(&markdown).expect("canonical export")
+        );
+
+        let executable = directory.0.join("not-an-export.exe");
+        std_fs::write(&executable, b"MZ").expect("write rejected executable");
+        assert!(validate_open_export_path(executable.to_string_lossy().as_ref()).is_err());
+        assert!(validate_open_export_path("relative.md").is_err());
+        assert!(validate_open_export_path(directory.0.to_string_lossy().as_ref()).is_err());
     }
 
     #[tokio::test]

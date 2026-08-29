@@ -1171,6 +1171,10 @@ export function SettingsPage() {
         }
         return;
       }
+      const activeElement = document.activeElement;
+      if (activeElement instanceof HTMLElement && target.contains(activeElement)) {
+        return;
+      }
       focusSettingsSection(resolvedTargetId);
     };
     timeout = window.setTimeout(focusRequestedSection, 0);
@@ -4851,8 +4855,8 @@ export function SettingsPage() {
                   title={writingExperience.preference?.mode === "direct" ? "直接写作" : "专业创作"}
                   description={
                     writingExperience.preference?.mode === "direct"
-                      ? "续写会先持久化为隔离的 AI 建议草稿；只有你明确选择使用后，才会写入正文并创建不可变版本。本地整理授权不允许自动接受正文。"
-                      : "所有 AI 建议保持隔离，明确点击“使用这版”后才写入正文并创建不可变版本。"
+                      ? "续写会先保存为隔离的 AI 建议草稿；只有你明确选择使用后，才会写入正文并创建不会被改动的历史版本。本地整理授权不允许自动接受正文。"
+                      : "所有 AI 建议保持隔离，明确点击“使用这版”后才写入正文并创建不会被改动的历史版本。"
                   }
                 />
                 {writingExperience.preference?.directLocalOrganizationAuthorizedAt !== undefined &&
@@ -4968,7 +4972,7 @@ export function SettingsPage() {
 
                   <ul className="privacy-list">
                     <li>清空只作用于上方明确选择的项目，不会触碰其他项目或正式正文。</li>
-                    <li>记忆不会物理删除：来源、操作前后快照和审计事件都会保留。</li>
+                    <li>记忆不会被直接删除：来源、操作前后状态和操作记录都会保留。</li>
                     <li>任一记录或策略在确认后发生变化，整个操作会回滚并要求重新确认。</li>
                   </ul>
                   <div className="settings-actions">
@@ -5076,7 +5080,7 @@ export function SettingsPage() {
                             <InlineAlert
                               tone="warning"
                               title={modelHubReadinessSnapshot.failure.title}
-                              description={`${modelHubReadinessSnapshot.failure.description} 支持编号：${modelHubReadinessSnapshot.failure.supportId}。${modelHubReadinessSnapshot.failure.recovery}`}
+                              description={`${modelHubReadinessSnapshot.failure.description} 问题编号：${modelHubReadinessSnapshot.failure.supportId}（联系支持时提供）。${modelHubReadinessSnapshot.failure.recovery}`}
                             />
                             <Button
                               variant="secondary"
@@ -5128,7 +5132,7 @@ export function SettingsPage() {
                           <InlineAlert
                             tone="warning"
                             title={`${novelAiTaskLabel(modelHubReadiness.exactBlockers[0]?.task ?? "continuation")}尚未通过基础配置检查`}
-                            description={`${modelHubReadinessBlockerLabel(modelHubReadiness.exactBlockers[0]?.code ?? "MODEL_HUB_PREFLIGHT_FAILED")}。这里没有读取或发送作品内容；请在“连接与模型”中修复后重新验证。当前章节仍会在真正发送前单独检查隐私、参考资料和请求长度；作品正文、不可变版本和隔离建议均未改变。`}
+                            description={`${modelHubReadinessBlockerLabel(modelHubReadiness.exactBlockers[0]?.code ?? "MODEL_HUB_PREFLIGHT_FAILED")}。这里没有读取或发送作品内容；请在“连接与模型”中修复后重新验证。当前章节仍会在真正发送前单独检查隐私、参考资料和请求长度；作品正文、不会被改动的历史版本和隔离建议均未改变。`}
                           />
                         )}
                         {manageableHubConnections.length > 0 && (
@@ -5880,12 +5884,12 @@ export function SettingsPage() {
                           <InlineAlert
                             tone="info"
                             title="费用预估依据"
-                            description="这些字段只用于整理资料、费用估算和预算，不是开始写作的必填项。不确定时可以留空；价格单位为每百万内容额度，供应商仍可能正常计费。"
+                            description="这些字段只用于整理资料、费用估算和预算，不是开始写作的必填项。不确定时可以留空；价格单位按每百万文字量单位计算，文字量不是金额，供应商仍可能正常计费。"
                           />
                           <div className="model-center-grid">
                             <FormField
-                              label="单次读取上限（内容额度）"
-                              hint="模型一次可读取的最大内容额度。目录没有提供时可留空，墨影会使用保守默认长度；这里不是小说字数。"
+                              label="单次可发送的文字量上限（不是金额）"
+                              hint="模型一次可读取的最大文字量单位。目录没有提供时可留空，墨影会使用保守默认长度；这里不是小说字数，也不是金额。"
                             >
                               {(fieldProps) => (
                                 <Input
@@ -5920,7 +5924,7 @@ export function SettingsPage() {
                               )}
                             </FormField>
                             <FormField
-                              label="输入价 / 百万内容额度"
+                              label="发送文字量价格 / 百万单位"
                               hint="从供应商价格页获取；不确定可留空。"
                             >
                               {(fieldProps) => (
@@ -5938,7 +5942,7 @@ export function SettingsPage() {
                               )}
                             </FormField>
                             <FormField
-                              label="输出价 / 百万内容额度"
+                              label="返回文字量价格 / 百万单位"
                               hint="从供应商价格页获取；不确定可留空。"
                             >
                               {(fieldProps) => (
@@ -5956,7 +5960,7 @@ export function SettingsPage() {
                               )}
                             </FormField>
                             <FormField
-                              label="缓存输入价 / 百万内容额度"
+                              label="缓存文字量价格 / 百万单位"
                               hint="供应商未区分时可留空。"
                             >
                               {(fieldProps) => (
@@ -6080,7 +6084,7 @@ export function SettingsPage() {
                             capabilityProbeKind === "embedding"
                               ? `点击“确认 1 次固定验证”将通过“${hubConnection?.displayName ?? getModelProviderPreset(providerPreset).displayName}”的“${effectiveTextProbeModelId}”向语义向量接口发送 1 条固定、无作品内容的最小测试文本；只检查返回条目数、有效维度和有限数值。本次最多向模型服务发送 1 次，自动重试 0 次。${modelProbeDestinationDisclosure(providerPreset, { region, workspaceId, baseUrl })}不发送作品正文、灵感、设定或接口密钥；当前费用上限未知，供应商可能收取少量费用。测试文本和向量不会写入能力记录或诊断。`
                               : capabilityProbeKind === "text_generation"
-                                ? `点击“${catalogDiscoverySupported ? "确认 1 次固定验证" : "确认 1 次固定验证并检查连接"}”将通过“${hubConnection?.displayName ?? getModelProviderPreset(providerPreset).displayName}”的“${effectiveTextProbeModelId}”发送固定短句“只回复：OK”，最多请求 64 个输出内容额度；本次最多向模型服务发送 1 次，自动重试 0 次。${modelProbeDestinationDisclosure(providerPreset, { region, workspaceId, baseUrl })}不发送作品正文、灵感、设定或接口密钥；当前费用上限未知，供应商可能收取少量费用。测试输入和输出不会写入能力记录。`
+                                ? `点击“${catalogDiscoverySupported ? "确认 1 次固定验证" : "确认 1 次固定验证并检查连接"}”将通过“${hubConnection?.displayName ?? getModelProviderPreset(providerPreset).displayName}”的“${effectiveTextProbeModelId}”发送固定短句“只回复：OK”，AI 最多返回 64 个文字量单位（这不是金额）；本次最多向模型服务发送 1 次，自动重试 0 次。${modelProbeDestinationDisclosure(providerPreset, { region, workspaceId, baseUrl })}不发送作品正文、灵感、设定或接口密钥；当前费用上限未知，供应商可能收取少量费用。测试输入和输出不会写入能力记录。`
                                 : "请选择文字生成能力或语义向量能力。选择并确认前，本次发送次数为零。"
                           }
                         />
@@ -6107,7 +6111,7 @@ export function SettingsPage() {
                             description={
                               capabilityProbeFailure === null
                                 ? normalizedCapabilityProbeError.description
-                                : `阶段：${capabilityProbeFailure.stageLabel}。${capabilityProbeFailure.reason}${capabilityProbeFailure.recovery} 本次发送 ${capabilityProbeFailure.providerDispatchCount === 0 ? "零" : "一次"}，自动重试为零；连接和模型目录仍然保留。 支持编号：${capabilityProbeFailure.supportId}。`
+                                : `阶段：${capabilityProbeFailure.stageLabel}。${capabilityProbeFailure.reason}${capabilityProbeFailure.recovery} 本次发送 ${capabilityProbeFailure.providerDispatchCount === 0 ? "零" : "一次"}，自动重试为零；连接和模型目录仍然保留。 问题编号：${capabilityProbeFailure.supportId}（联系支持时提供）。`
                             }
                           />
                           {capabilityProbeFailure !== null && (
@@ -6414,8 +6418,8 @@ export function SettingsPage() {
                                 ? "未能确认"
                                 : routeFailureRollbackConfirmed
                                   ? routeFailureLegacyProjectionMayHaveChanged
-                                    ? "模型中心快照未变化；旧版兼容设置可能已安全停用"
-                                    : "模型中心快照未变化"
+                                    ? "AI 连接记录未变化；旧版兼容设置可能已安全停用"
+                                    : "AI 连接记录未变化"
                                   : "检测到变化"}
                               。原始 SQL 不会在界面中显示。
                             </p>
@@ -7366,9 +7370,7 @@ export function SettingsPage() {
                       aria-controls="novel-skill-paid-evaluation"
                       onClick={() => setPaidEvaluationExpanded((current) => !current)}
                     >
-                      {paidEvaluationExpanded
-                        ? "收起写作方法 A/B 评测"
-                        : "写作方法 A/B 评测（专家）"}
+                      {paidEvaluationExpanded ? "收起写作技能对照验证" : "写作技能对照验证（专家）"}
                     </Button>
                   </div>
                 )}
@@ -7602,7 +7604,7 @@ export function SettingsPage() {
                     <InlineAlert
                       tone="info"
                       title="诊断包已下载"
-                      description={`支持编号：${diagnosticId}。发送前仍可自行打开结构化文件检查内容。`}
+                      description={`问题编号：${diagnosticId}（联系支持时提供）。发送前仍可自行打开文件检查内容。`}
                     />
                   )}
                   <ul className="privacy-list">
@@ -7680,8 +7682,9 @@ export function SettingsPage() {
                 <li key={item}>{item}</li>
               ))}
               <li>
-                最大输出：
-                {String(taskProbeConfirmation.disclosure.maximumOutputTokens)} 个输出内容额度。
+                最大输出： AI 最多返回{" "}
+                {String(taskProbeConfirmation.disclosure.maximumOutputTokens)}
+                个文字量单位（这不是金额）。
               </li>
               <li>
                 最多向模型服务发送：
@@ -8810,7 +8813,7 @@ function modelHubCapabilityLabel(capability: ModelHubCapability): string {
     vision: "图片理解",
     translation: "翻译",
     tool_calling: "工具调用",
-    token_counting: "内容额度计数",
+    token_counting: "文字量计算",
     streaming: "流式输出",
     long_context: "长篇资料容量",
   };
@@ -8871,7 +8874,7 @@ function modelHubOverallBadgeLabel(
     validating: "正在验证",
     writing_ready: "基础配置可用",
     partial: "部分基础配置需完善",
-    complete: "基础配置完整",
+    complete: "AI 写作功能已准备好",
     anomaly: "连接或创作任务安排异常",
     save_failed: "配置写入失败",
   } as const;
@@ -9008,7 +9011,7 @@ function capabilityEvidenceSourceLabel(source: string | null): string {
 
 function capabilityFailureLabel(code: string): string {
   if (code === "PROVIDER_RESULT_AMBIGUOUS") {
-    return "这次发送的结果需要核对，系统不会自动重发";
+    return "请求可能已经发出，暂时无法确认结果；系统不会自动重发";
   }
   return code === "MODEL_OUTPUT_TRUNCATED"
     ? "最近一次验证未返回完整可见内容"

@@ -5,6 +5,7 @@ import path from "node:path";
 import {
   compileNovelSkills,
   createCoreNovelSkillDefinitions,
+  sealNovelSkillDefinition,
   type CompiledNovelSkills,
   type ProjectNovelSkillBinding,
 } from "@inkshadow/ai-core";
@@ -269,6 +270,277 @@ describe("NovelSkillSqliteStore", () => {
         if (executor !== undefined) {
           await closeExecutor(executor);
         }
+      }
+    },
+  );
+
+  fileSqliteIt(
+    "persists user writing-skill versions, project enablement, export and archive across restarts",
+    async () => {
+      const databasePath = createDatabasePath();
+      let executor: NodeSqliteExecutor | undefined;
+      try {
+        executor = await createMigratedFileExecutor(databasePath);
+        await insertProjectOnly(executor);
+        let runtime = new TauriNovelSkillRuntime(new NovelSkillSqliteStore(executor), CLOCK);
+        await runtime.initialize();
+        const created = await runtime.createCustomSkill(PROJECT_ID, {
+          displayName: "克制对白",
+          summary: "让对白简短，并用动作承接情绪。",
+          taskTypes: ["continuation", "rewrite"],
+          rules: ["对白尽量简短。", "用动作承接情绪。"],
+          prohibitions: ["捏造尚未确认的人物经历。"],
+          precedence: 500,
+          projectScope: "current_project",
+        });
+        const custom = created.methods.find(({ ownerScope }) => ownerScope === "user");
+        if (custom === undefined) throw new Error("custom writing skill fixture missing");
+        await runtime.setMethodEnabled(PROJECT_ID, custom.skillId, true);
+        await closeExecutor(executor);
+        executor = createExecutor("", databasePath);
+
+        runtime = new TauriNovelSkillRuntime(new NovelSkillSqliteStore(executor), CLOCK);
+        await runtime.initialize();
+        expect(
+          (await runtime.listProjectState(PROJECT_ID)).methods.find(
+            ({ skillId }) => skillId === custom.skillId,
+          ),
+        ).toMatchObject({ enabled: true, archived: false, version: "1.0.0" });
+        await expect(runtime.exportCustomSkill(PROJECT_ID, custom.skillId)).resolves.toContain(
+          '"schema": "inkshadow-writing-skill"',
+        );
+
+        await runtime.updateCustomSkill(PROJECT_ID, custom.skillId, {
+          displayName: "克制对白",
+          summary: "让对白简短，并用动作承接情绪。",
+          taskTypes: ["continuation", "rewrite"],
+          rules: ["对白尽量简短。", "用动作承接情绪。"],
+          prohibitions: ["捏造尚未确认的人物经历。"],
+          precedence: 550,
+          projectScope: "current_project",
+        });
+        await runtime.archiveCustomSkill(PROJECT_ID, custom.skillId);
+        await closeExecutor(executor);
+        executor = createExecutor("", databasePath);
+
+        runtime = new TauriNovelSkillRuntime(new NovelSkillSqliteStore(executor), CLOCK);
+        await runtime.initialize();
+        expect(
+          (await runtime.listProjectState(PROJECT_ID)).methods.find(
+            ({ skillId }) => skillId === custom.skillId,
+          ),
+        ).toMatchObject({ enabled: false, archived: true, version: "1.0.2" });
+        await expect(
+          executor.select<{ readonly count: number }>(
+            "SELECT count(*) AS count FROM novel_skill_definitions WHERE skill_id = ?",
+            [custom.skillId],
+          ),
+        ).resolves.toEqual([{ count: 3 }]);
+      } finally {
+        if (executor !== undefined) await closeExecutor(executor);
+      }
+    },
+  );
+
+  fileSqliteIt(
+    "rolls back a custom definition when its initial project binding cannot be saved",
+    async () => {
+      const executor = createExecutor(migration);
+      try {
+        await insertProjectOnly(executor);
+        const runtime = new TauriNovelSkillRuntime(new NovelSkillSqliteStore(executor), CLOCK);
+        await runtime.initialize();
+        executor.database.exec(`
+          CREATE TRIGGER fail_custom_binding_insert
+          BEFORE INSERT ON project_novel_skill_bindings
+          WHEN NEW.skill_id LIKE 'custom.user.%'
+          BEGIN
+            SELECT RAISE(ABORT, 'injected custom binding insert failure');
+          END;
+        `);
+
+        await expect(runtime.createCustomSkill(PROJECT_ID, customSkillDraft())).rejects.toThrow(
+          /binding|保存|injected/iu,
+        );
+        await expect(countCustomDefinitions(executor)).resolves.toBe(0);
+        await expect(countCustomBindings(executor)).resolves.toBe(0);
+      } finally {
+        await closeExecutor(executor);
+      }
+    },
+  );
+
+  fileSqliteIt(
+    "rolls back a new custom version when repinning its project binding fails",
+    async () => {
+      const executor = createExecutor(migration);
+      try {
+        await insertProjectOnly(executor);
+        const runtime = new TauriNovelSkillRuntime(new NovelSkillSqliteStore(executor), CLOCK);
+        await runtime.initialize();
+        const created = await runtime.createCustomSkill(PROJECT_ID, customSkillDraft());
+        const custom = created.methods.find(({ ownerScope }) => ownerScope === "user");
+        if (custom === undefined) throw new Error("custom writing skill fixture missing");
+        executor.database.exec(`
+          CREATE TRIGGER fail_custom_binding_update
+          BEFORE UPDATE ON project_novel_skill_bindings
+          WHEN NEW.skill_id = '${custom.skillId}'
+          BEGIN
+            SELECT RAISE(ABORT, 'injected custom binding update failure');
+          END;
+        `);
+
+        await expect(
+          runtime.updateCustomSkill(PROJECT_ID, custom.skillId, {
+            ...customSkillDraft(),
+            precedence: 550,
+          }),
+        ).rejects.toThrow(/binding|保存|injected/iu);
+        await expect(countCustomDefinitions(executor)).resolves.toBe(1);
+        await expect(readCustomBinding(executor, custom.skillId)).resolves.toMatchObject({
+          pinned_version: "1.0.0",
+          enabled: 0,
+          revision: 1,
+        });
+      } finally {
+        await closeExecutor(executor);
+      }
+    },
+  );
+
+  fileSqliteIt(
+    "rolls back an archived custom version when disabling its project binding fails",
+    async () => {
+      const executor = createExecutor(migration);
+      try {
+        await insertProjectOnly(executor);
+        const runtime = new TauriNovelSkillRuntime(new NovelSkillSqliteStore(executor), CLOCK);
+        await runtime.initialize();
+        const created = await runtime.createCustomSkill(PROJECT_ID, customSkillDraft());
+        const custom = created.methods.find(({ ownerScope }) => ownerScope === "user");
+        if (custom === undefined) throw new Error("custom writing skill fixture missing");
+        await runtime.setMethodEnabled(PROJECT_ID, custom.skillId, true);
+        executor.database.exec(`
+          CREATE TRIGGER fail_custom_binding_archive
+          BEFORE UPDATE ON project_novel_skill_bindings
+          WHEN NEW.skill_id = '${custom.skillId}'
+          BEGIN
+            SELECT RAISE(ABORT, 'injected custom binding archive failure');
+          END;
+        `);
+
+        await expect(runtime.archiveCustomSkill(PROJECT_ID, custom.skillId)).rejects.toThrow(
+          /binding|保存|injected/iu,
+        );
+        await expect(countCustomDefinitions(executor)).resolves.toBe(1);
+        await expect(readCustomBinding(executor, custom.skillId)).resolves.toMatchObject({
+          pinned_version: "1.0.0",
+          enabled: 1,
+          revision: 2,
+        });
+      } finally {
+        await closeExecutor(executor);
+      }
+    },
+  );
+
+  fileSqliteIt(
+    "preserves a legacy orphaned version and advances the next project-bound edit past it",
+    async () => {
+      const executor = createExecutor(migration);
+      try {
+        await insertProjectOnly(executor);
+        const store = new NovelSkillSqliteStore(executor);
+        const runtime = new TauriNovelSkillRuntime(store, CLOCK);
+        await runtime.initialize();
+        const created = await runtime.createCustomSkill(PROJECT_ID, customSkillDraft());
+        const custom = created.methods.find(({ ownerScope }) => ownerScope === "user");
+        if (custom === undefined) throw new Error("custom writing skill fixture missing");
+        const original = (await store.listDefinitions()).find(
+          ({ skillId, version }) => skillId === custom.skillId && version === "1.0.0",
+        );
+        if (original === undefined) throw new Error("custom definition fixture missing");
+        const { definitionHash: ignoredHash, ...originalDraft } = original;
+        void ignoredHash;
+        const orphan = await sealNovelSkillDefinition({
+          ...originalDraft,
+          version: "1.0.1",
+          summary: "旧版分步写入失败后保留下来的不可见版本。",
+        });
+        await store.insertDefinition(orphan);
+
+        const updated = await runtime.updateCustomSkill(PROJECT_ID, custom.skillId, {
+          ...customSkillDraft(),
+          precedence: 550,
+        });
+
+        expect(updated.methods.find(({ skillId }) => skillId === custom.skillId)?.version).toBe(
+          "1.0.2",
+        );
+        await expect(countCustomDefinitions(executor)).resolves.toBe(3);
+        await expect(readCustomBinding(executor, custom.skillId)).resolves.toMatchObject({
+          pinned_version: "1.0.2",
+          revision: 2,
+        });
+        await expect(
+          executor.select<{ readonly definition_hash: string }>(
+            `SELECT definition_hash FROM novel_skill_definitions
+             WHERE skill_id = ? AND version = '1.0.1'`,
+            [custom.skillId],
+          ),
+        ).resolves.toEqual([{ definition_hash: orphan.definitionHash }]);
+      } finally {
+        await closeExecutor(executor);
+      }
+    },
+  );
+
+  fileSqliteIt(
+    "isolates one damaged user skill without blocking built-ins or prose preparation",
+    async () => {
+      const executor = createExecutor(migration);
+      try {
+        await insertProjectOnly(executor);
+        const runtime = new TauriNovelSkillRuntime(new NovelSkillSqliteStore(executor), CLOCK);
+        await runtime.initialize();
+        const created = await runtime.createCustomSkill(PROJECT_ID, {
+          displayName: "待隔离技能",
+          summary: "用于验证坏记录隔离。",
+          taskTypes: ["continuation"],
+          rules: ["保持当前场景连续。"],
+          prohibitions: [],
+          precedence: 500,
+          projectScope: "current_project",
+        });
+        const custom = created.methods.find(({ ownerScope }) => ownerScope === "user");
+        if (custom === undefined) throw new Error("custom writing skill fixture missing");
+        await runtime.setMethodEnabled(PROJECT_ID, custom.skillId, true);
+        executor.database.exec("DROP TRIGGER novel_skill_definition_immutable");
+        await executor.execute(
+          "UPDATE novel_skill_definitions SET definition_hash = ? WHERE skill_id = ?",
+          ["f".repeat(64), custom.skillId],
+        );
+
+        const state = await runtime.listProjectState(PROJECT_ID);
+        expect(state.methods.filter(({ ownerScope }) => ownerScope === "builtin")).toHaveLength(12);
+        expect(state.methods.some(({ skillId }) => skillId === custom.skillId)).toBe(false);
+        expect(state.isolatedRecords).toHaveLength(1);
+        expect(state.isolatedRecords?.[0]?.recordNumber).toEqual(expect.any(Number));
+        expect(state.isolatedRecords?.[0]?.reason).toBe("用户技能记录已损坏");
+        await expect(
+          runtime.prepareInvocation({
+            projectId: PROJECT_ID,
+            taskType: "continuation",
+            invocationMode: "draft",
+            availableContextLayers: ["current_task"],
+          }),
+        ).resolves.toMatchObject({ status: "prepared_none_selected" });
+        const recoveredState = await runtime.listProjectState(PROJECT_ID);
+        expect(recoveredState.isolatedRecords).toHaveLength(1);
+        expect(recoveredState.isolatedRecords?.[0]?.recordNumber).toEqual(expect.any(Number));
+        expect(recoveredState.isolatedRecords?.[0]?.reason).toBe("用户技能记录已损坏");
+      } finally {
+        await closeExecutor(executor);
       }
     },
   );
@@ -655,6 +927,46 @@ async function insertProjectOnly(executor: NodeSqliteExecutor): Promise<void> {
      ) VALUES (?, 'Novel Skill store', 'active', 1, 0, ?, ?, NULL, NULL, NULL, NULL)`,
     [PROJECT_ID, NOW, NOW],
   );
+}
+
+function customSkillDraft() {
+  return {
+    displayName: "克制对白",
+    summary: "让对白简短，并用动作承接情绪。",
+    taskTypes: ["continuation", "rewrite"] as const,
+    rules: ["对白尽量简短。", "用动作承接情绪。"],
+    prohibitions: ["捏造尚未确认的人物经历。"],
+    precedence: 500,
+    projectScope: "current_project" as const,
+  };
+}
+
+async function countCustomDefinitions(executor: NodeSqliteExecutor): Promise<number> {
+  const rows = await executor.select<{ readonly count: number }>(
+    "SELECT count(*) AS count FROM novel_skill_definitions WHERE owner_scope = 'user' AND kind = 'custom'",
+  );
+  return rows[0]?.count ?? 0;
+}
+
+async function countCustomBindings(executor: NodeSqliteExecutor): Promise<number> {
+  const rows = await executor.select<{ readonly count: number }>(
+    "SELECT count(*) AS count FROM project_novel_skill_bindings WHERE skill_id LIKE 'custom.user.%'",
+  );
+  return rows[0]?.count ?? 0;
+}
+
+async function readCustomBinding(executor: NodeSqliteExecutor, skillId: string) {
+  const rows = await executor.select<{
+    readonly pinned_version: string;
+    readonly enabled: number;
+    readonly revision: number;
+  }>(
+    `SELECT pinned_version, enabled, revision
+     FROM project_novel_skill_bindings
+     WHERE project_id = ? AND skill_id = ?`,
+    [PROJECT_ID, skillId],
+  );
+  return rows[0] ?? null;
 }
 
 async function insertExactModelLink(executor: NodeSqliteExecutor): Promise<void> {

@@ -155,13 +155,56 @@ describe("simplified editor workspace", () => {
 
       const actions = await screen.findByRole("region", { name: "选中文本写作操作" });
       expect(
-        within(actions).getByText("请先在正文中选择作用范围，再选择改写、润色、扩写或缩写。"),
+        within(actions).getByText("先在正文中选中需要处理的文字，再选择改写、润色、扩写或缩写。"),
       ).toBeVisible();
       for (const name of ["改写", "润色", "扩写", "缩写"]) {
         expect(within(actions).getByRole("button", { name })).toBeDisabled();
       }
     },
   );
+
+  it("remembers the selected continuation length and safely falls back when my requirement is blank", async () => {
+    const runtime = createDevelopmentRuntime(window.localStorage);
+    await ensureWritingMode(runtime, "professional");
+    const { chapter, project } = await seedProject(runtime);
+    const user = userEvent.setup();
+
+    const firstRender = renderEditor(runtime, project, chapter);
+    const firstExpandAssistant = await screen.findByRole("button", {
+      name: /展开 AI 创作助手|收起 AI 创作助手/u,
+    });
+    if (firstExpandAssistant.getAttribute("aria-expanded") === "false") {
+      await user.click(firstExpandAssistant);
+    }
+    const firstLength = await screen.findByRole("combobox", { name: /本次续写长度/u });
+    await user.selectOptions(firstLength, "long");
+    expect(firstLength).toHaveValue("long");
+    firstRender.unmount();
+
+    renderEditor(runtime, project, chapter);
+    const secondExpandAssistant = await screen.findByRole("button", {
+      name: /展开 AI 创作助手|收起 AI 创作助手/u,
+    });
+    if (secondExpandAssistant.getAttribute("aria-expanded") === "false") {
+      await user.click(secondExpandAssistant);
+    }
+    expect(await screen.findByRole("combobox", { name: /本次续写长度/u })).toHaveValue("long");
+    await user.selectOptions(
+      screen.getByRole("combobox", { name: /写到哪里/u }),
+      "custom_instruction",
+    );
+    expect(
+      screen.getByText("未填写具体要求时，将继续按当前正文和本次选中的故事资料自然续写。"),
+    ).toBeVisible();
+
+    await user.click(screen.getByRole("button", { name: "生成续写建议" }));
+    await waitFor(async () => {
+      const candidates = await runtime.repositories.aiCandidates.listByChapterId(chapter.id);
+      expect(candidates.ok && candidates.value[0]?.status).toBe("ready");
+    });
+    const stable = await runtime.repositories.chapters.findById(chapter.id);
+    expect(stable.ok && stable.value?.content).toBe(chapter.content);
+  });
 
   it("shows local-only limits and direct recovery entries before private generation", async () => {
     const runtime = createNativeEditorRuntime();
@@ -185,12 +228,22 @@ describe("simplified editor workspace", () => {
     fireEvent.select(editor);
     const selectionActions = screen.getByRole("region", { name: "选中文本写作操作" });
     expect(within(selectionActions).getByText("私密章节仅限本机")).toBeVisible();
+    expect(
+      within(selectionActions).getByText(
+        "私密章节只在本机处理。没有可用的本地 AI 时，本次生成不会开始。",
+      ),
+    ).toBeVisible();
     for (const name of ["改写", "润色", "扩写", "缩写"]) {
       expect(within(selectionActions).getByRole("button", { name })).toBeDisabled();
     }
 
     const assistant = await screen.findByRole("complementary", { name: "AI 创作助手" });
     expect(within(assistant).getByText("私密章节仅限本地处理")).toBeVisible();
+    expect(
+      within(assistant).getAllByText(
+        "私密章节只在本机处理。没有可用的本地 AI 时，本次生成不会开始。",
+      ),
+    ).toHaveLength(2);
     expect(within(assistant).getByRole("link", { name: "设置本地模型" })).toBeVisible();
     expect(within(assistant).getByRole("button", { name: "恢复普通章节" })).toBeVisible();
     expect(within(assistant).queryByRole("link", { name: "设置 AI 服务" })).not.toBeInTheDocument();

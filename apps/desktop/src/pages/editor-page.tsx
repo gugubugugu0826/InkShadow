@@ -37,6 +37,7 @@ import type {
 } from "@inkshadow/domain";
 import type { AiCandidateListWithIsolation, AiCandidateIsolationIncident } from "@inkshadow/data";
 import { parseUuidV7 } from "@inkshadow/domain";
+import { parseUuidV7 as parseStoryUuidV7, type Outline } from "@inkshadow/story-core";
 import type { SaveState } from "@inkshadow/contracts/states";
 import {
   Badge,
@@ -350,6 +351,50 @@ interface PreparedContinuationDirections {
 interface DirectionFailureNotice {
   readonly title: string;
   readonly description: string;
+}
+
+interface LargeDeletionReview {
+  readonly routeKey: string;
+  readonly chapterId: UuidV7;
+  readonly chapterTitle: string;
+  readonly baseRevision: number;
+  readonly baseVersionId: UuidV7;
+  readonly previousCharacterCount: number;
+  readonly proposedContent: string;
+  readonly cursorOffset: number;
+  readonly draftStatus: "saving" | "saved" | "failed";
+}
+
+const LARGE_DELETION_MINIMUM_SOURCE_CHARACTERS = 5_000;
+const LARGE_DELETION_MINIMUM_REMOVED_CHARACTERS = 3_000;
+const LARGE_DELETION_MAXIMUM_REMAINING_RATIO = 0.35;
+
+function requiresLargeDeletionConfirmation(stableContent: string, nextContent: string): boolean {
+  const removedCharacters = stableContent.length - nextContent.length;
+  return (
+    stableContent.length >= LARGE_DELETION_MINIMUM_SOURCE_CHARACTERS &&
+    removedCharacters >= LARGE_DELETION_MINIMUM_REMOVED_CHARACTERS &&
+    nextContent.length / stableContent.length <= LARGE_DELETION_MAXIMUM_REMAINING_RATIO
+  );
+}
+
+function chapterVolumeName(outline: Outline | null, chapterTitle: string): string {
+  if (outline === null) return "未关联卷";
+  const snapshot = outline.toSnapshot();
+  const matchingChapters = snapshot.nodes.filter(
+    (node) => node.kind === "chapter" && node.title === chapterTitle,
+  );
+  if (matchingChapters.length !== 1) return "未关联卷";
+  const volume = snapshot.nodes.find(
+    (node) => node.kind === "volume" && node.id === matchingChapters[0]?.parentId,
+  );
+  return volume?.title ?? "未关联卷";
+}
+
+function versionCharacterDifferenceLabel(targetLength: number, currentLength: number): string {
+  const difference = targetLength - currentLength;
+  if (difference === 0) return "与当前正文字数相同";
+  return `与当前正文相比${difference > 0 ? "多" : "少"} ${Math.abs(difference).toLocaleString("zh-CN")} 字`;
 }
 
 function generationActionFromCandidate(
@@ -886,6 +931,10 @@ export function EditorPage() {
   const [contextSourcesOpen, setContextSourcesOpen] = useState(false);
   const [versionToRestore, setVersionToRestore] = useState<ChapterVersion | null>(null);
   const [versionRestoreBusy, setVersionRestoreBusy] = useState(false);
+  const [volumeName, setVolumeName] = useState("未关联卷");
+  const [largeDeletionReview, setLargeDeletionReview] = useState<LargeDeletionReview | null>(null);
+  const [largeDeletionDialogOpen, setLargeDeletionDialogOpen] = useState(false);
+  const [largeDeletionBusy, setLargeDeletionBusy] = useState(false);
   const [candidate, setCandidate] = useState<AiCandidate | null>(null);
   const [candidateHistory, setCandidateHistory] = useState<readonly AiCandidate[]>([]);
   const [candidatePresentation, setCandidatePresentation] = useState<"ai" | "local" | "unknown">(
@@ -1048,6 +1097,9 @@ export function EditorPage() {
   const operationQueueRef = useRef(new SerializedPersistenceQueue());
   const flushInFlightRef = useRef<Promise<PersistenceFlushHandlerResult> | null>(null);
   const editorReplacementFenceRef = useRef(false);
+  const versionRestoreFlightRef = useRef<symbol | null>(null);
+  const largeDeletionReviewRef = useRef<LargeDeletionReview | null>(null);
+  const largeDeletionFlightRef = useRef<symbol | null>(null);
   const candidateDecisionFenceRef = useRef(false);
   const candidateGenerationFlightRef = useRef<
     "idle" | "preparing" | "awaiting_decision" | "executing" | "deferring"
@@ -1060,6 +1112,23 @@ export function EditorPage() {
   const directionCandidateRef = useRef<AiCandidate | null>(null);
   const generationEstimate = generationPlan?.preflight.estimate ?? null;
   const returnedFromAiSettings = searchParams.get("aiSettings") === "returned";
+
+  function publishLargeDeletionReview(review: LargeDeletionReview | null): void {
+    largeDeletionReviewRef.current = review;
+    setLargeDeletionReview(review);
+  }
+
+  function isSameLargeDeletionReview(
+    current: LargeDeletionReview | null,
+    expected: LargeDeletionReview,
+  ): boolean {
+    return (
+      current?.routeKey === expected.routeKey &&
+      current.chapterId === expected.chapterId &&
+      current.baseVersionId === expected.baseVersionId &&
+      current.proposedContent === expected.proposedContent
+    );
+  }
 
   const measureAssistantResizeBounds = useCallback((): EditorAssistantResizeBounds => {
     const workspace = editorWorkspaceRef.current;
@@ -1537,7 +1606,16 @@ export function EditorPage() {
     setRecoveryDraft(null);
     setRecoveryCopySaved(false);
     setVersionToRestore(null);
+    versionRestoreFlightRef.current = null;
     setVersionRestoreBusy(false);
+    editorReplacementFenceRef.current = false;
+    setEditorReplacementLocked(false);
+    largeDeletionReviewRef.current = null;
+    largeDeletionFlightRef.current = null;
+    setLargeDeletionReview(null);
+    setLargeDeletionDialogOpen(false);
+    setLargeDeletionBusy(false);
+    setVolumeName("未关联卷");
     setCandidateReviewOpen(false);
     setCandidateDiff(null);
     setCandidateDiffDecisions({});
@@ -1662,7 +1740,7 @@ export function EditorPage() {
         "chapter_versions",
         new UiActionError(
           "CURRENT_VERSION_CONTENT_MISMATCH",
-          "当前正文与不可变版本不一致。为保护正文，已停止写入。",
+          "当前正文与不会被改动的历史版本不一致。为保护正文，已停止写入。",
         ),
       );
       return;
@@ -1677,7 +1755,7 @@ export function EditorPage() {
         const failure = withEditorReadRowReference(
           new UiActionError(
             "CURRENT_VERSION_CHECKSUM_UNAVAILABLE",
-            "暂时无法核对不可变版本的内容校验值。为保护正文，已停止写入。",
+            "暂时无法核对不会被改动的历史版本的内容校验值。为保护正文，已停止写入。",
           ),
           chapterVersionDiagnosticReference(version),
         );
@@ -1691,7 +1769,7 @@ export function EditorPage() {
           withEditorReadRowReference(
             new UiActionError(
               "CURRENT_VERSION_CHECKSUM_MISMATCH",
-              "不可变版本的内容校验值不一致。为保护正文，已停止写入。",
+              "不会被改动的历史版本的内容校验值不一致。为保护正文，已停止写入。",
             ),
             chapterVersionDiagnosticReference(version),
           ),
@@ -2028,6 +2106,21 @@ export function EditorPage() {
   }, [clearScheduledPersistence, load]);
 
   useEffect(() => {
+    if (pageState !== "ready" || projectId === null || chapter === null) return undefined;
+    const storyProjectId = parseStoryUuidV7(projectId);
+    if (!storyProjectId.ok) return undefined;
+    const expectedRouteKey = editorRouteKey;
+    let active = true;
+    void runtime.story.outlines.findByProjectId(storyProjectId.value).then((result) => {
+      if (!active || routeIdentityRef.current !== expectedRouteKey) return;
+      setVolumeName(result.ok ? chapterVolumeName(result.value, chapter.title) : "未关联卷");
+    });
+    return () => {
+      active = false;
+    };
+  }, [chapter, editorRouteKey, pageState, projectId, runtime.story.outlines]);
+
+  useEffect(() => {
     const currentDirectionCandidate = directionCandidateRef.current;
     if (currentDirectionCandidate === null) return;
     const remainsCurrent =
@@ -2282,6 +2375,8 @@ export function EditorPage() {
     const stableChapter = chapterRef.current;
     return (
       composingRef.current ||
+      largeDeletionReviewRef.current !== null ||
+      editorReplacementFenceRef.current ||
       draftTimerRef.current !== null ||
       autosaveTimerRef.current !== null ||
       flushInFlightRef.current !== null ||
@@ -2327,6 +2422,20 @@ export function EditorPage() {
           status: "blocked",
           code: "COMPOSITION_ACTIVE",
           message: "请先完成当前中文输入，再离开编辑器。",
+        });
+      }
+      if (largeDeletionReviewRef.current !== null) {
+        return Object.freeze({
+          status: "blocked",
+          code: "LARGE_DELETION_REQUIRES_CONFIRMATION",
+          message: "本次修改将删除大量正文；请先确认创建版本，或恢复修改前正文。",
+        });
+      }
+      if (editorReplacementFenceRef.current) {
+        return Object.freeze({
+          status: "blocked",
+          code: "EDITOR_REPLACEMENT_ACTIVE",
+          message: "正文版本操作仍在完成，请等待后再切换章节。",
         });
       }
 
@@ -2550,6 +2659,7 @@ export function EditorPage() {
       pageState !== "ready" ||
       project?.status !== "active" ||
       isComposing ||
+      largeDeletionReview !== null ||
       (content === stableChapter.content && !recovered)
     ) {
       return;
@@ -2592,10 +2702,16 @@ export function EditorPage() {
     persistDraft,
     project?.status,
     recovered,
+    largeDeletionReview,
   ]);
 
   const manualSave = useCallback(async (): Promise<void> => {
     if (authorityWriteBlockedRef.current || project?.status !== "active" || composingRef.current) {
+      return;
+    }
+    if (largeDeletionReviewRef.current !== null) {
+      setLargeDeletionDialogOpen(true);
+      setEditorNotice("请先确认这次大幅删除；确认前只保留恢复草稿，不会创建正式版本。");
       return;
     }
     clearScheduledPersistence();
@@ -2606,6 +2722,160 @@ export function EditorPage() {
       // save state. Button/key handlers must not create an unhandled promise.
     }
   }, [clearScheduledPersistence, commitSnapshot, enqueue, project?.status]);
+
+  async function persistLargeDeletionDraft(review: LargeDeletionReview): Promise<void> {
+    try {
+      await enqueue(() => persistDraft(review.proposedContent, review.cursorOffset));
+      const current = largeDeletionReviewRef.current;
+      if (current === null || !isSameLargeDeletionReview(current, review)) return;
+      publishLargeDeletionReview(Object.freeze({ ...current, draftStatus: "saved" }));
+      setSaveState("dirty");
+    } catch (cause: unknown) {
+      const current = largeDeletionReviewRef.current;
+      if (current === null || !isSameLargeDeletionReview(current, review)) return;
+      publishLargeDeletionReview(Object.freeze({ ...current, draftStatus: "failed" }));
+      setError(cause);
+      setSaveState("save_failed");
+    }
+  }
+
+  async function retryLargeDeletionDraft(): Promise<void> {
+    const review = largeDeletionReviewRef.current;
+    if (review === null || review.draftStatus === "saving") return;
+    const next = Object.freeze({ ...review, draftStatus: "saving" as const });
+    publishLargeDeletionReview(next);
+    setError(null);
+    await persistLargeDeletionDraft(next);
+  }
+
+  async function confirmLargeDeletion(): Promise<void> {
+    const review = largeDeletionReviewRef.current;
+    const stableChapter = chapterRef.current;
+    if (
+      review?.draftStatus !== "saved" ||
+      stableChapter === null ||
+      largeDeletionFlightRef.current !== null
+    ) {
+      return;
+    }
+    if (
+      routeIdentityRef.current !== review.routeKey ||
+      stableChapter.id !== review.chapterId ||
+      stableChapter.revision !== review.baseRevision ||
+      stableChapter.currentVersionId !== review.baseVersionId ||
+      contentRef.current !== review.proposedContent
+    ) {
+      setError(
+        new UiActionError(
+          "LARGE_DELETION_AUTHORITY_CHANGED",
+          "章节或稳定版本已经变化。本次大幅删除仍保留在恢复草稿中，请重新读取后再决定。",
+        ),
+      );
+      return;
+    }
+    const flight = Symbol("large-deletion-confirmation");
+    largeDeletionFlightRef.current = flight;
+    setLargeDeletionBusy(true);
+    setError(null);
+    clearScheduledPersistence();
+    try {
+      await enqueue(() => commitSnapshot(review.proposedContent, review.cursorOffset, "manual"));
+      if (
+        largeDeletionFlightRef.current === flight &&
+        routeIdentityRef.current === review.routeKey &&
+        isSameLargeDeletionReview(largeDeletionReviewRef.current, review)
+      ) {
+        publishLargeDeletionReview(null);
+        setLargeDeletionDialogOpen(false);
+        setEditorNotice(
+          `已确认《${review.chapterTitle}》的大幅删除并创建新的稳定版本；修改前正文仍保留在版本历史中。`,
+        );
+      }
+    } catch {
+      // commitSnapshot keeps the exact save error and recovery draft visible.
+    } finally {
+      if (largeDeletionFlightRef.current === flight) {
+        largeDeletionFlightRef.current = null;
+        setLargeDeletionBusy(false);
+      }
+    }
+  }
+
+  async function restoreBeforeLargeDeletion(): Promise<void> {
+    const review = largeDeletionReviewRef.current;
+    const stableChapter = chapterRef.current;
+    if (
+      review?.draftStatus !== "saved" ||
+      stableChapter === null ||
+      largeDeletionFlightRef.current !== null
+    ) {
+      return;
+    }
+    if (
+      routeIdentityRef.current !== review.routeKey ||
+      stableChapter.id !== review.chapterId ||
+      stableChapter.revision !== review.baseRevision ||
+      stableChapter.currentVersionId !== review.baseVersionId
+    ) {
+      setError(
+        new UiActionError(
+          "LARGE_DELETION_AUTHORITY_CHANGED",
+          "章节或稳定版本已经变化，无法直接恢复。短正文仍保留在恢复草稿中。",
+        ),
+      );
+      return;
+    }
+    const flight = Symbol("large-deletion-restore");
+    largeDeletionFlightRef.current = flight;
+    setLargeDeletionBusy(true);
+    setError(null);
+    try {
+      const draft = await runtime.repositories.recoveryDrafts.findByChapterId(stableChapter.id);
+      if (!draft.ok) throw draft.error;
+      if (
+        draft.value?.baseRevision !== review.baseRevision ||
+        draft.value.content !== review.proposedContent
+      ) {
+        throw new UiActionError(
+          "RECOVERY_DRAFT_CHANGED",
+          "恢复草稿已经变化。为避免删除新的输入，当前没有清理任何内容。",
+        );
+      }
+      const removed = await runtime.repositories.recoveryDrafts.delete(
+        stableChapter.id,
+        draft.value.id,
+      );
+      if (!removed.ok) throw removed.error;
+      if (
+        largeDeletionFlightRef.current !== flight ||
+        routeIdentityRef.current !== review.routeKey
+      ) {
+        return;
+      }
+      const selection = Object.freeze({
+        start: stableChapter.content.length,
+        end: stableChapter.content.length,
+      });
+      contentRef.current = stableChapter.content;
+      setContent(stableChapter.content);
+      setRecovered(false);
+      setSaveState("saved_local");
+      publishLargeDeletionReview(null);
+      setLargeDeletionDialogOpen(false);
+      resetEditorHistory();
+      scheduleSelection(selection, true);
+      persistEditorView(selection);
+      setEditorNotice(`已恢复《${review.chapterTitle}》修改前的稳定正文；版本历史没有改变。`);
+    } catch (cause: unknown) {
+      setError(cause);
+      setSaveState("save_failed");
+    } finally {
+      if (largeDeletionFlightRef.current === flight) {
+        largeDeletionFlightRef.current = null;
+        setLargeDeletionBusy(false);
+      }
+    }
+  }
 
   useEffect(() => {
     if (chapterId === null) {
@@ -2809,10 +3079,39 @@ export function EditorPage() {
     syncHistoryAvailability(nextHistory);
   }
 
+  function stageLargeDeletionProtection(nextContent: string, selection: EditorSelection): void {
+    const stableChapter = chapterRef.current;
+    if (
+      stableChapter === null ||
+      largeDeletionReviewRef.current !== null ||
+      !requiresLargeDeletionConfirmation(stableChapter.content, nextContent)
+    ) {
+      return;
+    }
+    clearScheduledPersistence();
+    const review = Object.freeze({
+      routeKey: editorRouteKey,
+      chapterId: stableChapter.id,
+      chapterTitle: stableChapter.title,
+      baseRevision: stableChapter.revision,
+      baseVersionId: stableChapter.currentVersionId,
+      previousCharacterCount: stableChapter.content.length,
+      proposedContent: nextContent,
+      cursorOffset: Math.min(selection.start, nextContent.length),
+      draftStatus: "saving" as const,
+    });
+    publishLargeDeletionReview(review);
+    setLargeDeletionDialogOpen(true);
+    setLargeDeletionBusy(false);
+    setError(null);
+    void persistLargeDeletionDraft(review);
+  }
+
   function markEditorContentDirty(nextContent: string, selection: EditorSelection): void {
     if (editorReplacementFenceRef.current) {
       return;
     }
+    stageLargeDeletionProtection(nextContent, selection);
     contentRef.current = nextContent;
     selectionRef.current = selection;
     cursorRef.current = selection.start;
@@ -2970,7 +3269,7 @@ export function EditorPage() {
   }
 
   function handleEditorChange(event: ReactChangeEvent<HTMLTextAreaElement>): void {
-    if (editorReplacementFenceRef.current) {
+    if (editorReplacementFenceRef.current || largeDeletionReviewRef.current !== null) {
       event.currentTarget.value = contentRef.current;
       return;
     }
@@ -3049,6 +3348,7 @@ export function EditorPage() {
       );
     }
     compositionBaseRef.current = null;
+    stageLargeDeletionProtection(finalContent, selectionAfter);
     contentRef.current = finalContent;
     selectionRef.current = selectionAfter;
     cursorRef.current = selectionAfter.start;
@@ -3171,6 +3471,13 @@ export function EditorPage() {
       directDirection === null || directDirection.trim().length === 0
         ? null
         : directDirection.normalize("NFC").trim();
+    const normalizedCustomDestinationInstruction =
+      continuationPreference.customDestinationInstruction?.normalize("NFC").trim() ?? "";
+    const professionalDestination =
+      continuationPreference.destination === "custom_instruction" &&
+      normalizedCustomDestinationInstruction.length === 0
+        ? "complete_scene"
+        : continuationPreference.destination;
     const operation = beginGenerationOperation();
     setLastGenerationAction(
       (chapterRef.current?.content.trim().length ?? 0) === 0 ? "opening" : "continuation",
@@ -3200,10 +3507,12 @@ export function EditorPage() {
           ? normalizedDirectDirection === null
             ? "complete_scene"
             : "custom_instruction"
-          : continuationPreference.destination,
+          : professionalDestination,
         customDestinationInstruction: directAtStart
           ? normalizedDirectDirection
-          : continuationPreference.customDestinationInstruction,
+          : professionalDestination === "custom_instruction"
+            ? normalizedCustomDestinationInstruction
+            : null,
         contextBudgetProfile: directAtStart
           ? "standard"
           : continuationPreference.profile === "long"
@@ -3296,7 +3605,7 @@ export function EditorPage() {
     setDirectionError(
       Object.freeze({
         title,
-        description: `${input.description} 当前阶段：${stageLabel}。${sendSummary}支持编号：${incident.supportId}。`,
+        description: `${input.description} 当前阶段：${stageLabel}。${sendSummary}问题编号（联系支持时提供）：${incident.supportId}。`,
       }),
     );
   }
@@ -4218,6 +4527,25 @@ export function EditorPage() {
     }
   }
 
+  function navigateCandidateReviewTo(target: "start" | "end" | "edit"): void {
+    const textarea = candidateReviewTextareaRef.current;
+    const scrollContainer =
+      textarea?.closest<HTMLElement>(".ink-overlay__content") ??
+      document.querySelector<HTMLElement>(".candidate-review-overlay .ink-overlay__content");
+    if (scrollContainer === null) return;
+    if (target === "start") {
+      scrollContainer.scrollTop = 0;
+      return;
+    }
+    if (target === "end") {
+      scrollContainer.scrollTop = scrollContainer.scrollHeight;
+      return;
+    }
+    if (textarea === null) return;
+    scrollContainer.scrollTop = Math.max(0, textarea.offsetTop - 24);
+    textarea.focus({ preventScroll: true });
+  }
+
   function dismissCandidateReview(): void {
     setCandidateReviewOpen(false);
     window.requestAnimationFrame(() => {
@@ -4280,7 +4608,7 @@ export function EditorPage() {
       chapterId,
       dispatched: false,
     });
-    setEditorNotice(`已取消，本次没有调用 AI。支持编号：${incident.supportId}`);
+    setEditorNotice(`已取消，本次没有调用 AI。问题编号（联系支持时提供）：${incident.supportId}`);
   }
 
   function cancelSelectionRewriteDisclosure(): void {
@@ -4514,7 +4842,7 @@ export function EditorPage() {
       setEditorNotice(
         withJourneySettlementNotice(
           completionNotice === null
-            ? `${candidateSuggestionLabel}已安全写入正文和不可变版本；后台重建任务暂未登记，正在直接执行本地设定整理：${pipelineRegistrationError}`
+            ? `${candidateSuggestionLabel}已安全写入正文和不会被改动的历史版本；后台重建任务暂未登记，正在直接执行本地设定整理：${pipelineRegistrationError}`
             : `${completionNotice} 后台重建任务暂未登记，正在直接执行本地设定整理。`,
         ),
       );
@@ -4561,7 +4889,7 @@ export function EditorPage() {
           const message = projectOrdinaryUiError(cause).description;
           setEditorNotice(
             withJourneySettlementNotice(
-              `${candidateSuggestionLabel}已安全写入正文和不可变版本；部分本地整理稍后会自动重试：${message}`,
+              `${candidateSuggestionLabel}已安全写入正文和不会被改动的历史版本；部分本地整理稍后会自动重试：${message}`,
             ),
           );
         } else {
@@ -4643,6 +4971,7 @@ export function EditorPage() {
       authorityWriteBlockedRef.current ||
       selected === null ||
       stableChapter === null ||
+      versionRestoreFlightRef.current !== null ||
       project?.status !== "active" ||
       selected.toSnapshot().content === stableChapter.content
     ) {
@@ -4652,6 +4981,10 @@ export function EditorPage() {
       setEditorNotice("正文仍有尚未完成的本地保存；当前没有恢复版本，正文和历史版本均未改变。");
       return;
     }
+    const expectedRouteKey = editorRouteKey;
+    const selectedSnapshot = selected.toSnapshot();
+    const flight = Symbol(`restore-version-${String(selectedSnapshot.sequence)}`);
+    versionRestoreFlightRef.current = flight;
     setVersionRestoreBusy(true);
     setError(null);
     try {
@@ -4663,6 +4996,13 @@ export function EditorPage() {
         expectedRevision: stableChapter.revision,
         organizeLocalStoryFacts,
       });
+      if (
+        versionRestoreFlightRef.current !== flight ||
+        routeIdentityRef.current !== expectedRouteKey ||
+        chapterRef.current?.id !== stableChapter.id
+      ) {
+        return;
+      }
       if (!result.ok) {
         setError(result.error);
         return;
@@ -4697,7 +5037,7 @@ export function EditorPage() {
       setDirectGenerationUndo(null);
       setEditorNotice(
         completionNotice ??
-          `已从版本 ${String(selected.toSnapshot().sequence)} 创建新的恢复版本；所有历史版本仍保留。`,
+          `已从版本 ${String(selectedSnapshot.sequence)} 创建新的恢复版本；所有历史版本仍保留。`,
       );
       const pipelineInput = createLocalAcceptedVersionPipelineInput({
         projectId: result.value.chapter.projectId,
@@ -4732,10 +5072,18 @@ export function EditorPage() {
       await recordWritingFeedbackSafely({ action: "restored_original", candidateId: null });
       await loadVersions();
     } catch (cause: unknown) {
-      setError(cause);
+      if (
+        versionRestoreFlightRef.current === flight &&
+        routeIdentityRef.current === expectedRouteKey
+      ) {
+        setError(cause);
+      }
     } finally {
-      setVersionRestoreBusy(false);
-      finishEditorReplacement();
+      if (versionRestoreFlightRef.current === flight) {
+        versionRestoreFlightRef.current = null;
+        setVersionRestoreBusy(false);
+        finishEditorReplacement();
+      }
     }
   }
 
@@ -5164,7 +5512,7 @@ export function EditorPage() {
           <span>{selectionLength.toLocaleString("zh-CN")} 个字符</span>
         </div>
         {selectionLength === 0 && (
-          <p role="status">请先在正文中选择作用范围，再选择改写、润色、扩写或缩写。</p>
+          <p role="status">先在正文中选中需要处理的文字，再选择改写、润色、扩写或缩写。</p>
         )}
         {selectionExceedsLimit && (
           <InlineAlert
@@ -5181,7 +5529,7 @@ export function EditorPage() {
           <InlineAlert
             tone="warning"
             title="私密章节仅限本机"
-            description="远程改写、润色、扩写和缩写已关闭。你可以继续手写、使用本地编辑工具，或在确认隐私边界后另建非私密章节。"
+            description="私密章节只在本机处理。没有可用的本地 AI 时，本次生成不会开始。"
           />
         )}
         {selectionRewriteDisclosure === null ? (
@@ -5210,19 +5558,15 @@ export function EditorPage() {
               tone="warning"
               title={"确认本次" + selectionRewriteActionLabel(lastGenerationAction)}
               onDismiss={cancelSelectionRewriteDisclosure}
-              description={
-                selectionRewriteDisclosure.connectionDisplayName +
-                " · " +
-                selectionRewriteDisclosure.modelId +
-                "；" +
-                selectionRewriteDisclosure.privacy +
-                " 发送内容：" +
-                selectionRewriteDisclosure.sends.join("；") +
-                "。本次最多向模型服务发送 1 次，自动重试 0 次；" +
-                formatSelectionRewriteCost(selectionRewriteDisclosure) +
-                "。"
-              }
+              description={`${chapter !== null ? `作品《${project.name}》 · 章节《${chapter.title}》；` : ""}模型：${selectionRewriteDisclosure.connectionDisplayName} · ${selectionRewriteDisclosure.modelId}；资料：当前选中文字和处理要求；预计发送 1 次；${formatSelectionRewriteCostSummary(selectionRewriteDisclosure)}；私密内容：不包含私密章节。`}
             />
+            <details className="candidate-panel__disclosure-details">
+              <summary>查看详细信息</summary>
+              <p>{selectionRewriteDisclosure.privacy}</p>
+              <p>发送内容：{selectionRewriteDisclosure.sends.join("；")}。</p>
+              <p>本次最多向模型服务发送 1 次，自动重试 0 次。</p>
+              <p>{formatSelectionRewriteCost(selectionRewriteDisclosure)}</p>
+            </details>
             <div className="candidate-actions">
               <Button
                 variant="ai-primary"
@@ -5272,7 +5616,7 @@ export function EditorPage() {
           normalizedError === null ? undefined : (
             <ErrorState
               title={normalizedError.title}
-              description={`${normalizedError.description} 支持编号：${
+              description={`${normalizedError.description} 问题编号（联系支持时提供）：${
                 loadDiagnosticId ?? "正在生成"
               }。`}
               savedState="已停止正文写入；本地正文、版本和恢复草稿保持原样。"
@@ -5305,6 +5649,19 @@ export function EditorPage() {
               返回章节
             </Link>
             <h1>{chapter?.title ?? "写作编辑器"}</h1>
+            {project !== null && chapter !== null && (
+              <div
+                className="editor-toolbar__chapter-identity"
+                role="status"
+                aria-label="当前写作位置"
+                aria-live="polite"
+              >
+                <span>作品：{project.name}</span>
+                <span>卷：{volumeName}</span>
+                <span>章节：{chapter.title}</span>
+                <strong>{content.length.toLocaleString("zh-CN")} 字</strong>
+              </div>
+            )}
             {chapter !== null && (
               <div className="editor-toolbar__privacy">
                 <Badge tone={chapter.isLocalOnly ? "success" : "neutral"}>
@@ -5421,7 +5778,7 @@ export function EditorPage() {
             title="版本历史需恢复"
             description={`${String(
               versionReadWarning.isolatedCount,
-            )} 条分叉版本已保留。支持编号：${versionReadWarning.diagnosticId}`}
+            )} 条分叉版本已保留。问题编号（联系支持时提供）：${versionReadWarning.diagnosticId}`}
             action={{
               label: "诊断与恢复",
               onClick: () => void navigate("/settings#diagnostics"),
@@ -5436,7 +5793,7 @@ export function EditorPage() {
               candidateReadWarning.isolatedCount === null
                 ? "有生成记录暂时无法安全读取"
                 : `${String(candidateReadWarning.isolatedCount)} 条生成记录暂时无法安全读取`
-            }；正文和不可变版本仍可正常使用。支持编号：${candidateReadWarning.diagnosticId}。`}
+            }；正文和不会被改动的历史版本仍可正常使用。问题编号（联系支持时提供）：${candidateReadWarning.diagnosticId}。`}
             action={{
               label: candidateRowsRetrying ? "正在重新读取" : "重新读取附属资料",
               onClick: () => void retryCandidateRows(),
@@ -5463,6 +5820,17 @@ export function EditorPage() {
             title="编辑器提示"
             description={editorNotice}
             onDismiss={() => setEditorNotice(null)}
+          />
+        )}
+        {largeDeletionReview !== null && !largeDeletionDialogOpen && (
+          <InlineAlert
+            tone="warning"
+            title="大幅删除尚未确认"
+            description={`《${largeDeletionReview.chapterTitle}》将从 ${largeDeletionReview.previousCharacterCount.toLocaleString("zh-CN")} 字缩短为 ${largeDeletionReview.proposedContent.length.toLocaleString("zh-CN")} 字。短正文已保留为恢复草稿，不会自动成为正式版本。`}
+            action={{
+              label: "重新查看并决定",
+              onClick: () => setLargeDeletionDialogOpen(true),
+            }}
           />
         )}
 
@@ -5712,7 +6080,7 @@ export function EditorPage() {
               aria-label="章节正文"
               value={content}
               currentLength={content.length}
-              readOnly={readonly || editorReplacementLocked}
+              readOnly={readonly || editorReplacementLocked || largeDeletionReview !== null}
               maxLength={5_000_000}
               onBeforeInput={handleEditorBeforeInput}
               onKeyDown={handleEditorKeyDown}
@@ -5813,7 +6181,7 @@ export function EditorPage() {
                   <InlineAlert
                     tone="warning"
                     title="私密章节仅限本地处理"
-                    description="本章正文与相关故事资料只允许交给已验证的本机模型；没有可用本地模型时会在发送前停止，远程发送次数为 0。"
+                    description="私密章节只在本机处理。没有可用的本地 AI 时，本次生成不会开始。"
                   />
                   <div className="candidate-actions">
                     <Link
@@ -5873,7 +6241,7 @@ export function EditorPage() {
                     {privateGenerationBlocked
                       ? directMode
                         ? "本章处于私密模式，但目前没有可用且已验证的本地创作服务。本次没有发送正文。"
-                        : "本章处于私密模式，但目前没有可用且已验证的本地模型。本次请求在发送 0 字后停止。"
+                        : "私密章节只在本机处理。没有可用的本地 AI 时，本次生成不会开始。"
                       : directMode
                         ? "创作服务未能完整返回结果，请检查服务后重试。"
                         : ordinaryGenerationError.description}
@@ -5944,7 +6312,7 @@ export function EditorPage() {
                 <InlineAlert
                   tone="warning"
                   title="连续故事状态暂不可用"
-                  description={`这项附属资料没有读取成功；正文和不可变版本仍可使用，也没有删除任何记录。请稍后重试。支持编号：${storyStateUpdate.diagnosticId}。`}
+                  description={`这项附属资料没有读取成功；正文和不会被改动的历史版本仍可使用，也没有删除任何记录。请稍后重试。问题编号（联系支持时提供）：${storyStateUpdate.diagnosticId}。`}
                 />
               )}
               {!directMode && storyStateUpdate.state === "ready" && (
@@ -6142,7 +6510,7 @@ export function EditorPage() {
                             : "保留当前部分并比较"
                           : directMode
                             ? "查看并使用"
-                            : `比较${candidateActionGap}${candidateSuggestionLabel}`}
+                            : "比较建议"}
                       </Button>
                       {candidateIncomplete && (
                         <Button
@@ -6250,15 +6618,31 @@ export function EditorPage() {
                         />
                       )}
                       {preparedDirections !== null && (
-                        <InlineAlert
-                          tone="warning"
-                          title="确认本次方向生成"
-                          description={
-                            preparedDirections.disclosure === null
-                              ? "本次只在本机准备三个方向，不会发送给外部服务。明确确认后才会开始生成。"
-                              : `${preparedDirections.disclosure.connectionDisplayName} · ${preparedDirections.disclosure.modelId}；${preparedDirections.disclosure.privacy} 发送内容：${preparedDirections.disclosure.sends.join("；")}。本次最多向模型服务发送 ${String(preparedDirections.disclosure.maximumProviderCalls)} 次，自动重试 ${String(preparedDirections.disclosure.automaticRetryCount)} 次；${formatProviderActionCost(preparedDirections.disclosure)}。`
-                          }
-                        />
+                        <>
+                          <InlineAlert
+                            tone="warning"
+                            title="确认本次方向生成"
+                            description={
+                              preparedDirections.disclosure === null
+                                ? "本次只在本机准备三个方向，不会发送给外部服务。明确确认后才会开始生成。"
+                                : `${project !== null && chapter !== null ? `作品《${project.name}》 · 章节《${chapter.title}》；` : ""}模型：${preparedDirections.disclosure.connectionDisplayName} · ${preparedDirections.disclosure.modelId}；资料：${preparedDirections.disclosure.sentScopeLabel}；预计发送 ${String(preparedDirections.disclosure.maximumProviderCalls)} 次；${formatProviderActionCostSummary(preparedDirections.disclosure)}；私密内容：${chapter?.isLocalOnly === true ? (preparedDirections.disclosure.dataDestination === "local" ? "包含，只在本机处理" : "不会发送") : "不包含私密章节"}。`
+                            }
+                          />
+                          {preparedDirections.disclosure !== null && (
+                            <details>
+                              <summary>查看详细信息</summary>
+                              <p>{preparedDirections.disclosure.privacy}</p>
+                              <p>发送内容：{preparedDirections.disclosure.sends.join("；")}。</p>
+                              <p>
+                                本次最多向模型服务发送{" "}
+                                {String(preparedDirections.disclosure.maximumProviderCalls)} 次，
+                                自动重试 {String(preparedDirections.disclosure.automaticRetryCount)}{" "}
+                                次。
+                              </p>
+                              <p>{formatProviderActionCost(preparedDirections.disclosure)}</p>
+                            </details>
+                          )}
+                        </>
                       )}
                       {directionOptions.length > 0 && (
                         <div className="candidate-actions" aria-label="三个创作方向">
@@ -6443,30 +6827,37 @@ export function EditorPage() {
                       )}
                     </FormField>
                     {continuationPreference.destination === "custom_instruction" && (
-                      <FormField
-                        label="本次写作要求"
-                        hint="例如：写到主角发现密信为止。最多 2,000 字。"
-                        required
-                      >
-                        {(fieldProps) => (
-                          <Textarea
-                            {...fieldProps}
-                            value={continuationPreference.customDestinationInstruction ?? ""}
-                            currentLength={
-                              continuationPreference.customDestinationInstruction?.length ?? 0
-                            }
-                            rows={3}
-                            maxLength={2_000}
-                            disabled={candidateBusy}
-                            onChange={(event) =>
-                              updateContinuationPreference({
-                                ...continuationPreference,
-                                customDestinationInstruction: event.currentTarget.value,
-                              })
-                            }
-                          />
+                      <>
+                        <FormField
+                          label="本次写作要求"
+                          hint="例如：写到主角发现密信为止。最多 2,000 字。"
+                        >
+                          {(fieldProps) => (
+                            <Textarea
+                              {...fieldProps}
+                              value={continuationPreference.customDestinationInstruction ?? ""}
+                              currentLength={
+                                continuationPreference.customDestinationInstruction?.length ?? 0
+                              }
+                              rows={3}
+                              maxLength={2_000}
+                              disabled={candidateBusy}
+                              onChange={(event) =>
+                                updateContinuationPreference({
+                                  ...continuationPreference,
+                                  customDestinationInstruction: event.currentTarget.value,
+                                })
+                              }
+                            />
+                          )}
+                        </FormField>
+                        {(continuationPreference.customDestinationInstruction?.trim().length ??
+                          0) === 0 && (
+                          <p className="candidate-panel__hint" role="status">
+                            未填写具体要求时，将继续按当前正文和本次选中的故事资料自然续写。
+                          </p>
                         )}
-                      </FormField>
+                      </>
                     )}
                   </section>
                   {selectionWritingControls}
@@ -6623,7 +7014,15 @@ export function EditorPage() {
                       timeStyle: "short",
                     }).format(new Date(snapshot.createdAt))}
                   </time>
-                  <span>{snapshot.content.length} 字符</span>
+                  <span>{snapshot.content.length.toLocaleString("zh-CN")} 字</span>
+                  {chapter !== null && (
+                    <span>
+                      {versionCharacterDifferenceLabel(
+                        snapshot.content.length,
+                        chapter.content.length,
+                      )}
+                    </span>
+                  )}
                   <pre className="version-list__preview">
                     {boundedEditorPreview(snapshot.content)}
                   </pre>
@@ -6637,7 +7036,9 @@ export function EditorPage() {
                     }
                     onClick={() => setVersionToRestore(version)}
                   >
-                    {chapter?.currentVersionId === snapshot.id ? "当前稳定版本" : "恢复此版本"}
+                    {chapter?.currentVersionId === snapshot.id
+                      ? `当前版本 ${String(snapshot.sequence)}`
+                      : `恢复版本 ${String(snapshot.sequence)}`}
                   </Button>
                 </li>
               );
@@ -6681,12 +7082,12 @@ export function EditorPage() {
                   </strong>
                 </div>
                 <p>
-                  预计使用{" "}
+                  发送给 AI 的文字量（不是金额）约为{" "}
                   {displayedContextCompilation.compiled.trace.usedTokens.toLocaleString("zh-CN")}/
                   {displayedContextCompilation.compiled.trace.maximumContextTokens.toLocaleString(
                     "zh-CN",
                   )}{" "}
-                  个输入内容额度（本机保守估算，不是计费回执）。
+                  个本机估算单位（不是计费回执）。
                 </p>
                 <p>{contextBudgetExplanation(displayedContextCompilation.compiled)}</p>
               </div>
@@ -6703,7 +7104,8 @@ export function EditorPage() {
                                 {contextEntryStatusLabel(entry)}
                               </Badge>
                               <span>
-                                约 {entry.estimatedTokens.toLocaleString("zh-CN")} 个内容额度
+                                发送给 AI 的文字量约 {entry.estimatedTokens.toLocaleString("zh-CN")}{" "}
+                                个本机估算单位
                               </span>
                             </div>
                             <p>{contextSelectionReasonLabel(entry)}</p>
@@ -6733,6 +7135,101 @@ export function EditorPage() {
         </>
       </Drawer>
 
+      {largeDeletionReview !== null && chapter !== null && largeDeletionDialogOpen && (
+        <Dialog
+          open
+          onOpenChange={(open) => {
+            if (!open && !largeDeletionBusy) {
+              setLargeDeletionDialogOpen(false);
+              setEditorNotice("大幅删除仍保留为恢复草稿；确认前不会创建正式版本或自动切换章节。");
+            }
+          }}
+          title="本次修改将删除大量正文"
+          description="为避免误覆盖，修改后的短正文已先保存为恢复草稿；修改前正文仍保留在当前稳定版本中。"
+          footer={
+            <>
+              <Button
+                variant="secondary"
+                disabled={largeDeletionBusy}
+                onClick={() => {
+                  setLargeDeletionDialogOpen(false);
+                  setEditorNotice(
+                    "大幅删除仍保留为恢复草稿；确认前不会创建正式版本或自动切换章节。",
+                  );
+                }}
+              >
+                取消，保留恢复草稿
+              </Button>
+              <Button
+                variant="secondary"
+                loading={largeDeletionBusy}
+                disabled={largeDeletionReview.draftStatus !== "saved" || largeDeletionBusy}
+                onClick={() => void restoreBeforeLargeDeletion()}
+              >
+                恢复修改前正文
+              </Button>
+              {largeDeletionReview.draftStatus === "failed" ? (
+                <Button
+                  loading={largeDeletionBusy}
+                  disabled={largeDeletionBusy}
+                  onClick={() => void retryLargeDeletionDraft()}
+                >
+                  重试保存恢复草稿
+                </Button>
+              ) : (
+                <Button
+                  loading={largeDeletionBusy || largeDeletionReview.draftStatus === "saving"}
+                  disabled={largeDeletionReview.draftStatus !== "saved" || largeDeletionBusy}
+                  onClick={() => void confirmLargeDeletion()}
+                >
+                  确认删除并创建版本
+                </Button>
+              )}
+            </>
+          }
+        >
+          <div className="version-restore-comparison">
+            <InlineAlert
+              tone="warning"
+              title="请核对当前章节"
+              description="只有明确确认后，短正文才会创建新的稳定版本；系统不会删除修改前版本。"
+            />
+            <dl className="generation-receipt">
+              <div>
+                <dt>作品</dt>
+                <dd>作品：{project?.name ?? "未命名作品"}</dd>
+              </div>
+              <div>
+                <dt>章节</dt>
+                <dd>章节：{largeDeletionReview.chapterTitle}</dd>
+              </div>
+              <div>
+                <dt>修改前</dt>
+                <dd>
+                  修改前：{largeDeletionReview.previousCharacterCount.toLocaleString("zh-CN")} 字
+                </dd>
+              </div>
+              <div>
+                <dt>修改后</dt>
+                <dd>
+                  修改后：{largeDeletionReview.proposedContent.length.toLocaleString("zh-CN")} 字
+                </dd>
+              </div>
+            </dl>
+            <div>
+              <section>
+                <h3>修改前的稳定正文</h3>
+                <pre>{boundedEditorPreview(chapter.content)}</pre>
+              </section>
+              <section>
+                <h3>等待确认的短正文</h3>
+                <pre>{boundedEditorPreview(largeDeletionReview.proposedContent)}</pre>
+              </section>
+            </div>
+          </div>
+        </Dialog>
+      )}
+
       {versionToRestore !== null && chapter !== null && (
         <Dialog
           open
@@ -6742,7 +7239,7 @@ export function EditorPage() {
             }
           }}
           title={`恢复版本 ${String(versionToRestore.toSnapshot().sequence)}`}
-          description="确认后会把所选内容复制成新的稳定版本；当前版本和所有旧版本都会继续保留。"
+          description="恢复会创建一个新版本，旧历史不会删除。"
           footer={
             <>
               <Button
@@ -6757,7 +7254,7 @@ export function EditorPage() {
                 disabled={!editorClean || readonly}
                 onClick={() => void restoreSelectedVersion()}
               >
-                创建恢复版本
+                确认恢复版本 {String(versionToRestore.toSnapshot().sequence)}
               </Button>
             </>
           }
@@ -6768,6 +7265,32 @@ export function EditorPage() {
               title="这是追加式恢复"
               description="恢复不会回写旧记录。若章节在确认前发生变化，版本冲突保护会阻止提交。"
             />
+            <dl className="generation-receipt">
+              <div>
+                <dt>作品</dt>
+                <dd>作品：{project?.name ?? "未命名作品"}</dd>
+              </div>
+              <div>
+                <dt>章节</dt>
+                <dd>章节：{chapter.title}</dd>
+              </div>
+              <div>
+                <dt>目标版本</dt>
+                <dd>目标版本：版本 {String(versionToRestore.toSnapshot().sequence)}</dd>
+              </div>
+              <div>
+                <dt>目标字数</dt>
+                <dd>
+                  目标字数：
+                  {versionToRestore.toSnapshot().content.length.toLocaleString("zh-CN")} 字
+                </dd>
+              </div>
+              <div>
+                <dt>当前字数</dt>
+                <dd>当前字数：{chapter.content.length.toLocaleString("zh-CN")} 字</dd>
+              </div>
+            </dl>
+            <p>恢复会创建一个新版本，旧历史不会删除。</p>
             <div>
               <section>
                 <h3>当前稳定正文</h3>
@@ -6795,7 +7318,7 @@ export function EditorPage() {
           }
           description={
             privacyChangeTarget === "local_only"
-              ? "确认后，本章正文、摘要、检索、审稿和续写只允许使用已验证的本地模型；没有可用本地模型时会安全停止。"
+              ? "确认后，私密章节只在本机处理。没有可用的本地 AI 时，本次生成不会开始。"
               : "确认后，未来的联网 AI、同步与普通导出可以按你的设置使用本章所需内容。"
           }
           footer={
@@ -6859,11 +7382,7 @@ export function EditorPage() {
             }
           }
         }}
-        title={
-          directMode
-            ? "查看创作结果与正文"
-            : `比较${candidateActionGap}${candidateSuggestionLabel}与正文`
-        }
+        title={directMode ? "查看创作结果与正文" : "比较建议与正文"}
         description={
           directMode
             ? "结果仍与正文隔离；明确点击“使用这版”前不会改变正文或创建版本。"
@@ -6942,6 +7461,13 @@ export function EditorPage() {
           role="region"
           aria-label={`${candidateSuggestionLabel}审阅内容`}
         >
+          {project !== null && chapter !== null && (
+            <InlineAlert
+              tone="info"
+              title={`正在处理《${chapter.title}》`}
+              description={`作品《${project.name}》 · 当前章节《${chapter.title}》。下面的结果仍与这章正文隔离；只有点击“使用这版”或明确的创建版本操作后才会写入本章。`}
+            />
+          )}
           <Button
             className="candidate-review-dialog__scroll-control"
             variant="ghost"
@@ -6950,6 +7476,21 @@ export function EditorPage() {
             浏览{candidateActionGap}
             {candidateSuggestionLabel}内容（PageUp / PageDown / Home / End）
           </Button>
+          <nav className="candidate-review-dialog__navigation" aria-label="长内容快速定位">
+            <Button variant="secondary" onClick={() => navigateCandidateReviewTo("start")}>
+              查看开头
+            </Button>
+            <Button variant="secondary" onClick={() => navigateCandidateReviewTo("end")}>
+              查看结尾
+            </Button>
+            <Button
+              variant="secondary"
+              disabled={candidateReviewConflict !== null}
+              onClick={() => navigateCandidateReviewTo("edit")}
+            >
+              返回修改处
+            </Button>
+          </nav>
           {candidate !== null && candidateReviewConflict === null && (
             <section className="candidate-review-dialog__editor">
               <div className="candidate-review-dialog__editor-heading">
@@ -7437,42 +7978,72 @@ export function EditorPage() {
                 <InlineAlert
                   tone="info"
                   title="本次不会发送到外部 AI 服务"
-                  description="这是本机演示流程。完整结果只会保存为隔离的 AI 建议草稿；只有你稍后明确选择使用，才会改变正文并创建不可变版本。"
+                  description="这是本机演示流程。完整结果只会保存为隔离的 AI 建议草稿；只有你稍后明确选择使用，才会改变正文并创建不会被改动的历史版本。"
                 />
               ) : null
-            ) : continuationConfirmationIsRemembered ? (
-              <InlineAlert
-                tone="info"
-                title="已记住本次会话的相同确认"
-                description={`${continuationDisclosure.connectionDisplayName} · ${continuationDisclosure.modelId}；${continuationDisclosure.privacy} 资料范围：${continuationDisclosure.sentScopeLabel}。本次最多向模型服务发送 ${String(continuationDisclosure.maximumProviderCalls)} 次，自动重试 ${String(continuationDisclosure.automaticRetryCount)} 次；${formatProviderActionCost(continuationDisclosure)}。系统不会静默发送，请核对后点击“按本次摘要${generationPlan.actionLabel}”。`}
-              />
             ) : (
               <InlineAlert
-                tone="warning"
-                title="确认本次模型服务调用"
-                description={`${continuationDisclosure.connectionDisplayName} · ${continuationDisclosure.modelId}；${continuationDisclosure.privacy} 发送内容：${continuationDisclosure.sends.join("；")}。本次最多向模型服务发送 ${String(continuationDisclosure.maximumProviderCalls)} 次，自动重试 ${String(continuationDisclosure.automaticRetryCount)} 次；${formatProviderActionCost(continuationDisclosure)}。这次确认只适用于当前正文版本与本次生成计划；任一项变化都会停止发送并要求重新确认。完整结果只会保存为隔离的${directMode ? "创作结果" : " AI 建议草稿"}，正文和版本保持不变，直到你明确选择使用。`}
+                tone={continuationConfirmationIsRemembered ? "info" : "warning"}
+                title={
+                  continuationConfirmationIsRemembered ? "已记住本次会话的相同确认" : "发送确认摘要"
+                }
+                description={`${project !== null && chapter !== null ? `作品《${project.name}》 · 章节《${chapter.title}》；` : ""}模型：${continuationDisclosure.connectionDisplayName} · ${continuationDisclosure.modelId}；资料：${continuationDisclosure.sentScopeLabel}；预计发送 ${String(continuationDisclosure.maximumProviderCalls)} 次；${formatProviderActionCostSummary(continuationDisclosure)}；私密内容：${chapter?.isLocalOnly === true ? (continuationDisclosure.dataDestination === "local" ? "包含，只在本机处理" : "不会发送") : "不包含私密章节"}。${continuationConfirmationIsRemembered ? `仍需点击“按本次摘要${generationPlan.actionLabel}”才会发送。` : "确认后才会发送，生成结果不会自动写入正文。"}`}
               />
             )}
-            {continuationDisclosure !== null && !continuationConfirmationIsRemembered && (
-              <section
-                className="generation-preflight__confirmation-memory"
-                aria-label="本次确认方式"
-              >
-                <label className="checkbox-row">
-                  <input
-                    type="checkbox"
-                    aria-label="在当前会话记住本次确认"
-                    checked={rememberContinuationConfirmationForSession}
-                    onChange={(event) =>
-                      setRememberContinuationConfirmationForSession(event.currentTarget.checked)
-                    }
-                  />
-                  <span>在当前会话记住本次确认</span>
-                </label>
-                <p>
-                  仅限同一作品、章节、正文版本、模型、服务、任务、资料范围和隐私去向；任一项变化都会重新确认。
-                </p>
-              </section>
+            {continuationDisclosure !== null && (
+              <details>
+                <summary>查看详细信息</summary>
+                {project !== null && chapter !== null && (
+                  <section
+                    className="generation-preflight__confirmation-memory"
+                    aria-label="本次写作章节"
+                  >
+                    <h3>本次写作章节</h3>
+                    <p>
+                      作品《{project.name}》 · 章节《{chapter.title}》 · 当前稳定正文{" "}
+                      {chapter.content.length.toLocaleString("zh-CN")} 字。
+                    </p>
+                  </section>
+                )}
+                <section
+                  className="generation-preflight__confirmation-memory"
+                  aria-label="完整发送信息"
+                >
+                  <h3>完整发送信息</h3>
+                  <p>{continuationDisclosure.privacy}</p>
+                  <p>发送内容：{continuationDisclosure.sends.join("；")}。</p>
+                  <p>
+                    本次最多向模型服务发送 {String(continuationDisclosure.maximumProviderCalls)}{" "}
+                    次，自动重试 {String(continuationDisclosure.automaticRetryCount)} 次。
+                  </p>
+                  <p>
+                    这次确认只适用于当前正文版本与本次生成计划；任一项变化都会停止发送并要求重新确认。完整结果只会保存为隔离的
+                    {directMode ? "创作结果" : " AI 建议草稿"}
+                    ，正文和版本保持不变，直到你明确选择使用。
+                  </p>
+                </section>
+                {!continuationConfirmationIsRemembered && (
+                  <section
+                    className="generation-preflight__confirmation-memory"
+                    aria-label="本次确认方式"
+                  >
+                    <label className="checkbox-row">
+                      <input
+                        type="checkbox"
+                        aria-label="在当前会话记住本次确认"
+                        checked={rememberContinuationConfirmationForSession}
+                        onChange={(event) =>
+                          setRememberContinuationConfirmationForSession(event.currentTarget.checked)
+                        }
+                      />
+                      <span>在当前会话记住本次确认</span>
+                    </label>
+                    <p>
+                      仅限同一作品、章节、正文版本、模型、服务、任务、资料范围和隐私去向；任一项变化都会重新确认。
+                    </p>
+                  </section>
+                )}
+              </details>
             )}
 
             {generationPlan.contextCompilation !== null &&
@@ -7540,7 +8111,7 @@ export function EditorPage() {
                     </strong>
                   </div>
                   <p>
-                    预计使用{" "}
+                    发送给 AI 的文字量（不是金额）约为{" "}
                     {generationPlan.contextCompilation.compiled.trace.usedTokens.toLocaleString(
                       "zh-CN",
                     )}
@@ -7548,7 +8119,7 @@ export function EditorPage() {
                     {generationPlan.contextCompilation.compiled.trace.maximumContextTokens.toLocaleString(
                       "zh-CN",
                     )}{" "}
-                    个输入内容额度（本机保守估算，不是计费回执）；未选资料不会发送给模型。
+                    个本机估算单位（不是计费回执）；未选资料不会发送给模型。
                   </p>
                   <p>{contextBudgetExplanation(generationPlan.contextCompilation.compiled)}</p>
                   <ul>
@@ -7560,7 +8131,10 @@ export function EditorPage() {
                         <strong>{contextLayerLabel(entry.layer)}</strong>
                         <span>
                           {" "}
-                          · 约 {entry.estimatedTokens.toLocaleString("zh-CN")} 个内容额度
+                          · 发送给 AI 的文字量约 {entry.estimatedTokens.toLocaleString(
+                            "zh-CN",
+                          )}{" "}
+                          个本机估算单位
                         </span>
                         <p>{contextSelectionReasonLabel(entry)}</p>
                         {entry.evidence.length > 0 && (
@@ -7630,9 +8204,7 @@ export function EditorPage() {
                   <span>预计费用</span>
                   <strong>暂时无法计算</strong>
                 </div>
-                <p>
-                  当前模型价格未配置；这不会阻止本次生成，但服务商仍可能正常计费。生成后会保留服务商返回的用量，并显示“服务商未提供费用信息”，不会伪造零费用。
-                </p>
+                <p>服务商没有提供可计算的单价，实际费用请以服务商账单为准。</p>
               </section>
             )}
 
@@ -7648,11 +8220,11 @@ export function EditorPage() {
                   <summary>用量与计价依据（高级）</summary>
                   <dl>
                     <div>
-                      <dt>输入 / 输出上限</dt>
+                      <dt>发送给 AI / AI 返回的文字量（不是金额）</dt>
                       <dd>
                         {generationPlan.preflight.inputTokens.toLocaleString("zh-CN")} /{" "}
                         {generationPlan.preflight.maximumOutputTokens.toLocaleString("zh-CN")}{" "}
-                        用量单位
+                        个本机估算单位
                       </dd>
                     </div>
                     <div>
@@ -7798,9 +8370,16 @@ function selectionRewriteUiError(cause: unknown): unknown {
 
 function formatSelectionRewriteCost(disclosure: SelectionRewriteDisclosure): string {
   if (disclosure.estimatedMaximumCostMicros === null || disclosure.currency === null) {
-    return "当前无法核定费用上限，AI 服务仍可能收费";
+    return "服务商没有提供可计算的单价，实际费用请以服务商账单为准。";
   }
   return `本次费用上限 ${disclosure.estimatedMaximumCostMicros} 微单位 ${disclosure.currency}`;
+}
+
+function formatSelectionRewriteCostSummary(disclosure: SelectionRewriteDisclosure): string {
+  if (disclosure.estimatedMaximumCostMicros === null || disclosure.currency === null) {
+    return "费用：暂时无法计算";
+  }
+  return `费用上限：${disclosure.estimatedMaximumCostMicros} 微单位 ${disclosure.currency}`;
 }
 
 function selectionRewriteActionLabel(action: EditorGenerationAction): string {
@@ -7812,9 +8391,16 @@ function selectionRewriteActionLabel(action: EditorGenerationAction): string {
 
 function formatProviderActionCost(disclosure: ContinuationGenerationDisclosure): string {
   if (disclosure.estimatedMaximumCostMicros === null || disclosure.currency === null) {
-    return "当前无法核定费用上限，AI 服务仍可能收费";
+    return "服务商没有提供可计算的单价，实际费用请以服务商账单为准。";
   }
   return `本次费用上限 ${disclosure.estimatedMaximumCostMicros} 微单位 ${disclosure.currency}`;
+}
+
+function formatProviderActionCostSummary(disclosure: ContinuationGenerationDisclosure): string {
+  if (disclosure.estimatedMaximumCostMicros === null || disclosure.currency === null) {
+    return "费用：暂时无法计算";
+  }
+  return `费用上限：${disclosure.estimatedMaximumCostMicros} 微单位 ${disclosure.currency}`;
 }
 
 function continuationConfirmationScope(
@@ -8027,7 +8613,8 @@ function preflightCheckLabel(code: string): string {
     BUDGET_EXCEEDED: "预计费用超过硬预算",
     PREFLIGHT_WARNING_PRICING_UNKNOWN: "该模型尚未填写价格，暂时无法估算费用",
     PREFLIGHT_WARNING_CONTEXT_UNKNOWN: "未获取精确的资料处理上限，将使用保守长度整理参考内容",
-    PREFLIGHT_WARNING_TOKEN_ESTIMATE_APPROXIMATE: "当前内容额度为估算值，已预留安全余量",
+    PREFLIGHT_WARNING_TOKEN_ESTIMATE_APPROXIMATE:
+      "发送给 AI 的文字量为本机估算（不是金额），已预留安全余量",
     PREFLIGHT_BLOCKED_NO_ROUTE: "没有可用的正文生成创作任务安排",
     PREFLIGHT_BLOCKED_CREDENTIAL: "AI 服务凭据缺失或不可用",
     PREFLIGHT_BLOCKED_MODEL_UNAVAILABLE: "连接或所选模型确定不可用",
@@ -8076,12 +8663,12 @@ function formatAttemptUsage(usage: GenerationAttemptUsage): string {
     const cached =
       usage.cachedInputTokens === null
         ? ""
-        : `，其中缓存输入 ${usage.cachedInputTokens.toLocaleString("zh-CN")}`;
-    return `第 ${String(usage.attempt)} 次供应商回执：输入 ${usage.inputTokens.toLocaleString(
+        : `，其中缓存文字量 ${usage.cachedInputTokens.toLocaleString("zh-CN")}`;
+    return `第 ${String(usage.attempt)} 次供应商回执：发送给 AI 的文字量 ${usage.inputTokens.toLocaleString(
       "zh-CN",
-    )}${cached}，输出 ${usage.outputTokens.toLocaleString(
+    )}${cached}，AI 返回的文字量 ${usage.outputTokens.toLocaleString(
       "zh-CN",
-    )} 用量单位；按价格版本重算 ${formatCostEstimate(
+    )}（不是金额）；按价格版本重算 ${formatCostEstimate(
       BigInt(usage.usagePricedEstimateMicros),
       usage.currency,
     )}（估算）。`;
@@ -8094,12 +8681,12 @@ function formatAttemptUsage(usage: GenerationAttemptUsage): string {
     const cached =
       usage.cachedInputTokens === null
         ? ""
-        : `，其中缓存输入 ${usage.cachedInputTokens.toLocaleString("zh-CN")}`;
-    return `第 ${String(usage.attempt)} 次供应商回执：输入 ${usage.inputTokens.toLocaleString(
+        : `，其中缓存文字量 ${usage.cachedInputTokens.toLocaleString("zh-CN")}`;
+    return `第 ${String(usage.attempt)} 次供应商回执：发送给 AI 的文字量 ${usage.inputTokens.toLocaleString(
       "zh-CN",
-    )}${cached}，输出 ${usage.outputTokens.toLocaleString(
+    )}${cached}，AI 返回的文字量 ${usage.outputTokens.toLocaleString(
       "zh-CN",
-    )} 个用量单位；服务商未提供费用信息。`;
+    )}（不是金额）；服务商没有提供可计算的单价，实际费用请以服务商账单为准。`;
   }
   return `第 ${String(usage.attempt)} 次：外部服务未返回可验证用量回执，保留生成前上界估算。`;
 }

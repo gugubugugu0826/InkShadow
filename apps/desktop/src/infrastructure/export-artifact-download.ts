@@ -45,7 +45,10 @@ export interface ExportArtifactSaveReceipt {
 export interface SaveExportArtifactOptions {
   readonly format: ExportArtifactFormat;
   readonly mode: "tauri" | "browser-development";
+  readonly onDestinationPromptChange?: (open: boolean) => void;
 }
+
+export type SavedExportArtifactAction = "open_file" | "show_in_folder";
 
 export class ExportArtifactSaveError extends Error {
   public constructor(
@@ -123,6 +126,7 @@ export async function saveExportArtifact(
   }
 
   let destination: NativeExportDestinationReceipt | null;
+  notifyDestinationPrompt(options, true);
   try {
     const value = await invoke<unknown>("native_choose_export_destination", {
       request: {
@@ -134,6 +138,8 @@ export async function saveExportArtifact(
     destination = value === null ? null : validateNativeDestination(value);
   } catch {
     throw failedSaveError(artifact, options.format, "无法打开安全保存位置，请检查桌面权限后重试。");
+  } finally {
+    notifyDestinationPrompt(options, false);
   }
   if (destination === null) {
     return Object.freeze({
@@ -161,6 +167,18 @@ export async function saveExportArtifact(
   } catch {
     throw unknownWriteResultError({ ...artifact, fileName: destination.fileName }, options.format);
   }
+}
+
+export async function openSavedExportArtifact(
+  path: string,
+  action: SavedExportArtifactAction,
+): Promise<void> {
+  if (!isSafeAbsolutePath(path) || !["open_file", "show_in_folder"].includes(action)) {
+    throw new Error("The saved export path or action is invalid.");
+  }
+  await invoke<unknown>("native_open_export_artifact", {
+    request: { path, action },
+  });
 }
 
 export function persistLastExportReceipt(
@@ -458,4 +476,12 @@ function isVerification(value: unknown): value is ExportArtifactVerification {
   return ["verified", "not_written", "path_not_available", "write_result_unknown"].includes(
     value as string,
   );
+}
+
+function notifyDestinationPrompt(options: SaveExportArtifactOptions, open: boolean): void {
+  try {
+    options.onDestinationPromptChange?.(open);
+  } catch {
+    // Presentation callbacks cannot change the native save boundary or receipt.
+  }
 }

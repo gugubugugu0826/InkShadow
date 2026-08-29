@@ -53,7 +53,7 @@ export class AppErrorBoundary extends Component<AppErrorBoundaryProps, AppErrorB
         <ErrorState
           headingLevel={1}
           title="这个页面暂时没有正常打开"
-          description={`可以重试当前页面，或先返回创作首页。支持编号：${this.state.diagnosticId ?? "正在生成"}。已保存的正文、版本和本地备份不会因为这个界面错误被删除。`}
+          description={`可以重试当前页面，或先返回创作首页。问题编号：${this.state.diagnosticId ?? "正在生成"}（联系支持时提供）。已保存的正文、版本和本地备份不会因为这个界面错误被删除。`}
           savedState="本地数据保持原样；未保存输入仍以恢复草稿策略为准。"
           primaryAction={{
             label: "重试当前页面",

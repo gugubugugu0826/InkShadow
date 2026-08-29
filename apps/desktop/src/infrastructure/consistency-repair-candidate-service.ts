@@ -90,6 +90,7 @@ export interface ConsistencyRepairCandidateDisclosure {
   readonly providerKind: string;
   readonly modelId: string;
   readonly dataDestination: "local" | "remote";
+  readonly includesPrivateContent: boolean;
   readonly taskLabel: "正文修复";
   readonly estimatedInputTokens: number;
   readonly maximumOutputTokens: number;
@@ -775,7 +776,7 @@ function buildRepairEvidenceBundle(
       id: "repair-authority-contract",
       layer: "locked_hard_rules",
       content:
-        "只生成一个隔离修复 Candidate；不得修改正文、正式设定、其他章节或不可变版本。输出只能是一处连续替换。",
+        "只生成一个隔离的修复建议；不得修改正文、正式设定、其他章节或不会被改动的历史版本。输出只能是一处连续替换。",
       selectionReason: "一致性修复动作的固定权限边界。",
       evidence: [
         {
@@ -1158,6 +1159,7 @@ function disclosure(prepared: PreparedRepair): ConsistencyRepairCandidateDisclos
     providerKind: prepared.inspection.providerKind,
     modelId: prepared.inspection.modelId,
     dataDestination: prepared.inspection.dataDestination,
+    includesPrivateContent: prepared.privacy.requiresVerifiedLocal,
     taskLabel: "正文修复" as const,
     estimatedInputTokens: prepared.inspection.estimatedInputTokens,
     maximumOutputTokens: MAXIMUM_OUTPUT_TOKENS,
@@ -1288,12 +1290,12 @@ function normalizeRepairFailure(cause: unknown): ConsistencyRepairCandidateError
       cause.code,
       cause instanceof Error
         ? cause.message
-        : "修复建议未能安全保存；正文、正式设定和不可变版本没有改变。",
+        : "修复建议未能安全保存；正文、正式设定和不会被改动的历史版本没有改变。",
     );
   }
   return new ConsistencyRepairCandidateError(
     "CONSISTENCY_REPAIR_FAILED",
-    "修复建议未能安全保存；正文、正式设定和不可变版本没有改变。",
+    "修复建议未能安全保存；正文、正式设定和不会被改动的历史版本没有改变。",
   );
 }
 

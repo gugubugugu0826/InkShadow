@@ -139,9 +139,9 @@ describe("WorkspacePage route authority", () => {
 
     renderRoute(runtime, `/projects/${project.value.id}`);
 
-    const notice = await screen.findByText(/支持编号：UI-/u);
+    const notice = await screen.findByText(/问题编号（联系支持时提供）：UI-/u);
     const supportId = /UI-[0-9]{14}-[0-9]{3,}/u.exec(notice.textContent)?.[0];
-    if (supportId === undefined) throw new Error("工作区没有支持编号。");
+    if (supportId === undefined) throw new Error("工作区没有问题编号。");
     const incident = readSafeUiRouteIncidents(runtime).find(
       ({ diagnosticId }) => diagnosticId === supportId,
     );
@@ -152,6 +152,31 @@ describe("WorkspacePage route authority", () => {
     });
     expect(incident?.reasonCodeChain).toContain("REPOSITORY_ERROR");
     expect(JSON.stringify(window.localStorage)).not.toContain(sensitive);
+  });
+
+  it("names the exact destination chapter for every continue-writing action in a 100k project", async () => {
+    const runtime = createDevelopmentRuntime(window.localStorage);
+    const project = await runtime.useCases.createProject.execute({ name: "十万字三章节作品" });
+    if (!project.ok) throw project.error;
+    for (const [title, character] of [
+      ["潮声", "潮"],
+      ["雨夜", "雨"],
+      ["天明", "明"],
+    ] as const) {
+      const chapter = await runtime.useCases.createChapter.execute({
+        projectId: project.value.id,
+        title,
+        content: character.repeat(34_000),
+      });
+      if (!chapter.ok) throw chapter.error;
+    }
+
+    renderRoute(runtime, `/projects/${project.value.id}`);
+
+    expect(await screen.findByText("102,000")).toBeVisible();
+    expect(screen.getByRole("link", { name: "继续写第 1 章《潮声》" })).toBeVisible();
+    expect(screen.getByRole("link", { name: "继续写第 2 章《雨夜》" })).toBeVisible();
+    expect(screen.getAllByRole("link", { name: "继续写第 3 章《天明》" })).toHaveLength(2);
   });
 });
 

@@ -67,7 +67,7 @@ describe("normalizeUiError SQLite persistence failures", () => {
 
       const ordinary = projectOrdinaryUiError(error);
       expect(ordinary).toEqual({
-        title: "写入结果需要核对",
+        title: "暂时无法确认是否已保存",
         description:
           "本机暂时无法确认这次写入是否已经完成。请重新打开当前页面，核对正文、版本和 AI 建议草稿状态；系统不会自动再次提交。",
       });

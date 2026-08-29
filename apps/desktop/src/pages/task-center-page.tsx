@@ -192,7 +192,7 @@ export function TaskCenterPage() {
     if (input === null || task.failure === null) {
       toast({
         title: "这条任务无法安全重试",
-        description: "任务来源信息不完整。正文没有受影响，可导出诊断后再处理。",
+        description: "任务来源信息不完整。正文没有受影响，可导出问题信息后再处理。",
         tone: "warning",
       });
       return;
@@ -208,7 +208,7 @@ export function TaskCenterPage() {
       });
       const queuedInput = persistedAcceptedChapterPipelineInput(queued);
       if (queuedInput === null) {
-        throw new Error("任务恢复标记未能安全核对。正文没有受到影响，请导出诊断后再试。");
+        throw new Error("任务恢复标记未能安全核对。正文没有受到影响，请导出问题信息后再试。");
       }
       await ensureCurrentSavedVersionStoryFactsForDirectMode(runtime, queuedInput);
       const receipt = await runAcceptedChapterPipeline(runtime, queuedInput);
@@ -496,13 +496,13 @@ function TaskList({ busyId, onCancel, onRetry, tasks }: TaskListProps) {
                           <span>{taskFailureDescription(task.failure)}</span>{" "}
                           {task.type === "ai.opening.generate" && (
                             <span>
-                              {`支持编号：${openingJourneySupportNumber({
+                              {`问题编号：${openingJourneySupportNumber({
                                 supportId: task.failure.requestId,
                                 startedAt:
                                   typeof task.metadata.startedAt === "string"
                                     ? task.metadata.startedAt
                                     : task.createdAt,
-                              })}`}
+                              })}（联系支持时提供）`}
                             </span>
                           )}
                         </>
@@ -534,7 +534,7 @@ function TaskList({ busyId, onCancel, onRetry, tasks }: TaskListProps) {
                       )}
                       {task.failure.actions.includes("EXPORT_DIAGNOSTICS") && (
                         <Link className="button-link" to="/settings#diagnostics">
-                          导出诊断
+                          导出问题信息
                         </Link>
                       )}
                     </div>

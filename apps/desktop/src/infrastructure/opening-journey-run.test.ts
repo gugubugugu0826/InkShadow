@@ -163,6 +163,38 @@ describe("opening journey run", () => {
     });
   });
 
+  it("starts a fresh bounded execution deadline only after the author confirms sending", () => {
+    const initial = createOpeningJourneyRun({
+      journeyId: JOURNEY_ID,
+      batchId: BATCH_ID,
+      taskId: TASK_ID,
+      requestIds: REQUEST_IDS,
+      now: STARTED_AT,
+      timeoutMs: 180_000,
+    });
+    const awaiting = advanceRunToAwaitingConfirmation(initial, "2026-08-23T10:05:00.000Z");
+    const confirmed = advanceOpeningJourneyRun(awaiting, {
+      stage: "confirmed",
+      now: "2026-08-23T10:10:00.000Z",
+      timeoutMs: 1_140_000,
+    });
+
+    expect(awaiting.deadlineAt).toBe("2026-08-23T10:03:00.000Z");
+    expect(confirmed).toMatchObject({
+      startedAt: STARTED_AT,
+      stageStartedAt: "2026-08-23T10:10:00.000Z",
+      deadlineAt: "2026-08-23T10:29:00.000Z",
+      autoRetryCount: 0,
+    });
+    expect(() =>
+      advanceOpeningJourneyRun(confirmed, {
+        stage: "invocation_reserving",
+        now: "2026-08-23T10:10:01.000Z",
+        timeoutMs: 180_000,
+      }),
+    ).toThrow("only start at confirmation");
+  });
+
   it("rejects skipped stages and terminal states outside their explicit dispatch boundary", () => {
     const initial = createOpeningJourneyRun({
       journeyId: JOURNEY_ID,

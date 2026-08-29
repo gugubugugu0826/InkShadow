@@ -1,4 +1,7 @@
 import {
+  MAX_NOVEL_SKILLS_PER_INVOCATION,
+  NOVEL_SKILL_COMPILER_VERSION,
+  isFixedNovelSkillEvaluationConfiguration,
   listNovelSkillEvaluationFixtures,
   type NovelSkillEvaluationArm,
   type NovelSkillEvaluationFixture,
@@ -93,6 +96,29 @@ describe("Novel Skill paid evaluation payload authority", () => {
     );
     expect(byArm.core_genre.manifest.armConfigurationHash).toBe(
       byArm.core_genre_preferences.manifest.armConfigurationHash,
+    );
+    for (const payload of payloads.filter(({ compiledSkills }) => compiledSkills !== null)) {
+      expect(payload.compiledSkills?.configuration.bindings).toEqual([]);
+      expect(payload.compiledSkills?.configuration.compilerVersion).toBe(
+        NOVEL_SKILL_COMPILER_VERSION,
+      );
+      expect(
+        payload.compiledSkills === null
+          ? false
+          : isFixedNovelSkillEvaluationConfiguration(payload.compiledSkills.configuration),
+      ).toBe(true);
+      expect(payload.compiledSkills?.configuration.explicitSkillIds.length).toBeGreaterThan(0);
+      expect(payload.compiledSkills?.configuration.explicitSkillIds).toHaveLength(
+        payload.compiledSkills?.configuration.consideredDefinitions.length ?? 0,
+      );
+      expect(
+        payload.compiledSkills?.items.every(
+          ({ activationSource }) => activationSource === "explicit",
+        ),
+      ).toBe(true);
+    }
+    expect(byArm.core_genre.compiledSkills?.selectedDefinitions.length).toBeGreaterThan(
+      MAX_NOVEL_SKILLS_PER_INVOCATION,
     );
     await expect(hashModelHubExactEvaluationMessages(byArm.core_genre.messages)).resolves.toBe(
       byArm.core_genre.manifest.messagePayloadHash,

@@ -27,9 +27,9 @@ describe("UsageCenterPage", () => {
       await screen.findByRole("heading", { name: "模型使用与费用", level: 1 }),
     ).toBeInTheDocument();
     expect(screen.getAllByText("¥0.12").length).toBeGreaterThan(0);
-    expect(screen.getByText("1 次费用未知 · 已知金额均为估算")).toBeInTheDocument();
-    expect(screen.getByText("内容额度未记录")).toBeInTheDocument();
-    expect(screen.getByText("AI 服务记录有 1 次失败或结果不明确、1 次费用未知")).toBeVisible();
+    expect(screen.getByText("1 次暂时无法估算 · 已知金额均为估算")).toBeInTheDocument();
+    expect(screen.getByText("文字量未记录（不是金额）")).toBeInTheDocument();
+    expect(screen.getByText("AI 服务记录有 1 次失败或结果不明确")).toBeVisible();
     expect(screen.getByText("第一章 雨停以前")).toBeVisible();
     expect(screen.getAllByText("本地运算").length).toBeGreaterThan(0);
     expect(document.body).not.toHaveTextContent("deepseek-connection");
@@ -41,9 +41,7 @@ describe("UsageCenterPage", () => {
     ).toBeVisible();
     expect(screen.queryByText("LOCAL_MODEL_UNAVAILABLE_INTERNAL_SENTINEL")).not.toBeInTheDocument();
     expect(
-      screen.getByText(
-        "这里不保存正文、提示词或接口密钥。金额是按本地价格元数据计算的估算，不代表供应商最终账单；缺少内容额度回执或价格时会明确显示“费用未知”。",
-      ),
+      screen.getByText("服务商没有提供可计算的单价，实际费用请以服务商账单为准。"),
     ).toBeInTheDocument();
 
     await user.selectOptions(screen.getByLabelText("作品"), PROJECT_ID);
@@ -67,6 +65,21 @@ describe("UsageCenterPage", () => {
     await user.selectOptions(screen.getByLabelText("汇总方式"), "provider");
     const breakdown = screen.getByRole("table", { name: "分类使用汇总" });
     expect(within(breakdown).getByRole("columnheader", { name: "供应商" })).toBeInTheDocument();
+  });
+
+  it("explains unknown prices once and presents text usage as a non-monetary quantity", async () => {
+    const reader: UsageCenterReader = {
+      read: vi.fn<UsageCenterReader["read"]>().mockResolvedValue(SNAPSHOT),
+    };
+    render(<UsageCenterPage reader={reader} now={NOW} />);
+
+    expect(await screen.findByRole("heading", { name: "模型使用与费用" })).toBeVisible();
+    expect(
+      screen.getAllByText("服务商没有提供可计算的单价，实际费用请以服务商账单为准。"),
+    ).toHaveLength(1);
+    expect(screen.getAllByRole("columnheader", { name: "文字量（不是金额）" })).toHaveLength(2);
+    expect(document.body).not.toHaveTextContent("内容额度");
+    expect(document.body).not.toHaveTextContent("费用未知");
   });
 
   it("shows an actionable empty state without invented sample usage", async () => {
@@ -138,8 +151,8 @@ describe("UsageCenterPage", () => {
     const row = within(details).getByRole("row", { name: /模型能力验证/u });
     expect(row).toHaveTextContent("写作模型服务");
     expect(row).toHaveTextContent("writer-model-v1");
-    expect(row).toHaveTextContent("输入 11 · 输出 2 · 缓存 3");
-    expect(row).toHaveTextContent("费用未知");
+    expect(row).toHaveTextContent("发送给 AI 的文字量 11 · AI 返回的文字量 2 · 缓存文字量 3");
+    expect(row).toHaveTextContent("服务商未提供费用信息");
     expect(row).toHaveTextContent("已得到完整结果");
     expect(document.body).not.toHaveTextContent("private-connection-id");
     expect(document.body).not.toHaveTextContent("https://api.example.test/v1");
@@ -193,9 +206,11 @@ describe("UsageCenterPage", () => {
     expect(within(details).getByRole("row", { name: /已得到完整结果/u })).toHaveTextContent(
       "243 个可见字符",
     );
-    expect(within(details).getByRole("row", { name: /结果待核对/u })).toHaveTextContent(
-      "发送 1 次 · 自动重试 0 次",
-    );
+    expect(
+      within(details).getByRole("row", {
+        name: /请求可能已经发出，暂时无法确认结果/u,
+      }),
+    ).toHaveTextContent("发送 1 次 · 自动重试 0 次");
     expect(within(details).getByRole("row", { name: /发送前安全终止/u })).toHaveTextContent(
       "发送 0 次 · 自动重试 0 次",
     );
@@ -215,7 +230,7 @@ describe("UsageCenterPage", () => {
     };
     render(<UsageCenterPage reader={reader} now={NOW} />);
 
-    const title = await screen.findByText("AI 服务记录有 2 次尚未终结、2 次费用未知");
+    const title = await screen.findByText("AI 服务记录有 2 次尚未终结");
     expect(title.closest(".ink-inline-alert")).toHaveClass("ink-inline-alert--warning");
   });
 

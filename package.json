@@ -1,6 +1,6 @@
 {
   "name": "inkshadow",
-  "version": "0.2.14",
+  "version": "0.2.15",
   "private": true,
   "description": "InkShadow 墨影：本地优先、隐私优先的 AI 长篇内容创作工作台",
   "license": "UNLICENSED",
@@ -35,6 +35,7 @@
     "test:all": "pnpm typecheck && pnpm lint && pnpm test:scripts && pnpm test && pnpm test:e2e",
     "release:check": "pnpm build && pnpm format:check && pnpm check:secrets && pnpm check:licenses && pnpm check:boundaries && pnpm check:desktop-release && pnpm typecheck && pnpm lint && pnpm test:scripts && pnpm test",
     "release:assert-clean": "node scripts/assert-clean-release-head.mjs",
+    "release:verify:installer-version": "node scripts/check-windows-installer-version.mjs",
     "release:verify:unsigned": "node scripts/check-desktop-release.mjs --dist apps/desktop/dist-release",
     "release:candidate:unsigned": "node scripts/run-unsigned-release-candidate.mjs",
     "check": "pnpm format:check && pnpm check:secrets && pnpm check:licenses && pnpm check:boundaries && pnpm check:desktop-release && pnpm typecheck && pnpm lint && pnpm test:scripts && pnpm test && pnpm build"

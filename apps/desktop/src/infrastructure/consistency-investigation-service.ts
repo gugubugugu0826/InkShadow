@@ -87,6 +87,7 @@ export interface ConsistencyInvestigationDisclosure {
   readonly catalogEntryId: string;
   readonly modelId: string;
   readonly dataDestination: "local" | "remote";
+  readonly includesPrivateContent: boolean;
   readonly maximumModelCalls: 1;
   readonly maximumToolSteps: 5;
   readonly automaticRetryCount: 0;
@@ -1472,6 +1473,7 @@ function disclosure(
     catalogEntryId: run.catalogEntryId,
     modelId: run.modelId,
     dataDestination: inspection.dataDestination,
+    includesPrivateContent: privacy.requiresVerifiedLocal,
     maximumModelCalls: 1,
     maximumToolSteps: 5,
     automaticRetryCount: 0,

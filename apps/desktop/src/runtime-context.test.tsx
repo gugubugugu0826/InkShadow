@@ -74,7 +74,7 @@ describe("RuntimeProvider native database bootstrap recovery", () => {
     expect(await screen.findByText(/墨影没有修改或替换原数据库/u)).toBeInTheDocument();
     expect(screen.queryByText("SQLITE_MIGRATION_INTEGRITY_FAILED")).not.toBeInTheDocument();
     expect(screen.queryByText(/secret prose|author|inkshadow\.db/u)).not.toBeInTheDocument();
-    const supportNumber = screen.getByText(/^支持编号：墨影-\d{14}-\d{3,}$/u);
+    const supportNumber = screen.getByText(/^问题编号：墨影-\d{14}-\d{3,}（联系支持时提供）$/u);
     expect(supportNumber).toBeVisible();
     expect(screen.getByRole("button", { name: "重新读取" })).toBeVisible();
     expect(screen.getByRole("button", { name: "导出脱敏诊断" })).toBeVisible();

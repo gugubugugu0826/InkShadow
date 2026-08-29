@@ -381,7 +381,7 @@ function UsageOverview({ summary }: { readonly summary: CloudAiUsageSummaryRespo
         <CardHeader>
           <CardTitle>计价版本</CardTitle>
           <CardDescription>
-            内部额度按预约时锁定的服务端价格快照计算，不代表供应商最终账单。
+            内部额度按预约时锁定的服务端价格记录计算，不代表供应商最终账单。
           </CardDescription>
         </CardHeader>
         <CardContent className="studio-usage-page__metrics">
@@ -509,7 +509,7 @@ function TeamBudgetForm(props: {
               />
             )}
           </FormField>
-          <FormField label="每百万输入内容额度价格" required>
+          <FormField label="每百万发送文字量单位价格" required>
             {(field) => (
               <Input
                 {...field}
@@ -520,7 +520,7 @@ function TeamBudgetForm(props: {
               />
             )}
           </FormField>
-          <FormField label="每百万输出内容额度价格" required>
+          <FormField label="每百万返回文字量单位价格" required>
             {(field) => (
               <Input
                 {...field}
@@ -632,7 +632,7 @@ function UsageEvents({
                 <TableHead>事件</TableHead>
                 <TableHead>模型</TableHead>
                 <TableHead>用途</TableHead>
-                <TableHead>输入 / 输出内容额度</TableHead>
+                <TableHead>发送 / 返回文字量（不是金额）</TableHead>
                 <TableHead>金额</TableHead>
                 <TableHead>价格版本</TableHead>
               </TableRow>

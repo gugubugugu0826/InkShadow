@@ -691,11 +691,11 @@ describe("desktop vertical slice", () => {
       throw new Error("找不到第一版历史记录");
     }
     expect(within(firstVersion).getByText("第一版正文。")).toBeVisible();
-    await user.click(within(firstVersion).getByRole("button", { name: "恢复此版本" }));
+    await user.click(within(firstVersion).getByRole("button", { name: /^恢复版本 \d+$/u }));
 
     const confirmation = await screen.findByRole("dialog", { name: "恢复版本 1" });
     expect(within(confirmation).getByText("这是追加式恢复")).toBeVisible();
-    await user.click(within(confirmation).getByRole("button", { name: "创建恢复版本" }));
+    await user.click(within(confirmation).getByRole("button", { name: /^确认恢复版本 \d+$/u }));
     await waitFor(() => {
       expect(editor).toHaveValue("第一版正文。");
     });

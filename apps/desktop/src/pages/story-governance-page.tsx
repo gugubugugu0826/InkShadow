@@ -221,8 +221,8 @@ function StoryFactEvidenceDetails({
                 <dt>保存版本</dt>
                 <dd>
                   {sourceVersion === undefined
-                    ? "不可变版本详情暂不可用"
-                    : "第 " + String(sourceVersion.sequence) + " 个不可变版本"}
+                    ? "历史版本详情暂不可用"
+                    : "第 " + String(sourceVersion.sequence) + " 个不会被改动的历史版本"}
                 </dd>
               </div>
               <div>
@@ -876,7 +876,7 @@ export function StoryGovernancePage() {
             return null;
           }
           if (found.value === null) {
-            sourceVersionFailure ??= new Error("设定原文对应的不可变版本不存在");
+            sourceVersionFailure ??= new Error("设定原文对应的历史版本不存在");
           }
           return found.value;
         }),
@@ -2008,7 +2008,7 @@ export function StoryGovernancePage() {
                   disabled={readonly || busy}
                   onClick={() => openEditFormalRecord(record)}
                 >
-                  编辑正式记录
+                  {fields.needsRepair ? "整理这条设定" : "编辑正式记录"}
                 </Button>
                 <Button
                   size="sm"
@@ -2077,7 +2077,7 @@ export function StoryGovernancePage() {
             description={`以下附属资料没有读取成功：${unavailableDerivedSections.join(
               "、",
             )}。已有正式设定仍可查看；这些记录没有被删除。请稍后重试。${
-              derivedSupportId === null ? "" : ` 支持编号：${derivedSupportId}。`
+              derivedSupportId === null ? "" : ` 问题编号：${derivedSupportId}（联系支持时提供）。`
             }`}
           />
         )}
@@ -2119,7 +2119,7 @@ export function StoryGovernancePage() {
                 <ErrorState
                   title={normalizedError.title}
                   description={`${normalizedError.description}${
-                    loadSupportId === null ? "" : ` 支持编号：${loadSupportId}。`
+                    loadSupportId === null ? "" : ` 问题编号：${loadSupportId}（联系支持时提供）。`
                   }`}
                   primaryAction={{ label: "重试", onClick: () => void load() }}
                 />
@@ -2630,7 +2630,7 @@ export function StoryGovernancePage() {
           description={`以下附属资料没有读取成功：${unavailableDerivedSections.join(
             "、",
           )}。已有正式设定仍可查看；这些记录没有被删除。请稍后重试。${
-            derivedSupportId === null ? "" : ` 支持编号：${derivedSupportId}。`
+            derivedSupportId === null ? "" : ` 问题编号：${derivedSupportId}（联系支持时提供）。`
           }`}
         />
       )}
@@ -2662,7 +2662,7 @@ export function StoryGovernancePage() {
               <ErrorState
                 title={normalizedError.title}
                 description={`${normalizedError.description}${
-                  loadSupportId === null ? "" : ` 支持编号：${loadSupportId}。`
+                  loadSupportId === null ? "" : ` 问题编号：${loadSupportId}（联系支持时提供）。`
                 }`}
                 primaryAction={{ label: "重试", onClick: () => void load() }}
               />
@@ -3190,7 +3190,7 @@ export function StoryGovernancePage() {
                               disabled={readonly || busy}
                               onClick={() => openEditFormalRecord(record)}
                             >
-                              编辑
+                              {fields.needsRepair ? "整理这条设定" : "编辑"}
                             </Button>
                             <Button
                               size="sm"
@@ -3490,7 +3490,7 @@ export function StoryGovernancePage() {
                                     : readFormalFields(target).title}
                                 </CardTitle>
                                 <CardDescription>
-                                  {chapter?.title ?? "来源章节待恢复"} · 已绑定对应不可变版本
+                                  {chapter?.title ?? "来源章节待恢复"} · 已绑定对应的历史版本
                                 </CardDescription>
                               </div>
                               <div className="story-memory-badges">
@@ -3792,7 +3792,7 @@ export function StoryGovernancePage() {
                     <dd>
                       {snapshot.source.sourceVersionId === null
                         ? "没有版本引用"
-                        : "已绑定不可变版本"}
+                        : "已绑定对应的历史版本"}
                     </dd>
                   </div>
                   <div>
@@ -4106,7 +4106,7 @@ export function StoryGovernancePage() {
           }
         }}
         title="手动合并两条记忆"
-        description="先核对两条记忆的来源，再指定保留哪一条记录。保存后会更新保留项并排除另一项，二者的原始来源和操作前后快照都保留在审计记录中。"
+        description="先核对两条记忆的来源，再指定保留哪一条记录。保存后会更新保留项并排除另一项，二者的原始来源和操作前后状态都会保留在操作记录中。"
         footer={
           <>
             <Button
@@ -4656,8 +4656,13 @@ function readFormalFields(record: FormalStoryRecord): {
   readonly description: string;
   readonly editableDescription: string;
   readonly aliases: readonly string[];
+  readonly needsRepair: boolean;
 } {
-  return readStoryValueFields(record.currentValue, "旧结构化设定", record.kind);
+  return readStoryValueFields(
+    record.currentValue,
+    record.kind === "character" ? "待整理人物设定" : "待整理正式设定",
+    record.kind,
+  );
 }
 
 function readStoryValueFields(
@@ -4669,18 +4674,54 @@ function readStoryValueFields(
   readonly description: string;
   readonly editableDescription: string;
   readonly aliases: readonly string[];
+  readonly needsRepair: boolean;
 } {
   if (isStoryObject(value)) {
     if (kind === "character") {
-      const title = readFirstStoryString(value, ["name", "title", "canonicalName"]);
+      const containers = characterValueContainers(value);
+      const title = readFirstStoryStringFromContainers(containers, [
+        "name",
+        "title",
+        "canonicalName",
+        "displayName",
+      ]);
       if (title !== null) {
-        const aliases = readStoryStringList(value.aliases);
-        const role = readFirstStoryString(value, ["role"]);
-        const traits = readStoryStringList(value.traits);
-        const knownInformation = readStoryStringList(value.knownInformation);
+        const aliases = readStoryStringListsFromContainers(containers, [
+          "aliases",
+          "alias",
+          "nicknames",
+        ]);
+        const identity = readFirstStoryStringFromContainers(containers, [
+          "identity",
+          "occupation",
+          "profession",
+        ]);
+        const role = readFirstStoryStringFromContainers(containers, [
+          "role",
+          "storyRole",
+          "narrativeRole",
+        ]);
+        const traits = readStoryStringListsFromContainers(containers, [
+          "traits",
+          "personalityTraits",
+          "characterTraits",
+        ]);
+        const knownInformation = readStoryStringListsFromContainers(containers, [
+          "knownInformation",
+          "knownFacts",
+          "knownKnowledge",
+          "knowledge",
+        ]);
         const editableDescription =
-          readFirstStoryString(value, ["description", "shortDescription"]) ?? "";
+          readFirstStoryStringFromContainers(containers, [
+            "description",
+            "shortDescription",
+            "summary",
+            "profileText",
+            "bio",
+          ]) ?? "";
         const descriptionLines = [
+          identity === null ? null : `身份：${identity}`,
           role === null ? null : `角色：${role}`,
           editableDescription.length === 0 ? null : editableDescription,
           traits.length === 0 ? null : `特质：${traits.join("、")}`,
@@ -4690,6 +4731,7 @@ function readStoryValueFields(
           title,
           aliases,
           editableDescription,
+          needsRepair: false,
           description:
             descriptionLines.length > 0
               ? descriptionLines.join("\n")
@@ -4700,15 +4742,62 @@ function readStoryValueFields(
     const title = readFirstStoryString(value, ["title"]);
     const description = readFirstStoryString(value, ["description"]);
     if (title !== null && description !== null) {
-      return { title, description, editableDescription: description, aliases: [] };
+      return {
+        title,
+        description,
+        editableDescription: description,
+        aliases: [],
+        needsRepair: false,
+      };
     }
   }
   return {
     title: fallbackTitle,
-    description: "这条旧设定使用结构化格式保存；普通视图不会显示内部字段，请在人工表单中复核。",
+    description:
+      "这条较早保存的设定暂时无法完整显示，原始内容仍已保留。请使用“整理这条设定”补充名称和说明。",
     editableDescription: "",
     aliases: [],
+    needsRepair: true,
   };
+}
+
+function characterValueContainers(
+  value: Readonly<Record<string, StoryValue>>,
+): readonly Readonly<Record<string, StoryValue>>[] {
+  const containers: Readonly<Record<string, StoryValue>>[] = [value];
+  for (const key of ["profile", "character", "person", "identity"] as const) {
+    const nested = value[key];
+    if (isStoryObject(nested) && !containers.includes(nested)) containers.push(nested);
+  }
+  for (const container of [...containers]) {
+    const nestedIdentity = container.identity;
+    if (isStoryObject(nestedIdentity) && !containers.includes(nestedIdentity)) {
+      containers.push(nestedIdentity);
+    }
+  }
+  return Object.freeze(containers);
+}
+
+function readFirstStoryStringFromContainers(
+  containers: readonly Readonly<Record<string, StoryValue>>[],
+  keys: readonly string[],
+): string | null {
+  for (const container of containers) {
+    const value = readFirstStoryString(container, keys);
+    if (value !== null) return value;
+  }
+  return null;
+}
+
+function readStoryStringListsFromContainers(
+  containers: readonly Readonly<Record<string, StoryValue>>[],
+  keys: readonly string[],
+): readonly string[] {
+  const values: string[] = [];
+  for (const container of containers) {
+    for (const key of keys) values.push(...readStoryStringList(container[key]));
+  }
+  return Object.freeze([...new Set(values)]);
 }
 
 function readFirstStoryString(
@@ -4725,6 +4814,10 @@ function readFirstStoryString(
 }
 
 function readStoryStringList(value: StoryValue | undefined): readonly string[] {
+  if (typeof value === "string") {
+    const normalized = value.trim();
+    return normalized.length === 0 ? [] : Object.freeze([normalized]);
+  }
   if (!Array.isArray(value)) return [];
   return Object.freeze(
     [...new Set(value.flatMap((item) => (typeof item === "string" ? [item.trim()] : [])))].filter(
@@ -4747,22 +4840,53 @@ function mergeFormalRecordFields(
     return merged;
   }
 
+  const updated = mergeExistingCharacterDisplayFields(currentValue, title, description);
+  if (!updated.updatedName) updated.value.name = title;
+  if (!updated.updatedDescription) updated.value.description = description;
+  return updated.value;
+}
+
+function mergeExistingCharacterDisplayFields(
+  current: Readonly<Record<string, StoryValue>>,
+  title: string,
+  description: string,
+  depth = 0,
+): Readonly<{
+  value: Record<string, StoryValue>;
+  updatedName: boolean;
+  updatedDescription: boolean;
+}> {
+  const value: Record<string, StoryValue> = { ...current };
   let updatedName = false;
-  for (const key of ["name", "title", "canonicalName"] as const) {
-    if (!Object.prototype.hasOwnProperty.call(currentValue, key)) continue;
-    merged[key] = title;
+  let updatedDescription = false;
+  for (const key of ["name", "title", "canonicalName", "displayName"] as const) {
+    if (typeof current[key] !== "string") continue;
+    value[key] = title;
     updatedName = true;
   }
-  if (!updatedName) merged.name = title;
-
-  let updatedDescription = false;
-  for (const key of ["description", "shortDescription"] as const) {
-    if (!Object.prototype.hasOwnProperty.call(currentValue, key)) continue;
-    merged[key] = description;
+  for (const key of ["description", "shortDescription", "summary", "profileText", "bio"] as const) {
+    if (typeof current[key] !== "string") continue;
+    value[key] = description;
     updatedDescription = true;
   }
-  if (!updatedDescription) merged.description = description;
-  return merged;
+  if (depth < 2) {
+    for (const key of ["profile", "character", "person", "identity"] as const) {
+      const nested = current[key];
+      if (!isStoryObject(nested)) continue;
+      const nestedUpdate = mergeExistingCharacterDisplayFields(
+        nested,
+        title,
+        description,
+        depth + 1,
+      );
+      if (nestedUpdate.updatedName || nestedUpdate.updatedDescription) {
+        value[key] = nestedUpdate.value;
+      }
+      updatedName ||= nestedUpdate.updatedName;
+      updatedDescription ||= nestedUpdate.updatedDescription;
+    }
+  }
+  return { value, updatedName, updatedDescription };
 }
 
 function defaultEvidence(content: string): string {

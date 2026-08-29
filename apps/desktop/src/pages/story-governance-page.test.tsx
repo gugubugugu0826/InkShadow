@@ -162,7 +162,7 @@ describe("StoryGovernancePage", () => {
 
     renderRoute(runtime, `/projects/${project.value.id}/story`);
 
-    const notice = await screen.findByText(/支持编号：UI-/u);
+    const notice = await screen.findByText(/问题编号：UI-.*联系支持时提供/u);
     const supportId = /UI-[0-9]{14}-[0-9]{3,}/u.exec(notice.textContent)?.[0];
     if (supportId === undefined) throw new Error("设定页没有支持编号。");
     const incident = readSafeUiRouteIncidents(runtime).find(
@@ -224,7 +224,7 @@ describe("StoryGovernancePage", () => {
       ),
     ).toBeVisible();
     expect(document.body).not.toHaveTextContent(/假设分支|待确认提取/u);
-    const supportNotice = screen.getByText(/支持编号：UI-/u);
+    const supportNotice = screen.getByText(/问题编号：UI-.*联系支持时提供/u);
     const supportId = /UI-[0-9]{14}-[0-9]{3,}/u.exec(supportNotice.textContent)?.[0];
     if (supportId === undefined) throw new Error("附属资料隔离没有生成支持编号。");
     expect(readSafeUiRouteIncidents(runtime)).toEqual(
@@ -352,7 +352,7 @@ describe("StoryGovernancePage", () => {
     expect(within(pendingSection).getByText("来源章节")).toBeVisible();
     expect(within(pendingSection).getByText("《钟楼旧事》")).toBeVisible();
     expect(within(pendingSection).getByText("保存版本")).toBeVisible();
-    expect(within(pendingSection).getByText("第 1 个不可变版本")).toBeVisible();
+    expect(within(pendingSection).getByText("第 1 个不会被改动的历史版本")).toBeVisible();
     expect(pendingSection).not.toHaveTextContent(
       String(sourceChapter.value.chapter.currentVersionId),
     );
@@ -1210,9 +1210,13 @@ describe("StoryGovernancePage", () => {
     expect(document.body).not.toHaveTextContent(chapter.value.chapter.currentVersionId);
     expect(
       screen.getAllByText(
-        "这条旧设定使用结构化格式保存；普通视图不会显示内部字段，请在人工表单中复核。",
+        "这条较早保存的设定暂时无法完整显示，原始内容仍已保留。请使用“整理这条设定”补充名称和说明。",
       ).length,
     ).toBeGreaterThan(0);
+    expect(document.body).not.toHaveTextContent(/旧结构化设定|内部字段|人工表单/u);
+    await user.click(screen.getByRole("button", { name: "返回世界与规则" }));
+    await user.click(screen.getByRole("button", { name: "版本化正式记录" }));
+    expect(screen.getByRole("button", { name: "整理这条设定" })).toBeVisible();
   });
 
   it("persists a human-confirmed formal record and governed memory", async () => {
@@ -1608,6 +1612,74 @@ describe("StoryGovernancePage", () => {
       description: "守望潮汐与旧城，并记录每次潮门开启。",
       knownInformation: ["煤球会说话", "潮门会在午夜开启"],
       extension: { source: "legacy-import", retained: true },
+    });
+  });
+
+  it("reads and edits nested legacy character profiles without replacing their original shape", async () => {
+    const runtime = createDevelopmentRuntime(window.localStorage);
+    const project = await runtime.useCases.createProject.execute({ name: "嵌套旧人物兼容测试" });
+    if (!project.ok) throw project.error;
+    const formalRecord = await runtime.story.formalRecordService.create({
+      projectId: project.value.id,
+      kind: "character",
+      recordKey: "character.shenyan.legacy-profile",
+      value: {
+        schemaVersion: "inkshadow.character.v1",
+        profile: {
+          name: "沈砚",
+          aliases: ["阿砚", "旧港记录员"],
+          identity: "潮汐档案保管人",
+          role: "主要人物",
+          traits: ["谨慎", "执着"],
+          description: "负责保管旧港失踪案卷宗。",
+          knownInformation: ["潮门开启时间", "失踪案编号"],
+          legacyProfileExtension: { color: "blue" },
+        },
+        extension: { source: "v0.2.3-upgrade", retained: true },
+      },
+      actorId: runtime.story.actorId,
+      humanConfirmed: true,
+    });
+    if (!formalRecord.ok) throw formalRecord.error;
+
+    const user = userEvent.setup();
+    renderRoute(runtime, `/projects/${project.value.id}/story`);
+    const heading = await screen.findByRole("heading", { name: "沈砚", level: 3 });
+    const card = heading.closest(".ink-card");
+    if (!(card instanceof HTMLElement)) throw new Error("找不到嵌套旧人物卡片。");
+    expect(card).toHaveTextContent("别名：阿砚、旧港记录员");
+    expect(card).toHaveTextContent("身份：潮汐档案保管人");
+    expect(card).toHaveTextContent("角色：主要人物");
+    expect(card).toHaveTextContent("特质：谨慎、执着");
+    expect(card).toHaveTextContent("已知信息：潮门开启时间、失踪案编号");
+
+    await user.click(within(card).getByRole("button", { name: "查看人物详情" }));
+    const detail = screen.getByRole("dialog", { name: "沈砚" });
+    await user.click(within(detail).getByRole("button", { name: "编辑正式记录" }));
+    const editor = screen.getByRole("dialog", { name: "编辑正式设定" });
+    const name = within(editor).getByRole("textbox", { name: "名称" });
+    const description = within(editor).getByRole("textbox", { name: "正式描述" });
+    await user.clear(name);
+    await user.type(name, "沈砚舟");
+    await user.clear(description);
+    await user.type(description, "负责保管旧港全部失踪案卷宗。");
+    await user.click(within(editor).getByRole("button", { name: "确认写入正式设定" }));
+
+    const stored = await runtime.story.formalRecords.findById(formalRecord.value.id);
+    if (!stored.ok || stored.value === null) throw new Error("嵌套旧人物编辑结果没有保存。");
+    expect(stored.value.currentValue).toEqual({
+      schemaVersion: "inkshadow.character.v1",
+      profile: {
+        name: "沈砚舟",
+        aliases: ["阿砚", "旧港记录员"],
+        identity: "潮汐档案保管人",
+        role: "主要人物",
+        traits: ["谨慎", "执着"],
+        description: "负责保管旧港全部失踪案卷宗。",
+        knownInformation: ["潮门开启时间", "失踪案编号"],
+        legacyProfileExtension: { color: "blue" },
+      },
+      extension: { source: "v0.2.3-upgrade", retained: true },
     });
   });
 
@@ -2464,7 +2536,9 @@ describe("StoryGovernancePage", () => {
       .mockRejectedValueOnce(new Error("测试中的提交后核对也暂时不可用"));
     await user.click(within(drawer).getByRole("button", { name: "保存为待确认设定" }));
     expect(
-      await within(drawer).findByText(/其余内容仍留在这里|保存结果需要核对|没有写入任何设定/u),
+      await within(drawer).findByText(
+        /其余内容仍留在这里|保存操作的结果暂时无法确认|没有写入任何设定/u,
+      ),
     ).toBeVisible();
     expect(firstStage).toHaveBeenCalledTimes(1);
     firstList.mockRestore();

@@ -113,7 +113,7 @@ describe("StoryOutlinePage", () => {
 
     renderRoute(runtime, `/projects/${project.value.id}/outline`);
 
-    const notice = await screen.findByText(/支持编号：UI-/u);
+    const notice = await screen.findByText(/问题编号：UI-.*联系支持时提供/u);
     const supportId = /UI-[0-9]{14}-[0-9]{3,}/u.exec(notice.textContent)?.[0];
     if (supportId === undefined) throw new Error("规划页没有支持编号。");
     const incident = readSafeUiRouteIncidents(runtime).find(
@@ -153,7 +153,7 @@ describe("StoryOutlinePage", () => {
       `/projects/${project.value.id}/chapters/${created.value.chapter.id}`,
     );
     expect(await screen.findByText("章节摘要暂不可用")).toBeVisible();
-    const supportNotice = screen.getByText(/支持编号：UI-/u);
+    const supportNotice = screen.getByText(/问题编号：UI-.*联系支持时提供/u);
     const supportId = /UI-[0-9]{14}-[0-9]{3,}/u.exec(supportNotice.textContent)?.[0];
     if (supportId === undefined) throw new Error("章节摘要隔离没有生成支持编号。");
     expect(readSafeUiRouteIncidents(runtime)).toEqual(

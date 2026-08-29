@@ -15,11 +15,52 @@ const LATER = "2026-08-01T00:01:00.000Z";
 const PROJECT_ID = "019f9f4a-b3c7-7350-9226-000000000001";
 const BOOK_ID = "019f9f4a-b3c7-7350-9226-000000000002";
 const CANDIDATE_ID = "019f9f4a-b3c7-7350-9226-000000000003";
+const VOLUME_ID = "019f9f4a-b3c7-7350-9226-000000000005";
 
 describe("StoryPlanningPanel", () => {
   beforeEach(() => {
     window.localStorage.clear();
     resetSafeOperationDiagnosticsForTests();
+  });
+
+  it("offers direct structure actions instead of leaving scene planning at a dead end", async () => {
+    const user = userEvent.setup();
+    const onCreateVolume = vi.fn();
+    const onAddChapter = vi.fn();
+    const service = planningService();
+    const rendered = render(
+      <StoryPlanningPanel
+        projectId={PROJECT_ID}
+        outline={outline()}
+        service={service}
+        onOutlineChanged={vi.fn()}
+        onCreateVolume={onCreateVolume}
+        onAddChapter={onAddChapter}
+      />,
+    );
+    await waitFor(() => expect(service.listCandidates).toHaveBeenCalled());
+
+    await user.selectOptions(screen.getByLabelText("这次想规划什么"), "scene_breakdown");
+
+    expect(screen.getByRole("option", { name: "规划章节场景" })).toBeVisible();
+    expect(screen.getByText("还没有可规划的章节")).toBeVisible();
+    await user.click(screen.getByRole("button", { name: "新建卷" }));
+    expect(onCreateVolume).toHaveBeenCalledTimes(1);
+    expect(onAddChapter).not.toHaveBeenCalled();
+
+    rendered.rerender(
+      <StoryPlanningPanel
+        projectId={PROJECT_ID}
+        outline={outlineWithVolume()}
+        service={service}
+        onOutlineChanged={vi.fn()}
+        onCreateVolume={onCreateVolume}
+        onAddChapter={onAddChapter}
+      />,
+    );
+    await user.click(screen.getByRole("button", { name: "添加章节" }));
+    expect(onAddChapter).toHaveBeenCalledTimes(1);
+    expect(screen.getByText(/创建后会留在这里继续规划章节场景/u)).toBeVisible();
   });
 
   it("cancels a prepared planning action without generating", async () => {
@@ -29,7 +70,7 @@ describe("StoryPlanningPanel", () => {
     renderPanel(service);
     await waitFor(() => expect(service.listCandidates).toHaveBeenCalled());
 
-    await user.click(screen.getByRole("button", { name: "查看故事方向发送信息" }));
+    await user.click(screen.getByRole("button", { name: "查看本次发送内容" }));
     await user.click(screen.getByRole("button", { name: "取消，不发送" }));
 
     expect(generate).not.toHaveBeenCalled();
@@ -58,9 +99,17 @@ describe("StoryPlanningPanel", () => {
     );
     await waitFor(() => expect(service.listCandidates).toHaveBeenCalled());
 
-    await user.click(screen.getByRole("button", { name: "查看故事方向发送信息" }));
+    await user.click(screen.getByRole("button", { name: "查看本次发送内容" }));
 
+    expect(screen.getByText("发送确认摘要")).toBeVisible();
     expect(screen.getByText(/我的写作服务 · planning-model/u)).toBeVisible();
+    const detailsSummary = screen.getByText("查看详细信息");
+    expect(detailsSummary).toBeVisible();
+    const details = detailsSummary.closest("details");
+    if (!(details instanceof HTMLElement)) throw new Error("规划发送信息缺少展开详情。 ");
+    expect(within(details).getByText(/自动重试 0 次/u)).not.toBeVisible();
+    await user.click(detailsSummary);
+    expect(within(details).getByText(/自动重试 0 次/u)).toBeVisible();
     expect(screen.queryByText("AI 剧情规划未完成")).not.toBeInTheDocument();
     expect(generate).not.toHaveBeenCalled();
   });
@@ -78,12 +127,12 @@ describe("StoryPlanningPanel", () => {
     renderPanel(service);
     await waitFor(() => expect(service.listCandidates).toHaveBeenCalled());
 
-    await user.click(screen.getByRole("button", { name: "查看故事方向发送信息" }));
+    await user.click(screen.getByRole("button", { name: "查看本次发送内容" }));
 
     expect(await screen.findByText("故事方向发送信息尚未准备好")).toBeVisible();
     expect(screen.getByText(/准备发送信息时发现所选模型尚未通过规划格式检查/u)).toBeVisible();
     expect(screen.getByText(/本次没有向模型服务发送内容/u)).toBeVisible();
-    expect(screen.getByText(/支持编号：墨影-/u)).toBeVisible();
+    expect(screen.getByText(/问题编号：墨影-.*联系支持时提供/u)).toBeVisible();
     expect(screen.queryByText("AI 剧情规划未完成")).not.toBeInTheDocument();
     expect(document.body).not.toHaveTextContent("MODEL_HUB_STRUCTURED_OUTPUT_NOT_VERIFIED");
     expect(document.body).not.toHaveTextContent("private provider detail");
@@ -132,7 +181,7 @@ describe("StoryPlanningPanel", () => {
 
     expect(await screen.findByText("故事方向结果尚未保存")).toBeVisible();
     expect(screen.getByText(/模型结果已经返回，但待审阅建议没有安全保存/u)).toBeVisible();
-    expect(screen.getByText(/支持编号：墨影-/u)).toBeVisible();
+    expect(screen.getByText(/问题编号：墨影-.*联系支持时提供/u)).toBeVisible();
     expect(readSafeOperationIncidents()[0]).toMatchObject({
       stage: "persist_result",
       dispatched: true,
@@ -422,10 +471,13 @@ function planningService(
 }
 
 async function confirmStoryPlanning(user: ReturnType<typeof userEvent.setup>): Promise<void> {
-  await user.click(screen.getByRole("button", { name: "查看故事方向发送信息" }));
+  await user.click(screen.getByRole("button", { name: "查看本次发送内容" }));
   expect(screen.getByText(/我的写作服务 · planning-model/u)).toBeInTheDocument();
+  await user.click(screen.getByText("查看详细信息"));
   expect(screen.getByText(/自动重试 0 次/u)).toBeInTheDocument();
-  expect(screen.getByText(/当前无法核定费用上限/u)).toBeInTheDocument();
+  expect(
+    screen.getByText(/服务商没有提供可计算的单价，实际费用请以服务商账单为准/u),
+  ).toBeInTheDocument();
   await user.click(screen.getByRole("button", { name: "确认并生成故事方向建议" }));
 }
 
@@ -441,6 +493,21 @@ function outline(): Outline {
     throw result.error;
   }
   return result.value;
+}
+
+function outlineWithVolume(): Outline {
+  const volume = outline().addNode({
+    id: VOLUME_ID,
+    kind: "volume",
+    parentId: BOOK_ID,
+    title: "第一卷",
+    expectedRevision: 1,
+    now: LATER,
+  });
+  if (!volume.ok) {
+    throw volume.error;
+  }
+  return volume.value;
 }
 
 function candidate(): StoryPlanningCandidate {

@@ -104,9 +104,9 @@ describe("editor candidate route selection", () => {
 
     expect(await screen.findByRole("textbox", { name: "章节正文" })).toHaveValue(chapter.content);
     expect(await screen.findByText("连续故事状态暂不可用")).toBeVisible();
-    const supportNotice = await screen.findByText(/支持编号：UI-/u);
+    const supportNotice = await screen.findByText(/问题编号（联系支持时提供）：UI-/u);
     const supportId = /UI-[0-9]{14}-[0-9]{3,}/u.exec(supportNotice.textContent)?.[0];
-    if (supportId === undefined) throw new Error("连续故事状态没有生成支持编号。");
+    if (supportId === undefined) throw new Error("连续故事状态没有生成问题编号。");
     const incident = readSafeUiRouteIncidents(runtime).find(
       ({ diagnosticId }) => diagnosticId === supportId,
     );
@@ -161,7 +161,7 @@ describe("editor candidate route selection", () => {
 
     expect(await screen.findByRole("textbox", { name: "章节正文" })).toHaveValue(chapter.content);
     expect(await screen.findByText("部分生成记录暂不可用")).toBeVisible();
-    const supportNotice = await screen.findByText(/支持编号：UI-/u);
+    const supportNotice = await screen.findByText(/问题编号（联系支持时提供）：UI-/u);
     const supportId = /UI-[0-9]{14}-[0-9]{3,}/u.exec(supportNotice.textContent)?.[0];
     if (supportId === undefined) throw new Error("missing C2 support id");
 
@@ -258,10 +258,10 @@ describe("editor candidate route selection", () => {
     );
 
     const firstRender = renderEditor(runtime, project, chapter);
-    expect(await screen.findByText(/支持编号：UI-/u)).toBeVisible();
+    expect(await screen.findByText(/问题编号（联系支持时提供）：UI-/u)).toBeVisible();
     expect(screen.queryByRole("textbox", { name: "章节正文" })).not.toBeInTheDocument();
     expect(screen.getByText("已停止正文写入；本地正文、版本和恢复草稿保持原样。")).toBeVisible();
-    const firstSupportText = screen.getByText(/支持编号：UI-/u).textContent;
+    const firstSupportText = screen.getByText(/问题编号（联系支持时提供）：UI-/u).textContent;
     const supportId = /UI-[0-9]{14}-[0-9]{3,}/u.exec(firstSupportText)?.[0];
     if (supportId === undefined) throw new Error("missing authoritative C2 support id");
     firstRender.unmount();
@@ -339,7 +339,7 @@ describe("editor candidate route selection", () => {
 
     renderEditor(runtime, project, chapter);
 
-    expect(await screen.findByText(/支持编号：UI-/u)).toBeVisible();
+    expect(await screen.findByText(/问题编号（联系支持时提供）：UI-/u)).toBeVisible();
     expect(screen.queryByRole("textbox", { name: "章节正文" })).not.toBeInTheDocument();
     expect(screen.getByText("已停止正文写入；本地正文、版本和恢复草稿保持原样。")).toBeVisible();
     expect(hash).toHaveBeenCalledWith(authorityContent);
@@ -359,7 +359,7 @@ describe("editor candidate route selection", () => {
 
     renderEditor(runtime, project, chapter);
 
-    expect(await screen.findByText(/支持编号：UI-/u)).toBeVisible();
+    expect(await screen.findByText(/问题编号（联系支持时提供）：UI-/u)).toBeVisible();
     expect(screen.queryByRole("textbox", { name: "章节正文" })).not.toBeInTheDocument();
     const incident = readSafeUiRouteIncidents(runtime).find(
       ({ readStage, recovered }) => readStage === "chapter_versions" && !recovered,
@@ -386,7 +386,7 @@ describe("editor candidate route selection", () => {
 
     renderEditor(runtime, project, chapter);
 
-    expect(await screen.findByText(/支持编号：UI-/u)).toBeVisible();
+    expect(await screen.findByText(/问题编号（联系支持时提供）：UI-/u)).toBeVisible();
     expect(screen.queryByRole("textbox", { name: "章节正文" })).not.toBeInTheDocument();
     const incident = readSafeUiRouteIncidents(runtime).find(
       ({ readStage, recovered }) => readStage === "chapter_versions" && !recovered,
@@ -439,7 +439,7 @@ describe("editor candidate route selection", () => {
 
     renderEditor(runtime, project, saved.value.chapter);
 
-    expect(await screen.findByText(/支持编号：UI-/u)).toBeVisible();
+    expect(await screen.findByText(/问题编号（联系支持时提供）：UI-/u)).toBeVisible();
     expect(screen.queryByRole("textbox", { name: "章节正文" })).not.toBeInTheDocument();
     const incident = readSafeUiRouteIncidents(runtime).find(
       ({ readStage, recovered }) => readStage === "chapter_versions" && !recovered,
@@ -499,7 +499,7 @@ describe("editor candidate route selection", () => {
 
     renderEditor(runtime, project, chapter);
 
-    expect(await screen.findByText(/支持编号：UI-/u)).toBeVisible();
+    expect(await screen.findByText(/问题编号（联系支持时提供）：UI-/u)).toBeVisible();
     expect(screen.queryByRole("textbox", { name: "章节正文" })).not.toBeInTheDocument();
     const incident = readSafeUiRouteIncidents(runtime).find(
       ({ readStage, recovered }) => readStage === "chapter_versions" && !recovered,
@@ -662,10 +662,14 @@ describe("editor candidate route selection", () => {
     const preflight = await screen.findByRole("dialog", { name: "生成续写建议前检查" });
     expect(
       await within(preflight).findByText(
-        /Direct writing remote.*direct-writer.*本次最多向模型服务发送 1 次，自动重试 0 次/u,
+        /模型：Direct writing remote · direct-writer.*预计发送 1 次/u,
       ),
     ).toBeVisible();
     expect(generate).not.toHaveBeenCalled();
+    await user.click(within(preflight).getByText("查看详细信息"));
+    expect(
+      within(preflight).getByText(/本次最多向模型服务发送 1 次，自动重试 0 次/u),
+    ).toBeVisible();
     await user.click(
       screen.getByRole("button", { name: /确认并生成续写建议|使用安全默认值并生成续写建议/u }),
     );
@@ -754,10 +758,14 @@ describe("editor candidate route selection", () => {
     const preflight = await screen.findByRole("dialog", { name: "生成续写建议前检查" });
     expect(
       await within(preflight).findByText(
-        /Direct writing remote.*direct-writer.*本次最多向模型服务发送 1 次，自动重试 0 次/u,
+        /模型：Direct writing remote · direct-writer.*预计发送 1 次/u,
       ),
     ).toBeVisible();
-    expect(within(preflight).getByText(/当前章节.*故事资料/u)).toBeVisible();
+    await user.click(within(preflight).getByText("查看详细信息"));
+    expect(
+      within(preflight).getByText(/本次最多向模型服务发送 1 次，自动重试 0 次/u),
+    ).toBeVisible();
+    expect(within(preflight).getByText(/发送内容：.*当前章节.*故事资料/u)).toBeVisible();
     expect(preflight).not.toHaveTextContent("direct-writing-remote-connection");
     expect(generate).not.toHaveBeenCalled();
     const cancellationCountBefore = readSafeOperationIncidents().filter(
@@ -766,7 +774,9 @@ describe("editor candidate route selection", () => {
 
     await user.click(within(preflight).getByRole("button", { name: "暂不生成" }));
     expect(generate).not.toHaveBeenCalled();
-    expect(await screen.findByText(/已取消，本次没有调用 AI。支持编号：墨影-/u)).toBeVisible();
+    expect(
+      await screen.findByText(/已取消，本次没有调用 AI。问题编号（联系支持时提供）：墨影-/u),
+    ).toBeVisible();
     expect(
       readSafeOperationIncidents().filter(
         ({ normalizedErrorCode }) => normalizedErrorCode === "USER_CANCELLED_BEFORE_DISPATCH",
@@ -843,8 +853,19 @@ describe("editor candidate route selection", () => {
     if (!(disclosureAlert instanceof HTMLElement)) {
       throw new Error("没有找到选区改写发送信息提示。");
     }
+    const detailsSummary = screen.getByText("查看详细信息");
+    expect(detailsSummary).toBeVisible();
+    const details = detailsSummary.closest("details");
+    if (!(details instanceof HTMLElement)) {
+      throw new Error("选区改写没有可展开的完整发送信息。 ");
+    }
+    expect(within(details).getByText(/自动重试 0 次/u)).not.toBeVisible();
+    await user.click(detailsSummary);
+    expect(within(details).getByText(/自动重试 0 次/u)).toBeVisible();
     await user.click(within(disclosureAlert).getByRole("button", { name: "关闭提示" }));
-    expect(await screen.findByText(/已取消，本次没有调用 AI。支持编号：墨影-/u)).toBeVisible();
+    expect(
+      await screen.findByText(/已取消，本次没有调用 AI。问题编号（联系支持时提供）：墨影-/u),
+    ).toBeVisible();
     expect(generate).not.toHaveBeenCalled();
     expect(
       readSafeOperationIncidents().filter(
@@ -935,6 +956,14 @@ describe("editor candidate route selection", () => {
 
     await user.click(await screen.findByRole("button", { name: "生成续写建议" }));
     const firstPreflight = await screen.findByRole("dialog", { name: "生成续写建议前检查" });
+    expect(within(firstPreflight).getByText("发送确认摘要")).toBeVisible();
+    expect(within(firstPreflight).getByText("查看详细信息")).toBeVisible();
+    expect(
+      within(firstPreflight).getByRole("checkbox", {
+        name: "在当前会话记住本次确认",
+      }),
+    ).not.toBeVisible();
+    await user.click(within(firstPreflight).getByText("查看详细信息"));
     await user.click(
       within(firstPreflight).getByRole("checkbox", {
         name: "在当前会话记住本次确认",
@@ -1361,7 +1390,9 @@ describe("editor candidate route selection", () => {
 
     await user.click(screen.getByRole("button", { name: "选择方向" }));
 
-    const supportNotice = await screen.findByText(/支持编号：墨影-[0-9]{14}-[0-9]{3,}/u);
+    const supportNotice = await screen.findByText(
+      /问题编号（联系支持时提供）：墨影-[0-9]{14}-[0-9]{3,}/u,
+    );
     expect(supportNotice).toHaveTextContent("准备发送信息");
     expect(supportNotice).toHaveTextContent("本次没有发送");
     expect(customInput).toHaveValue("保留这条用户输入的方向");
@@ -1767,23 +1798,24 @@ describe("editor candidate route selection", () => {
     const restoreStarted = new Promise<void>((resolve) => {
       markRestoreStarted = resolve;
     });
-    vi.spyOn(runtime.useCases.restoreChapterVersion, "execute").mockImplementation(
-      async (input) => {
+    const restoreExecute = vi
+      .spyOn(runtime.useCases.restoreChapterVersion, "execute")
+      .mockImplementation(async (input) => {
         markRestoreStarted();
         await restoreGate;
         return restoreVersion(input);
-      },
-    );
+      });
     const user = userEvent.setup();
     renderEditor(runtime, seeded.project, saved.value.chapter);
     const editor = await screen.findByRole("textbox", { name: "章节正文" });
 
     await user.click(screen.getByRole("button", { name: "版本历史" }));
     const history = await screen.findByRole("dialog", { name: "版本历史" });
-    await user.click(within(history).getByRole("button", { name: "恢复此版本" }));
+    await user.click(within(history).getByRole("button", { name: /^恢复版本 \d+$/u }));
     const restore = await screen.findByRole("dialog", { name: /恢复版本/u });
-    await user.click(within(restore).getByRole("button", { name: "创建恢复版本" }));
+    await user.dblClick(within(restore).getByRole("button", { name: /^确认恢复版本 \d+$/u }));
     await restoreStarted;
+    expect(restoreExecute).toHaveBeenCalledTimes(1);
     await waitFor(() => expect(editor).toHaveAttribute("readonly"));
     fireEvent.change(editor, { target: { value: "恢复期间不应进入的输入" } });
     expect(editor).toHaveValue(saved.value.chapter.content);
@@ -1869,12 +1901,12 @@ describe("editor candidate route selection", () => {
     await user.click(await screen.findByRole("button", { name: "版本历史" }));
     const history = await screen.findByRole("dialog", { name: "版本历史" });
     const [restoreVersionButton] = within(history).getAllByRole("button", {
-      name: "恢复此版本",
+      name: /^恢复版本 \d+$/u,
     });
     if (restoreVersionButton === undefined) throw new Error("没有找到恢复版本按钮。");
     await user.click(restoreVersionButton);
     const restore = await screen.findByRole("dialog", { name: /恢复版本/u });
-    await user.click(within(restore).getByRole("button", { name: "创建恢复版本" }));
+    await user.click(within(restore).getByRole("button", { name: /^确认恢复版本 \d+$/u }));
     await waitFor(() => expect(editor).toHaveValue(restoredContent));
     await waitFor(() => {
       expect(editor.selectionStart).toBe(restoredContent.length);
@@ -2132,12 +2164,12 @@ describe("editor candidate route selection", () => {
     await user.click(await screen.findByRole("button", { name: "版本历史" }));
     const history = await screen.findByRole("dialog", { name: "版本历史" });
     const [restoreVersionButton] = within(history).getAllByRole("button", {
-      name: "恢复此版本",
+      name: /^恢复版本 \d+$/u,
     });
     if (restoreVersionButton === undefined) throw new Error("没有找到恢复版本按钮。");
     await user.click(restoreVersionButton);
     const restore = await screen.findByRole("dialog", { name: /恢复版本/u });
-    await user.click(within(restore).getByRole("button", { name: "创建恢复版本" }));
+    await user.click(within(restore).getByRole("button", { name: /^确认恢复版本 \d+$/u }));
     await waitFor(() => expect(editor).toHaveValue(restoredContent));
     await waitFor(() => expect(editor.selectionStart).toBe(restoredContent.length));
     const [closeHistoryButton] = within(history).getAllByRole("button", { name: "关闭" });
@@ -2409,9 +2441,9 @@ describe("editor candidate route selection", () => {
     renderEditor(runtime, seeded.project, saved.value.chapter);
     await user.click(await screen.findByRole("button", { name: "版本历史" }));
     const history = await screen.findByRole("dialog", { name: "版本历史" });
-    await user.click(within(history).getByRole("button", { name: "恢复此版本" }));
+    await user.click(within(history).getByRole("button", { name: /^恢复版本 \d+$/u }));
     const restore = await screen.findByRole("dialog", { name: /恢复版本/u });
-    await user.click(within(restore).getByRole("button", { name: "创建恢复版本" }));
+    await user.click(within(restore).getByRole("button", { name: /^确认恢复版本 \d+$/u }));
 
     expect(
       await screen.findByText(
@@ -2464,9 +2496,9 @@ describe("editor candidate route selection", () => {
 
     await user.click(await screen.findByRole("button", { name: "版本历史" }));
     const history = await screen.findByRole("dialog", { name: "版本历史" });
-    await user.click(within(history).getByRole("button", { name: "恢复此版本" }));
+    await user.click(within(history).getByRole("button", { name: /^恢复版本 \d+$/u }));
     const restore = await screen.findByRole("dialog", { name: /恢复版本/u });
-    await user.click(within(restore).getByRole("button", { name: "创建恢复版本" }));
+    await user.click(within(restore).getByRole("button", { name: /^确认恢复版本 \d+$/u }));
 
     expect(
       await screen.findByText(
@@ -2712,8 +2744,8 @@ describe("editor candidate route selection", () => {
     renderEditor(runtime, project, chapter, `?candidate=${candidate.id}`);
 
     expect(await screen.findByRole("button", { name: "查看本地草案版本" })).toBeVisible();
-    await user.click(screen.getByRole("button", { name: "比较本地草案" }));
-    expect(await screen.findByRole("dialog", { name: "比较本地草案与正文" })).toBeVisible();
+    await user.click(screen.getByRole("button", { name: "比较建议" }));
+    expect(await screen.findByRole("dialog", { name: "比较建议与正文" })).toBeVisible();
   });
 
   it.each([
@@ -2998,8 +3030,8 @@ describe("editor candidate route selection", () => {
     const user = userEvent.setup();
     renderEditor(runtime, project, chapter, `?candidate=${candidate.id}`);
 
-    await user.click(await screen.findByRole("button", { name: "比较 AI 建议" }));
-    const review = await screen.findByRole("dialog", { name: "比较 AI 建议与正文" });
+    await user.click(await screen.findByRole("button", { name: "比较建议" }));
+    const review = await screen.findByRole("dialog", { name: "比较建议与正文" });
     expect(within(review).getByText(/第 2 到第 4 个字符/u)).toBeVisible();
     await user.click(within(review).getByRole("button", { name: "替换选区并创建版本" }));
 
@@ -3024,8 +3056,8 @@ describe("editor candidate route selection", () => {
     const user = userEvent.setup();
     renderEditor(runtime, project, chapter, `?candidate=${candidate.id}`);
 
-    await user.click(await screen.findByRole("button", { name: "比较 AI 建议" }));
-    const review = await screen.findByRole("dialog", { name: "比较 AI 建议与正文" });
+    await user.click(await screen.findByRole("button", { name: "比较建议" }));
+    const review = await screen.findByRole("dialog", { name: "比较建议与正文" });
     expect(within(review).getByRole("button", { name: "取消" })).toBeEnabled();
     expect(within(review).getByRole("button", { name: "替换整章并创建版本" })).toBeEnabled();
     expect(within(review).getByRole("button", { name: "追加到章末并创建版本" })).toBeEnabled();
@@ -3319,6 +3351,13 @@ describe("editor candidate route selection", () => {
     fireEvent.keyDown(scrollControl, { key: "PageUp" });
     expect(scrollContainer.scrollTop).toBeLessThanOrEqual(0);
 
+    await user.click(within(review).getByRole("button", { name: "查看结尾" }));
+    expect(scrollContainer.scrollTop).toBe(4_000);
+    await user.click(within(review).getByRole("button", { name: "查看开头" }));
+    expect(scrollContainer.scrollTop).toBe(0);
+    await user.click(within(review).getByRole("button", { name: "返回修改处" }));
+    expect(within(review).getByRole("textbox", { name: /可编辑的/u })).toHaveFocus();
+
     const lastAction = within(review).getByRole("button", { name: "使用这版" });
     lastAction.focus();
     await user.tab();
@@ -3328,6 +3367,133 @@ describe("editor candidate route selection", () => {
     await user.keyboard("{Escape}");
     await waitFor(() => expect(review).not.toBeInTheDocument());
     await waitFor(() => expect(trigger).toHaveFocus());
+  });
+
+  it("keeps the exact project and chapter identity visible for a long chapter", async () => {
+    const runtime = createDevelopmentRuntime(window.localStorage);
+    const { chapter, project } = await seedChapter(runtime, "长".repeat(34_000), "十万字合成作品");
+
+    renderEditor(runtime, project, chapter);
+
+    const identity = await screen.findByRole("status", { name: "当前写作位置" });
+    expect(within(identity).getByText("作品：十万字合成作品")).toBeVisible();
+    expect(within(identity).getByText("卷：未关联卷")).toBeVisible();
+    expect(within(identity).getByText("章节：第一章")).toBeVisible();
+    expect(within(identity).getByText("34,000 字")).toBeVisible();
+    expect(screen.getByText("已保存到本地")).toBeVisible();
+  });
+
+  it("keeps a large deletion as a recovery draft until the author confirms it", async () => {
+    const runtime = createDevelopmentRuntime(window.localStorage);
+    const stableContent = "稳".repeat(29_465);
+    const { chapter, project } = await seedChapter(runtime, stableContent, "长正文保护作品");
+    const versionsBefore = await runtime.repositories.chapterVersions.listByChapterId(chapter.id);
+    if (!versionsBefore.ok) throw versionsBefore.error;
+    const user = userEvent.setup();
+    renderEditor(runtime, project, chapter);
+
+    const editor = await screen.findByRole("textbox", { name: "章节正文" });
+    fireEvent.change(editor, {
+      target: { value: "误覆盖后的短正文", selectionStart: 8, selectionEnd: 8 },
+    });
+
+    const warning = await screen.findByRole("dialog", { name: "本次修改将删除大量正文" });
+    expect(within(warning).getByText("章节：第一章")).toBeVisible();
+    expect(within(warning).getByText("修改前：29,465 字")).toBeVisible();
+    expect(within(warning).getByText("修改后：8 字")).toBeVisible();
+    await waitFor(async () => {
+      const draft = await runtime.repositories.recoveryDrafts.findByChapterId(chapter.id);
+      expect(draft.ok && draft.value?.content).toBe("误覆盖后的短正文");
+    });
+    await user.click(within(warning).getByRole("button", { name: "取消，保留恢复草稿" }));
+
+    expect(screen.queryByRole("dialog", { name: "本次修改将删除大量正文" })).toBeNull();
+    expect(await screen.findByText("大幅删除尚未确认")).toBeVisible();
+    const persisted = await runtime.repositories.chapters.findById(chapter.id);
+    expect(persisted.ok && persisted.value?.content).toBe(stableContent);
+    const versionsAfter = await runtime.repositories.chapterVersions.listByChapterId(chapter.id);
+    if (!versionsAfter.ok) throw versionsAfter.error;
+    expect(versionsAfter.value.map((version) => version.toSnapshot())).toEqual(
+      versionsBefore.value.map((version) => version.toSnapshot()),
+    );
+  });
+
+  it("creates one explicit stable version after a guarded large deletion is confirmed", async () => {
+    const runtime = createDevelopmentRuntime(window.localStorage);
+    const stableContent = "稳".repeat(29_465);
+    const shortenedContent = "作者确认保留的短正文";
+    const { chapter, project } = await seedChapter(runtime, stableContent, "删除确认作品");
+    const versionsBefore = await runtime.repositories.chapterVersions.listByChapterId(chapter.id);
+    if (!versionsBefore.ok) throw versionsBefore.error;
+    const user = userEvent.setup();
+    renderEditor(runtime, project, chapter);
+
+    const editor = await screen.findByRole("textbox", { name: "章节正文" });
+    fireEvent.change(editor, {
+      target: {
+        value: shortenedContent,
+        selectionStart: shortenedContent.length,
+        selectionEnd: shortenedContent.length,
+      },
+    });
+    const warning = await screen.findByRole("dialog", { name: "本次修改将删除大量正文" });
+    await waitFor(() =>
+      expect(within(warning).getByRole("button", { name: "确认删除并创建版本" })).toBeEnabled(),
+    );
+    await user.dblClick(within(warning).getByRole("button", { name: "确认删除并创建版本" }));
+
+    await waitFor(async () => {
+      const persisted = await runtime.repositories.chapters.findById(chapter.id);
+      expect(persisted.ok && persisted.value?.content).toBe(shortenedContent);
+    });
+    const versionsAfter = await runtime.repositories.chapterVersions.listByChapterId(chapter.id);
+    if (!versionsAfter.ok) throw versionsAfter.error;
+    expect(versionsAfter.value).toHaveLength(versionsBefore.value.length + 1);
+    expect(
+      versionsAfter.value.filter((version) => version.toSnapshot().content === shortenedContent),
+    ).toHaveLength(1);
+  });
+
+  it("labels every restore action with its version and repeats the exact target in confirmation", async () => {
+    const runtime = createDevelopmentRuntime(window.localStorage);
+    const originalContent = "旧".repeat(23_000);
+    const currentContent = "新".repeat(29_465);
+    const seeded = await seedChapter(runtime, originalContent, "版本恢复作品");
+    const edited = await runtime.useCases.editChapter.execute({
+      chapterId: seeded.chapter.id,
+      expectedRevision: seeded.chapter.revision,
+      content: currentContent,
+      cursorOffset: currentContent.length,
+    });
+    if (!edited.ok) throw edited.error;
+    const saved = await runtime.useCases.saveChapter.execute({
+      chapterId: seeded.chapter.id,
+      expectedRevision: seeded.chapter.revision,
+      reason: "manual",
+    });
+    if (!saved.ok) throw saved.error;
+    const user = userEvent.setup();
+    renderEditor(runtime, seeded.project, saved.value.chapter);
+
+    await user.click(await screen.findByRole("button", { name: "版本历史" }));
+    const history = await screen.findByRole("dialog", { name: "版本历史" });
+    const versionHeading = within(history).getByText("版本 1");
+    const versionCard = versionHeading.closest("li");
+    if (!(versionCard instanceof HTMLElement)) throw new Error("版本卡片不可用。");
+    expect(within(versionCard).getByText("23,000 字")).toBeVisible();
+    expect(within(versionCard).getByText("与当前正文相比少 6,465 字")).toBeVisible();
+    await user.click(within(versionCard).getByRole("button", { name: "恢复版本 1" }));
+
+    const confirmation = await screen.findByRole("dialog", { name: "恢复版本 1" });
+    expect(within(confirmation).getByText("作品：版本恢复作品")).toBeVisible();
+    expect(within(confirmation).getByText("章节：第一章")).toBeVisible();
+    expect(within(confirmation).getByText("目标版本：版本 1")).toBeVisible();
+    expect(within(confirmation).getByText("目标字数：23,000 字")).toBeVisible();
+    expect(within(confirmation).getByText("当前字数：29,465 字")).toBeVisible();
+    expect(
+      within(confirmation).getAllByText("恢复会创建一个新版本，旧历史不会删除。"),
+    ).toHaveLength(2);
+    expect(within(confirmation).getByRole("button", { name: "确认恢复版本 1" })).toBeEnabled();
   });
 });
 

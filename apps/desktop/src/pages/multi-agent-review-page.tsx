@@ -367,7 +367,7 @@ export function MultiAgentReviewPage({
       {featureEnabled && (
         <InlineAlert
           title="本地能力，不使用团队云额度"
-          description="本页只使用本机已配置的模型线路。实际内容额度与费用必须由模型服务回报；缺失用量时会失败关闭。"
+          description="本页只使用本机已配置的模型线路。实际发送与返回文字量、费用必须由模型服务回报；缺失用量时会停止并说明原因。文字量不是金额。"
         />
       )}
       {failure !== null && (
@@ -453,11 +453,11 @@ export function MultiAgentReviewPage({
                       )}`}
                     />
                     <Metric
-                      label="输入内容额度"
+                      label="发送给 AI 的文字量（不是金额）"
                       value={usage.unknown ? "部分未知" : formatNumber(usage.inputTokens)}
                     />
                     <Metric
-                      label="输出内容额度"
+                      label="AI 返回的文字量（不是金额）"
                       value={usage.unknown ? "部分未知" : formatNumber(usage.outputTokens)}
                     />
                     <Metric
@@ -516,7 +516,7 @@ export function MultiAgentReviewPage({
                 <div className="multi-agent-section-heading">
                   <div>
                     <h2 id="participants-title">参与角色与模型</h2>
-                    <span>模型快照在审查开始时固定</span>
+                    <span>所用模型信息在审查开始时固定</span>
                   </div>
                 </div>
                 <div className="multi-agent-participants">

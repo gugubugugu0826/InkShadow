@@ -283,7 +283,7 @@ function PersonalUsageRoute() {
         <EmptyState
           kind="feature_limited"
           title="费用记录只在桌面版读取"
-          description="浏览器开发模式不会伪造服务请求、内容额度或费用数据。请在墨影桌面版中打开此页面；正文与本地创作不受影响。"
+          description="浏览器开发模式不会伪造服务请求、发送与返回文字量或费用数据。请在墨影桌面版中打开此页面；正文与本地创作不受影响。"
           primaryAction={{
             label: "返回创作首页",
             onClick: () => {

@@ -213,8 +213,8 @@ function createCommands(projectId: string | null): readonly CommandDefinition[] 
     command(
       "command-usage",
       "模型使用与费用",
-      "查看模型使用记录、内容额度与费用估算",
-      ["用量", "费用", "账单", "内容额度"],
+      "查看模型使用记录、发送与返回文字量以及费用估算",
+      ["用量", "费用", "账单", "文字量"],
       "/usage",
       "工具",
     ),

@@ -204,7 +204,7 @@ test("imports into the first chapter and exports validated artifacts and diagnos
 
   const exportProjectId = projectIdFromEditorUrl(page.url());
   await page.goto(`/#/projects/${exportProjectId}`);
-  await createChapter(page, "私密附录");
+  await createChapter(page, "私密附录", 2);
   await page.getByRole("textbox", { name: "章节正文" }).fill(privateMarker);
   await expect
     .poll(
@@ -417,12 +417,15 @@ async function createProject(page: Page, name: string): Promise<void> {
   await expect(page.getByRole("heading", { level: 2, name })).toBeVisible();
 }
 
-async function createChapter(page: Page, title: string): Promise<void> {
+async function createChapter(page: Page, title: string, chapterNumber = 1): Promise<void> {
   await page.getByRole("button", { name: "新建章节" }).first().click();
   const dialog = page.getByRole("dialog", { name: "新建章节" });
   await dialog.getByRole("textbox", { name: "章节标题" }).fill(title);
   await dialog.getByRole("button", { name: "创建章节" }).click();
-  await page.getByLabel(title).getByRole("link", { name: "继续写作", exact: true }).click();
+  await page
+    .getByLabel(title)
+    .getByRole("link", { name: `继续写第 ${chapterNumber} 章《${title}》`, exact: true })
+    .click();
   await expect(page.getByRole("heading", { level: 1, name: title })).toBeVisible();
 }
 

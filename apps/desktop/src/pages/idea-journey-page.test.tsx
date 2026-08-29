@@ -53,6 +53,12 @@ describe("one-sentence idea journey", () => {
     const user = userEvent.setup();
     renderJourney(runtime);
 
+    expect(screen.getByRole("heading", { name: "你想写一个怎样的故事或文章？" })).toBeVisible();
+    expect(screen.getByRole("textbox", { name: "一句话灵感" })).toHaveAttribute(
+      "placeholder",
+      expect.stringContaining("故事或文章"),
+    );
+
     await user.type(
       screen.getByRole("textbox", { name: "一句话灵感" }),
       "我想写一个青春恋爱轻小说。",
@@ -745,7 +751,10 @@ describe("one-sentence idea journey", () => {
     renderJourney(runtime);
 
     const create = await screen.findByRole("button", { name: "生成第一段" });
+    const blank = screen.getByRole("button", { name: "直接写空白正文" });
     expect(create).toBeDisabled();
+    expect(blank).toHaveClass("ink-button--secondary");
+    expect(create.closest(".idea-journey__primary-actions")).toContainElement(blank);
     const descriptionId = create.getAttribute("aria-describedby");
     expect(descriptionId).not.toBeNull();
     expect(document.getElementById(descriptionId ?? "")).toHaveTextContent(
@@ -814,6 +823,28 @@ describe("one-sentence idea journey", () => {
     expect(candidates.ok && candidates.value).toHaveLength(0);
     const seed = await runtime.projectSeeds.findByProjectId(projects.value[0].id);
     expect(seed?.seed.premise.values).toEqual([]);
+  });
+
+  it("keeps the complete idea while using only a safe short default project title", async () => {
+    const runtime = createDevelopmentRuntime(window.localStorage);
+    const createJourney = vi.spyOn(runtime.creativeJourneys, "create");
+    const user = userEvent.setup();
+    renderJourney(runtime);
+    const longIdea =
+      "一位天文学家在午夜收到来自未来的求救信。她必须在整座城市忘记星空以前，找到信中反复提到的旧观测站，并决定是否公开一个会改变所有人记忆的真相。";
+
+    await user.type(screen.getByRole("textbox", { name: "一句话灵感" }), longIdea);
+    await user.click(screen.getByRole("button", { name: "直接写空白正文" }));
+    expect(await screen.findByText("已进入 AI 建议版本比较")).toBeVisible();
+
+    const projects = await runtime.useCases.listProjects.execute({ statuses: ["active"] });
+    if (!projects.ok || projects.value[0] === undefined) throw new Error("长灵感作品没有创建。");
+    expect(projects.value[0].name).toBe("一位天文学家在午夜收到来自未来的求救信");
+    const createdJourney = createJourney.mock.calls[0]?.[0];
+    if (createdJourney === undefined) throw new Error("长灵感没有保存开书旅程。");
+    expect(createdJourney.snapshot.idea).toBe(longIdea);
+    const seed = await runtime.projectSeeds.findByProjectId(projects.value[0].id);
+    expect(seed?.seed.premise.values).toEqual([longIdea]);
   });
 
   it("uses natural sequence names for repeated blank author works", async () => {
@@ -961,14 +992,27 @@ describe("one-sentence idea journey", () => {
 
     const dialog = await screen.findByRole("dialog", { name: "生成首批三个开头" });
     expect(harness.generate).not.toHaveBeenCalled();
+    expect(within(dialog).getByText("发送确认摘要")).toBeVisible();
     expect(within(dialog).getByText("Ollama")).toBeVisible();
     expect(within(dialog).getByText("local-novel")).toBeVisible();
+    expect(within(dialog).getByText("一句话灵感和固定创作角度")).toBeVisible();
+    expect(within(dialog).getByText("预计发送 3 次")).toBeVisible();
+    expect(within(dialog).getByText("暂时无法计算")).toBeVisible();
+    expect(within(dialog).getByText("不包含作品正文或私密章节")).toBeVisible();
+    expect(within(dialog).getByText("查看详细信息")).toBeVisible();
+    expect(
+      within(dialog).getByText("本次开头资料只发送给当前已验证的本机模型。"),
+    ).not.toBeVisible();
+
+    await user.click(within(dialog).getByText("查看详细信息"));
     expect(within(dialog).getByText("当前已验证的本机模型")).toBeVisible();
     expect(within(dialog).getByText("本次最多发送次数").parentElement).toHaveTextContent(
       /最多\s*3\s*次；\s*每个请求最多\s*1\s*次/u,
     );
     expect(within(dialog).getByText("0 次")).toBeVisible();
-    expect(within(dialog).getByText("费用暂无法核对（当前连接未提供精确价格）")).toBeVisible();
+    expect(
+      within(dialog).getByText("服务商没有提供可计算的单价，实际费用请以服务商账单为准。"),
+    ).toBeVisible();
     expect(within(dialog).getByText("本次开头资料只发送给当前已验证的本机模型。")).toBeVisible();
     expect(within(dialog).getByText(/一句话灵感（/u)).toBeVisible();
     expect(within(dialog).getByText(/3 个独立开头请求及其固定创作角度/u)).toBeVisible();
@@ -985,6 +1029,97 @@ describe("one-sentence idea journey", () => {
     );
   }, 30_000);
 
+  it("lets the author explicitly generate one opening with one invocation and no automatic retry", async () => {
+    const harness = createTauriIdeaRuntime(false);
+    const user = userEvent.setup();
+    renderJourney(harness.runtime);
+    await connectOllamaForAiOpening(user);
+    harness.generate.mockClear();
+    await user.click(screen.getByRole("button", { name: "只生成一个开头" }));
+    await user.type(
+      screen.getByRole("textbox", { name: "一句话灵感" }),
+      "雨夜里，每一盏熄灭的路灯都会忘记一个人的名字。",
+    );
+
+    await user.click(screen.getByRole("button", { name: "生成第一段" }));
+    expect(await screen.findByRole("dialog", { name: "生成一个开头" })).toBeVisible();
+    await confirmOpeningProviderAction(user, 1);
+
+    await waitFor(() => expect(harness.generate).toHaveBeenCalledTimes(1));
+    expect(harness.generate.mock.calls[0]?.[0].config.retryLimit).toBe(0);
+    expect(await screen.findByRole("heading", { name: "方案 1" })).toBeVisible();
+    expect(screen.queryByRole("heading", { name: "方案 2" })).not.toBeInTheDocument();
+    const [active] = await harness.runtime.creativeJourneys.listActive("idea");
+    const run = readOpeningJourneyRun(active?.snapshot.openingRun);
+    expect(run?.requestIds).toHaveLength(1);
+    if (run === null) throw new Error("单方案没有保存开书运行记录。");
+    await expect(
+      harness.runtime.modelHub.findInvocation(run.requestIds[0] ?? "missing"),
+    ).resolves.toMatchObject({
+      id: run.requestIds[0],
+      status: "succeeded",
+      attempt: 1,
+    });
+  }, 30_000);
+
+  it("skips a pending AI batch into the same blank chapter without creating a second project", async () => {
+    const harness = createTauriIdeaRuntime(false);
+    const user = userEvent.setup();
+    renderJourney(harness.runtime);
+    await connectOllamaForAiOpening(user);
+    harness.generate.mockClear();
+    harness.generate.mockImplementation(() => new Promise(() => undefined));
+    const idea = "一名邮差发现所有退信都来自明天。";
+    await user.type(screen.getByRole("textbox", { name: "一句话灵感" }), idea);
+    await user.click(screen.getByRole("button", { name: "生成第一段" }));
+    await confirmOpeningProviderAction(user, 3);
+    await waitFor(() => expect(harness.generate).toHaveBeenCalledTimes(1));
+
+    const [pending] = await harness.runtime.creativeJourneys.listActive("idea");
+    if (
+      pending?.projectId === null ||
+      pending?.projectId === undefined ||
+      pending.chapterId === null
+    ) {
+      throw new Error("等待中的开书没有复用所需的空白作品和第一章。");
+    }
+    const projectId = pending.projectId;
+    const chapterId = pending.chapterId;
+    const projectsBefore = await harness.runtime.useCases.listProjects.execute({
+      statuses: ["active"],
+    });
+    expect(projectsBefore.ok && projectsBefore.value).toHaveLength(1);
+
+    await user.click(screen.getByRole("button", { name: "跳过 AI，从空白正文开始" }));
+    expect(await screen.findByText("已进入 AI 建议版本比较")).toBeVisible();
+
+    const projectsAfter = await harness.runtime.useCases.listProjects.execute({
+      statuses: ["active"],
+    });
+    expect(projectsAfter.ok && projectsAfter.value).toHaveLength(1);
+    expect(projectsAfter.ok && projectsAfter.value[0]?.id).toBe(projectId);
+    const completed = await harness.runtime.creativeJourneys.findById(pending.id);
+    expect(completed).toMatchObject({
+      status: "completed",
+      currentState: "author_workspace_ready",
+      projectId,
+      chapterId,
+      candidateId: null,
+    });
+    const parsedChapterId = parseUuidV7(chapterId);
+    if (!parsedChapterId.ok) throw parsedChapterId.error;
+    const chapter = await harness.runtime.repositories.chapters.findById(parsedChapterId.value);
+    expect(chapter.ok && chapter.value?.content).toBe("");
+    const candidates = await harness.runtime.repositories.aiCandidates.listByChapterId(
+      parsedChapterId.value,
+    );
+    expect(candidates.ok && candidates.value).toHaveLength(0);
+    expect(await harness.runtime.projectSeeds.findByProjectId(projectId)).toMatchObject({
+      seed: { premise: { values: [idea] } },
+    });
+    expect(harness.generate).toHaveBeenCalledTimes(1);
+  }, 30_000);
+
   it("creates three isolated provider opening suggestions and lets the author choose one", async () => {
     const harness = createTauriIdeaRuntime(false);
     const enableNovelSkill = vi.spyOn(harness.runtime.novelSkills, "setMethodEnabled");
@@ -992,7 +1127,9 @@ describe("one-sentence idea journey", () => {
     renderJourney(harness.runtime);
     await connectOllamaForAiOpening(user);
     await setSingleConnectionRetryLimit(harness.runtime, 3);
-    expect(await screen.findByText(/并行发送 3 个独立生成请求，服务商可能分别计费/u)).toBeVisible();
+    expect(
+      await screen.findByText(/按顺序处理 3 个独立生成请求，服务商可能分别计费/u),
+    ).toBeVisible();
     expect(screen.getByText(/本操作不自动重试/u)).toBeVisible();
     expect(screen.getByText(/当前模型：Ollama · local-novel/u)).toBeVisible();
     expect(screen.queryByText(/当前模型：019/u)).not.toBeInTheDocument();
@@ -1014,7 +1151,7 @@ describe("one-sentence idea journey", () => {
     await user.click(screen.getByRole("button", { name: "生成第一段" }));
     await confirmOpeningProviderAction(user, 3);
 
-    await waitFor(() => expect(harness.generate).toHaveBeenCalledTimes(3));
+    await waitFor(() => expect(harness.generate).toHaveBeenCalledTimes(1));
     expect(harness.generate.mock.calls.every((call) => call[0].config.retryLimit === 0)).toBe(true);
     const projectsBeforeOutput = await harness.runtime.useCases.listProjects.execute({
       statuses: ["active"],
@@ -1045,8 +1182,8 @@ describe("one-sentence idea journey", () => {
       "停电后的校园里，只有女主的影子仍然会移动。",
     ]);
     const tracesBeforeOutput = await harness.runtime.contextTraces.listByProjectId(project.id);
-    expect(tracesBeforeOutput).toHaveLength(3);
-    expect(new Set(tracesBeforeOutput.map(({ id }) => id)).size).toBe(3);
+    expect(tracesBeforeOutput).toHaveLength(1);
+    expect(new Set(tracesBeforeOutput.map(({ id }) => id)).size).toBe(1);
     expect(
       tracesBeforeOutput.every(
         ({ taskType, chapterId, execution }) =>
@@ -1057,18 +1194,30 @@ describe("one-sentence idea journey", () => {
       ),
     ).toBe(true);
     expect(new Set(tracesBeforeOutput.map(({ execution }) => execution?.generationId)).size).toBe(
-      3,
+      1,
     );
     expect(
       new Set(tracesBeforeOutput.map(({ execution }) => execution?.modelInvocationId)).size,
-    ).toBe(3);
+    ).toBe(1);
     const candidatesBeforeOutput = await harness.runtime.repositories.aiCandidates.listByChapterId(
       chapter.id,
     );
     expect(candidatesBeforeOutput.ok && candidatesBeforeOutput.value).toHaveLength(0);
 
     await act(async () => {
-      for (const release of releaseGeneration) release();
+      releaseGeneration[0]?.();
+      await Promise.resolve();
+    });
+    await waitFor(() => expect(screen.getAllByText("已完成")).toHaveLength(1));
+    await waitFor(() => expect(harness.generate).toHaveBeenCalledTimes(2));
+    expect(screen.getByText("正在逐个生成，已完成 1/3 个方案。")).toBeVisible();
+    await act(async () => {
+      releaseGeneration[1]?.();
+      await Promise.resolve();
+    });
+    await waitFor(() => expect(harness.generate).toHaveBeenCalledTimes(3));
+    await act(async () => {
+      releaseGeneration[2]?.();
       await Promise.resolve();
     });
 
@@ -1088,8 +1237,10 @@ describe("one-sentence idea journey", () => {
     const suggestionTraceIds = (suggestions as readonly Readonly<{ contextTraceId: string }>[]).map(
       ({ contextTraceId }) => contextTraceId,
     );
+    const tracesAfterOutput = await harness.runtime.contextTraces.listByProjectId(project.id);
+    expect(tracesAfterOutput).toHaveLength(3);
     expect(new Set(suggestionTraceIds).size).toBe(3);
-    expect(new Set(suggestionTraceIds)).toEqual(new Set(tracesBeforeOutput.map(({ id }) => id)));
+    expect(new Set(suggestionTraceIds)).toEqual(new Set(tracesAfterOutput.map(({ id }) => id)));
     const firstSelectedId = beforeSelection[0]?.snapshot.selectedOpeningId;
     const journeyId = beforeSelection[0]?.id;
     if (journeyId === undefined) throw new Error("AI 开书旅程没有保存。");
@@ -1233,9 +1384,13 @@ describe("one-sentence idea journey", () => {
     expect(await screen.findByText(/创作仍在进行，1 个结果尚未返回/u)).toBeVisible();
     const [active] = await harness.runtime.creativeJourneys.listActive("idea");
     const run = readOpeningJourneyRun(active?.snapshot.openingRun);
-    if (run === null) throw new Error("直接模式等待没有保存运行支持编号。");
-    const waitingDescription = screen.getByText(/当前阶段：.+；已等待 .+总等待超过 3 分钟/u);
-    expect(waitingDescription).toHaveTextContent(`支持编号：${openingJourneySupportNumber(run)}`);
+    if (run === null) throw new Error("直接模式等待没有保存运行问题编号。");
+    const waitingDescription = screen.getByText(
+      /当前阶段：.+；已等待 .+每个方案按顺序独立处理，先完成的结果会立即显示/u,
+    );
+    expect(waitingDescription).toHaveTextContent(
+      `问题编号：${openingJourneySupportNumber(run)}（联系支持时请提供）`,
+    );
     expect(waitingDescription).not.toHaveTextContent(run.supportId);
     view.unmount();
   }, 30_000);
@@ -1263,7 +1418,7 @@ describe("one-sentence idea journey", () => {
     const [reviewJourney] = await harness.runtime.creativeJourneys.listActive("idea");
     if (reviewJourney === undefined) throw new Error("创建前摘要没有保存本地旅程。");
     const run = readOpeningJourneyRun(reviewJourney.snapshot.openingRun);
-    if (run === null) throw new Error("供应商开头没有保存支持编号。");
+    if (run === null) throw new Error("供应商开头没有保存问题编号。");
     vi.spyOn(harness.runtime.useCases.renameProject, "execute").mockRejectedValueOnce(
       Object.assign(new Error("private create failure"), {
         code: "IDEA_PROJECT_CREATE_FAILED",
@@ -1538,36 +1693,32 @@ describe("one-sentence idea journey", () => {
     );
     await user.click(screen.getByRole("button", { name: "生成第一段" }));
     await confirmOpeningProviderAction(user, 3);
-    await waitFor(() => expect(harness.generate).toHaveBeenCalledTimes(3));
-    const requestIds = harness.generate.mock.calls.map(([input]) => input.generationId);
-    expect(new Set(requestIds).size).toBe(3);
+    await waitFor(() => expect(harness.generate).toHaveBeenCalledTimes(1));
     const planned = (await runtime.creativeJourneys.listActive("idea"))[0];
     const plannedSuggestions = planned?.snapshot.openingSuggestions as
       readonly Readonly<{ id: string; slotNumber: number }>[] | undefined;
     const slotRequestIds = [...(plannedSuggestions ?? [])]
       .sort((left, right) => left.slotNumber - right.slotNumber)
       .map(({ id }) => id);
-    expect(new Set(slotRequestIds)).toEqual(new Set(requestIds));
+    expect(new Set(slotRequestIds).size).toBe(3);
 
     const firstResolver = resolvers.get(slotRequestIds[0] ?? "missing");
-    const secondResolver = resolvers.get(slotRequestIds[1] ?? "missing");
-    const thirdResolver = resolvers.get(slotRequestIds[2] ?? "missing");
-    if (
-      firstResolver === undefined ||
-      secondResolver === undefined ||
-      thirdResolver === undefined
-    ) {
-      throw new Error("三方案没有保留独立的返回入口。");
-    }
+    if (firstResolver === undefined) throw new Error("第一方案没有保留独立的返回入口。");
     await act(async () => {
       firstResolver({ text: "第一槽真实返回但首次本地保存失败。", usage: null });
       await Promise.resolve();
     });
     await waitFor(() => expect(failedReadyCheckpointCount).toBe(1));
+    await waitFor(() => expect(harness.generate).toHaveBeenCalledTimes(2));
+    const secondResolver = resolvers.get(slotRequestIds[1] ?? "missing");
+    if (secondResolver === undefined) throw new Error("第二方案没有保留独立的返回入口。");
     await act(async () => {
       secondResolver({ text: "第二槽在第一槽本地失败后仍然成功。", usage: null });
       await Promise.resolve();
     });
+    await waitFor(() => expect(harness.generate).toHaveBeenCalledTimes(3));
+    const thirdResolver = resolvers.get(slotRequestIds[2] ?? "missing");
+    if (thirdResolver === undefined) throw new Error("第三方案没有保留独立的返回入口。");
     await act(async () => {
       thirdResolver({ text: "第三槽也在同一批次独立完成。", usage: null });
       await Promise.resolve();
@@ -1576,7 +1727,7 @@ describe("one-sentence idea journey", () => {
     expect(screen.getByText("第二槽在第一槽本地失败后仍然成功。")).toBeVisible();
     expect(await screen.findByText("第三槽也在同一批次独立完成。")).toBeVisible();
     await waitFor(() => expect(screen.getAllByText("已完成")).toHaveLength(3));
-    expect(screen.queryByText("结果待核对")).not.toBeInTheDocument();
+    expect(screen.queryByText("请求可能已经发出，暂时无法确认结果")).not.toBeInTheDocument();
     expect(harness.generate).toHaveBeenCalledTimes(3);
     const beforeRestart = (await runtime.creativeJourneys.listActive("idea"))[0];
     expect(beforeRestart?.snapshot.openingSuggestions).toEqual([
@@ -1602,7 +1753,7 @@ describe("one-sentence idea journey", () => {
     renderJourney(runtime);
     await user.click(await screen.findByRole("button", { name: "继续这次构思" }));
     await waitFor(() => expect(screen.getAllByText("已完成")).toHaveLength(3));
-    expect(screen.queryByText("结果待核对")).not.toBeInTheDocument();
+    expect(screen.queryByText("请求可能已经发出，暂时无法确认结果")).not.toBeInTheDocument();
     expect(screen.queryByText("明确失败")).not.toBeInTheDocument();
     expect(screen.getByText("第一槽真实返回但首次本地保存失败。")).toBeVisible();
     expect(screen.getByText("第二槽在第一槽本地失败后仍然成功。")).toBeVisible();
@@ -1692,7 +1843,9 @@ describe("one-sentence idea journey", () => {
     });
     renderJourney(harness.runtime);
     await user.click(await screen.findByRole("button", { name: "继续这次构思" }));
-    await waitFor(() => expect(screen.getByText("结果需要核对")).toBeVisible());
+    await waitFor(() =>
+      expect(screen.getByText("请求可能已经发出，暂时无法确认结果")).toBeVisible(),
+    );
     expect(screen.queryByText("这次 AI 修改仍在等待结果")).not.toBeInTheDocument();
     expect(screen.getAllByText("已完成")).toHaveLength(2);
     expect(harness.generate).toHaveBeenCalledTimes(3);
@@ -2022,9 +2175,8 @@ describe("one-sentence idea journey", () => {
     try {
       await user.click(within(dialog).getByRole("button", { name: "确认并发送最多 3 个生成请求" }));
       await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
-      await waitFor(() => expect(harness.generate).toHaveBeenCalledTimes(3));
-      expect(slotTimeoutCallbacks).toHaveLength(6);
-      const providerTimeoutCallbacks = slotTimeoutCallbacks.slice(-3);
+      await waitFor(() => expect(harness.generate).toHaveBeenCalledTimes(1));
+      expect(slotTimeoutCallbacks).toHaveLength(2);
       expect(
         harness.generate.mock.calls.every(([request]) => request.config.retryLimit === 0),
       ).toBe(true);
@@ -2035,10 +2187,7 @@ describe("one-sentence idea journey", () => {
       const requestIds = pendingSuggestions?.map(({ id }) => id) ?? [];
       expect(requestIds).toHaveLength(3);
       expect(new Set(requestIds).size).toBe(3);
-      const sentGenerationIds = harness.generate.mock.calls.map(
-        ([request]) => request.generationId,
-      );
-      expect([...sentGenerationIds].sort()).toEqual([...requestIds].sort());
+      expect(harness.generate.mock.calls[0]?.[0].generationId).toBe(requestIds[0]);
       if (pending?.chapterId === null || pending?.chapterId === undefined) {
         throw new Error("超时竞态测试没有取得第一章编号。");
       }
@@ -2065,20 +2214,54 @@ describe("one-sentence idea journey", () => {
         "pending",
         "pending",
       ]);
-      for (const requestId of requestIds) {
-        const invocation = await harness.runtime.modelHub.findInvocation(requestId);
-        expect(invocation).toMatchObject({
-          id: requestId,
-          task: "book_start_guidance",
-          status: "running",
-        });
-        expect(typeof invocation?.providerDispatchStartedAt).toBe("string");
-      }
+      const firstInvocation = await harness.runtime.modelHub.findInvocation(requestIds[0] ?? "");
+      expect(firstInvocation).toMatchObject({
+        id: requestIds[0],
+        task: "book_start_guidance",
+        status: "running",
+      });
+      expect(typeof firstInvocation?.providerDispatchStartedAt).toBe("string");
+      await expect(
+        harness.runtime.modelHub.findInvocation(requestIds[1] ?? ""),
+      ).resolves.toBeNull();
+      await expect(
+        harness.runtime.modelHub.findInvocation(requestIds[2] ?? ""),
+      ).resolves.toBeNull();
 
       await act(async () => {
-        for (const timeout of providerTimeoutCallbacks) timeout();
+        slotTimeoutCallbacks[1]?.();
         await Promise.resolve();
       });
+      await waitFor(() => expect(harness.cancelGeneration).toHaveBeenCalledTimes(1));
+      expect(harness.cancelGeneration).toHaveBeenNthCalledWith(1, requestIds[0]);
+      expect(harness.generate).toHaveBeenCalledTimes(1);
+      await waitFor(() => expect(harness.generate).toHaveBeenCalledTimes(2));
+      expect(harness.cancelGeneration.mock.invocationCallOrder[0]).toBeLessThan(
+        harness.generate.mock.invocationCallOrder[1] ?? Number.POSITIVE_INFINITY,
+      );
+      expect(slotTimeoutCallbacks).toHaveLength(4);
+      await act(async () => {
+        slotTimeoutCallbacks[3]?.();
+        await Promise.resolve();
+      });
+      await waitFor(() => expect(harness.cancelGeneration).toHaveBeenCalledTimes(2));
+      expect(harness.cancelGeneration).toHaveBeenNthCalledWith(2, requestIds[1]);
+      expect(harness.generate).toHaveBeenCalledTimes(2);
+      await waitFor(() => expect(harness.generate).toHaveBeenCalledTimes(3));
+      expect(harness.cancelGeneration.mock.invocationCallOrder[1]).toBeLessThan(
+        harness.generate.mock.invocationCallOrder[2] ?? Number.POSITIVE_INFINITY,
+      );
+      expect(slotTimeoutCallbacks).toHaveLength(6);
+      await act(async () => {
+        slotTimeoutCallbacks[5]?.();
+        await Promise.resolve();
+      });
+      await waitFor(() => expect(harness.cancelGeneration).toHaveBeenCalledTimes(3));
+      expect(harness.cancelGeneration).toHaveBeenNthCalledWith(3, requestIds[2]);
+      const sentGenerationIds = harness.generate.mock.calls.map(
+        ([request]) => request.generationId,
+      );
+      expect([...sentGenerationIds].sort()).toEqual([...requestIds].sort());
 
       await waitFor(async () => {
         const [settled] = await harness.runtime.creativeJourneys.listActive("idea");
@@ -2157,12 +2340,12 @@ describe("one-sentence idea journey", () => {
       }, ASYNC_UI_TIMEOUT);
       expect(
         await screen.findByText(
-          "本机模型仍在处理或未及时返回。墨影已停止等待，并把这次发送标记为“结果需要核对”；不会自动重试，也不会改动正文。",
+          "请求可能已经发给本机模型，暂时无法确认结果。已保留同一条发送记录；发送一次、自动重试零次，正文不会改变。",
           undefined,
           ASYNC_UI_TIMEOUT,
         ),
       ).toBeVisible();
-      expect(harness.cancelGeneration).not.toHaveBeenCalled();
+      expect(harness.cancelGeneration).toHaveBeenCalledTimes(3);
       expect(harness.generate).toHaveBeenCalledTimes(3);
       for (const requestId of requestIds) {
         await expect(harness.runtime.modelHub.findInvocation(requestId)).resolves.toMatchObject({
@@ -2171,7 +2354,7 @@ describe("one-sentence idea journey", () => {
         });
       }
       expect(lateResultInjected).toBe(true);
-      expect(harness.cancelGeneration).not.toHaveBeenCalled();
+      expect(harness.cancelGeneration).toHaveBeenCalledTimes(3);
       const chapterAfterResult = await harness.runtime.repositories.chapters.findById(
         parsedChapterId.value,
       );
@@ -2181,6 +2364,254 @@ describe("one-sentence idea journey", () => {
     } finally {
       updateSpy.mockRestore();
       timeoutSpy.mockRestore();
+    }
+  }, 30_000);
+
+  it.each(["returns false", "throws"] as const)(
+    "stops the remaining slots and isolates a late result when timeout cancellation %s",
+    async (cancellationBehavior) => {
+      const harness = createTauriIdeaRuntime(false);
+      const user = userEvent.setup();
+      renderJourney(harness.runtime);
+      await connectOllamaForAiOpening(user);
+      harness.generate.mockClear();
+      harness.cancelGeneration.mockClear();
+      if (cancellationBehavior === "returns false") {
+        harness.cancelGeneration.mockResolvedValue(false);
+      } else {
+        harness.cancelGeneration.mockRejectedValue(new Error("synthetic cancellation failure"));
+      }
+      const lateResult = {
+        resolve: null as ((value: { text: string; usage: null }) => void) | null,
+      };
+      harness.generate.mockImplementation(
+        () =>
+          new Promise((resolve) => {
+            lateResult.resolve ??= resolve;
+          }),
+      );
+
+      await user.type(
+        screen.getByRole("textbox", { name: "一句话灵感" }),
+        "一艘退役渡轮在午夜重新亮起所有客舱的灯。",
+      );
+      await user.click(screen.getByRole("button", { name: "生成第一段" }));
+      const dialog = await screen.findByRole("dialog");
+      const realSetTimeout = globalThis.setTimeout.bind(globalThis);
+      const slotTimeoutCallbacks: (() => void)[] = [];
+      const timeoutSpy = vi.spyOn(globalThis, "setTimeout").mockImplementation(((
+        handler: TimerHandler,
+        timeout?: number,
+      ) => {
+        if (
+          timeout === CREATIVE_OPENING_SLOT_SETTLEMENT_TIMEOUT_MS &&
+          typeof handler === "function"
+        ) {
+          slotTimeoutCallbacks.push(handler as () => void);
+          return realSetTimeout(() => undefined, timeout);
+        }
+        return realSetTimeout(handler, timeout);
+      }) as typeof globalThis.setTimeout);
+
+      try {
+        await user.click(
+          within(dialog).getByRole("button", { name: "确认并发送最多 3 个生成请求" }),
+        );
+        await waitFor(() => expect(harness.generate).toHaveBeenCalledTimes(1));
+        expect(slotTimeoutCallbacks).toHaveLength(2);
+        const [pending] = await harness.runtime.creativeJourneys.listActive("idea");
+        const requestIds = (
+          pending?.snapshot.openingSuggestions as readonly Readonly<{ id: string }>[] | undefined
+        )?.map(({ id }) => id);
+        expect(requestIds).toHaveLength(3);
+        const firstRequestId = requestIds?.[0];
+        if (firstRequestId === undefined) throw new Error("取消失败测试没有取得首个请求编号。");
+
+        await act(async () => {
+          slotTimeoutCallbacks[1]?.();
+          await Promise.resolve();
+        });
+
+        await waitFor(() => expect(harness.cancelGeneration).toHaveBeenCalledTimes(1));
+        expect(harness.cancelGeneration).toHaveBeenCalledWith(firstRequestId);
+        expect(harness.generate).toHaveBeenCalledTimes(1);
+        await waitFor(async () => {
+          const [settled] = await harness.runtime.creativeJourneys.listActive("idea");
+          expect(settled?.currentState).not.toBe("generation_pending");
+          expect(settled?.snapshot.pendingRequestId).toBeNull();
+          const suggestions = settled?.snapshot.openingSuggestions as
+            | readonly Readonly<{
+                id: string;
+                status: string;
+                dispatchState: string;
+                noticeCode: string | null;
+              }>[]
+            | undefined;
+          expect(
+            suggestions?.map(({ id, status, dispatchState, noticeCode }) => ({
+              id,
+              status,
+              dispatchState,
+              noticeCode,
+            })),
+          ).toEqual([
+            {
+              id: requestIds?.[0],
+              status: "failed",
+              dispatchState: "ambiguous",
+              noticeCode: "MODEL_TIMEOUT",
+            },
+            ...((requestIds ?? []).slice(1).map((id) => ({
+              id,
+              status: "failed",
+              dispatchState: "not_dispatched",
+              noticeCode: "MODEL_TIMEOUT",
+            })) as readonly Readonly<{
+              id: string;
+              status: string;
+              dispatchState: string;
+              noticeCode: string;
+            }>[]),
+          ]);
+          expect(readOpeningJourneyRun(settled?.snapshot.openingRun)).toMatchObject({
+            stage: "result_pending",
+            autoRetryCount: 0,
+          });
+        }, ASYNC_UI_TIMEOUT);
+        expect(harness.generate).toHaveBeenCalledTimes(1);
+        expect(harness.generate.mock.calls[0]?.[0].config.retryLimit).toBe(0);
+        const timedOutInvocation = await harness.runtime.modelHub.findInvocation(firstRequestId);
+        expect(timedOutInvocation).toMatchObject({ status: "timed_out" });
+        expect(typeof timedOutInvocation?.providerDispatchStartedAt).toBe("string");
+        for (const requestId of (requestIds ?? []).slice(1)) {
+          await expect(harness.runtime.modelHub.findInvocation(requestId)).resolves.toBeNull();
+        }
+
+        const resolveLateResult = lateResult.resolve;
+        if (resolveLateResult === null) throw new Error("取消失败测试没有保留迟到结果入口。");
+        await act(async () => {
+          resolveLateResult({ text: "渡轮的舷窗里站着一排不该出现的乘客。", usage: null });
+          await Promise.resolve();
+        });
+        await waitFor(async () => {
+          const [reconciled] = await harness.runtime.creativeJourneys.listActive("idea");
+          const history = reconciled?.snapshot.openingResultHistory as
+            | readonly Readonly<{
+                id: string;
+                status: string;
+                text: string;
+                dispatchState: string;
+              }>[]
+            | undefined;
+          expect(history?.find(({ id }) => id === firstRequestId)).toMatchObject({
+            status: "review",
+            text: "渡轮的舷窗里站着一排不该出现的乘客。",
+            dispatchState: "ambiguous",
+          });
+        }, ASYNC_UI_TIMEOUT);
+        expect(harness.generate).toHaveBeenCalledTimes(1);
+        expect(harness.cancelGeneration).toHaveBeenCalledTimes(1);
+      } finally {
+        timeoutSpy.mockRestore();
+      }
+    },
+    30_000,
+  );
+
+  it("continues with the next slot when a pre-dispatch timeout cannot cancel an unregistered request", async () => {
+    const harness = createTauriIdeaRuntime(false);
+    const user = userEvent.setup();
+    renderJourney(harness.runtime);
+    await connectOllamaForAiOpening(user);
+    harness.generate.mockClear();
+    harness.cancelGeneration.mockReset();
+    harness.cancelGeneration.mockResolvedValue(false);
+
+    await user.type(
+      screen.getByRole("textbox", { name: "一句话灵感" }),
+      "图书馆闭馆以后，书架会替读者续写没看完的故事。",
+    );
+    await user.click(screen.getByRole("button", { name: "生成第一段" }));
+    const dialog = await screen.findByRole("dialog");
+    const originalSave = harness.runtime.contextTraces.save.bind(harness.runtime.contextTraces);
+    let blockFirstTraceSave = true;
+    const contextTraceSaveSpy = vi
+      .spyOn(harness.runtime.contextTraces, "save")
+      .mockImplementation((trace) => {
+        if (blockFirstTraceSave) {
+          blockFirstTraceSave = false;
+          return new Promise(() => undefined);
+        }
+        return originalSave(trace);
+      });
+    const realSetTimeout = globalThis.setTimeout.bind(globalThis);
+    const slotTimeoutCallbacks: (() => void)[] = [];
+    const timeoutSpy = vi.spyOn(globalThis, "setTimeout").mockImplementation(((
+      handler: TimerHandler,
+      timeout?: number,
+    ) => {
+      if (
+        timeout === CREATIVE_OPENING_SLOT_SETTLEMENT_TIMEOUT_MS &&
+        typeof handler === "function"
+      ) {
+        slotTimeoutCallbacks.push(handler as () => void);
+        return realSetTimeout(() => undefined, timeout);
+      }
+      return realSetTimeout(handler, timeout);
+    }) as typeof globalThis.setTimeout);
+
+    try {
+      await user.click(within(dialog).getByRole("button", { name: "确认并发送最多 3 个生成请求" }));
+      await waitFor(() => expect(contextTraceSaveSpy).toHaveBeenCalledTimes(1));
+      expect(harness.generate).not.toHaveBeenCalled();
+      expect(slotTimeoutCallbacks).toHaveLength(2);
+      const [pending] = await harness.runtime.creativeJourneys.listActive("idea");
+      const requestIds = (
+        pending?.snapshot.openingSuggestions as readonly Readonly<{ id: string }>[] | undefined
+      )?.map(({ id }) => id);
+      expect(requestIds).toHaveLength(3);
+      const firstRequestId = requestIds?.[0];
+      if (firstRequestId === undefined) throw new Error("发送前超时测试没有取得首个请求编号。");
+
+      await act(async () => {
+        slotTimeoutCallbacks[1]?.();
+        await Promise.resolve();
+      });
+
+      await waitFor(() => expect(harness.cancelGeneration).toHaveBeenCalledTimes(1));
+      expect(harness.cancelGeneration).toHaveBeenCalledWith(firstRequestId);
+      await waitFor(() => expect(harness.generate).toHaveBeenCalledTimes(2));
+      expect(harness.generate.mock.calls.map(([input]) => input.generationId)).toEqual(
+        requestIds?.slice(1),
+      );
+      expect(harness.cancelGeneration).toHaveBeenCalledTimes(1);
+      await waitFor(async () => {
+        const [settled] = await harness.runtime.creativeJourneys.listActive("idea");
+        expect(settled?.currentState).not.toBe("generation_pending");
+        expect(settled?.snapshot.pendingRequestId).toBeNull();
+        const suggestions = settled?.snapshot.openingSuggestions as
+          | readonly Readonly<{
+              id: string;
+              status: string;
+              dispatchState: string;
+              noticeCode: string | null;
+            }>[]
+          | undefined;
+        expect(suggestions?.[0]).toMatchObject({
+          id: firstRequestId,
+          status: "failed",
+          dispatchState: "not_dispatched",
+          noticeCode: "MODEL_TIMEOUT",
+        });
+        expect(suggestions?.slice(1).every(({ status }) => status === "ready")).toBe(true);
+      }, ASYNC_UI_TIMEOUT);
+      await expect(harness.runtime.modelHub.findInvocation(firstRequestId)).resolves.toMatchObject({
+        status: "failed",
+        providerDispatchStartedAt: null,
+      });
+    } finally {
+      timeoutSpy.mockRestore();
+      contextTraceSaveSpy.mockRestore();
     }
   }, 30_000);
 
@@ -2825,9 +3256,20 @@ describe("one-sentence idea journey", () => {
           within(dialog).getByRole("button", { name: "确认并发送最多 3 个生成请求" }),
         );
         await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+        await waitFor(() => expect(harness.generate).toHaveBeenCalledTimes(1));
+        expect(slotTimeoutCallbacks).toHaveLength(2);
+        await act(async () => {
+          slotTimeoutCallbacks[1]?.();
+          await Promise.resolve();
+        });
+        await waitFor(() => expect(harness.generate).toHaveBeenCalledTimes(2));
+        expect(slotTimeoutCallbacks).toHaveLength(4);
+        await act(async () => {
+          slotTimeoutCallbacks[3]?.();
+          await Promise.resolve();
+        });
         await waitFor(() => expect(harness.generate).toHaveBeenCalledTimes(3));
         expect(slotTimeoutCallbacks).toHaveLength(6);
-        const providerTimeoutCallbacks = slotTimeoutCallbacks.slice(-3);
 
         const [pending] = await harness.runtime.creativeJourneys.listActive("idea");
         if (pending === undefined) throw new Error("串绑超时测试没有保存待处理旅程。");
@@ -2897,19 +3339,22 @@ describe("one-sentence idea journey", () => {
 
         try {
           await act(async () => {
-            for (const timeout of providerTimeoutCallbacks) timeout();
+            slotTimeoutCallbacks[5]?.();
             await Promise.resolve();
           });
           expect(
             await screen.findByText(
-              "模型未在约定时间内返回。墨影已停止等待，并把这次发送标记为“结果需要核对”；不会自动重试，也不会改动正文。",
+              "请求可能已经发给所选 AI 服务，暂时无法确认结果。已保留同一条发送记录；发送一次、自动重试零次，正文不会改变。",
               undefined,
               ASYNC_UI_TIMEOUT,
             ),
           ).toBeVisible();
 
           expect(finishInvocationSpy).not.toHaveBeenCalled();
-          expect(harness.cancelGeneration).not.toHaveBeenCalled();
+          expect(harness.cancelGeneration).toHaveBeenCalledTimes(1);
+          expect(harness.cancelGeneration).toHaveBeenCalledWith(requestIds[2]);
+          expect(harness.cancelGeneration).not.toHaveBeenCalledWith(firstRequestId);
+          expect(harness.cancelGeneration).not.toHaveBeenCalledWith(secondRequestId);
           expect(updateJourneySpy).not.toHaveBeenCalled();
           const storedAfterFailure = await harness.runtime.creativeJourneys.findById(pending.id);
           expect(storedAfterFailure).toEqual(storedBeforeFailure);
@@ -3014,7 +3459,7 @@ describe("one-sentence idea journey", () => {
     );
     await user.click(screen.getByRole("button", { name: "生成第一段" }));
     await confirmOpeningProviderAction(user, 3);
-    await waitFor(() => expect(enteredTraceSaves).toBe(3));
+    await waitFor(() => expect(enteredTraceSaves).toBe(1));
     expect(harness.generate).not.toHaveBeenCalled();
 
     const [pending] = await harness.runtime.creativeJourneys.listActive("idea");
@@ -3026,12 +3471,12 @@ describe("one-sentence idea journey", () => {
     first.unmount();
     renderJourney(harness.runtime);
     await user.click(await screen.findByRole("button", { name: "继续这次构思" }));
-    await waitFor(() => expect(screen.getByText(/生成仍在进行，3 个方案尚未返回/u)).toBeVisible());
+    await waitFor(() => expect(screen.getByText(/生成仍在进行，1 个方案尚未返回/u)).toBeVisible());
     expect(harness.cancelGeneration).not.toHaveBeenCalled();
     await user.click(screen.getByRole("button", { name: "结束未完成请求" }));
     await waitFor(() => expect(screen.getAllByText("未发送")).toHaveLength(3));
     expect(screen.queryByRole("button", { name: "结束未完成请求" })).not.toBeInTheDocument();
-    expect(harness.cancelGeneration).toHaveBeenCalledTimes(3);
+    expect(harness.cancelGeneration).not.toHaveBeenCalled();
 
     releaseTraceSaves();
     let invocationIds: readonly string[] = [];
@@ -3041,7 +3486,7 @@ describe("one-sentence idea journey", () => {
         const invocationId = execution?.modelInvocationId;
         return invocationId === null || invocationId === undefined ? [] : [invocationId];
       });
-      expect(invocationIds).toHaveLength(3);
+      expect(invocationIds).toHaveLength(1);
     });
     await waitFor(async () => {
       const invocations = await Promise.all(
@@ -3075,7 +3520,7 @@ describe("one-sentence idea journey", () => {
     expect(harness.generate).not.toHaveBeenCalled();
   }, 30_000);
 
-  it("enables experimental opening methods only after explicit opt-in without forging browser receipts", async () => {
+  it("uses the explicit opening skills for this batch without changing project bindings", async () => {
     const harness = createTauriIdeaRuntime(false);
     const user = userEvent.setup();
     const availability = Object.freeze({ status: "ready" as const, reason: null });
@@ -3089,9 +3534,10 @@ describe("one-sentence idea journey", () => {
           methods: Object.freeze([]),
         }),
       );
+    const prepareNovelSkill = vi.spyOn(harness.runtime.novelSkills, "prepareInvocation");
     renderJourney(harness.runtime);
     await connectOllamaForAiOpening(user);
-    await user.click(screen.getByRole("checkbox", { name: /试用仍在评测中的基础写作方法/u }));
+    await user.click(screen.getByRole("checkbox", { name: /在本次开头中使用写作技能/u }));
     await user.type(
       screen.getByRole("textbox", { name: "一句话灵感" }),
       "雨停之后，旧剧场的所有座位都朝向一扇新出现的门。",
@@ -3100,19 +3546,19 @@ describe("one-sentence idea journey", () => {
     await confirmOpeningProviderAction(user, 3);
 
     expect(await screen.findByRole("heading", { name: "方案 3" })).toBeVisible();
-    expect(enableNovelSkill).toHaveBeenCalledTimes(2);
-    expect(enableNovelSkill).toHaveBeenNthCalledWith(
-      1,
-      expect.any(String),
-      "core.scene_craft",
-      true,
-    );
-    expect(enableNovelSkill).toHaveBeenNthCalledWith(
-      2,
-      expect.any(String),
-      "core.prose_specificity",
-      true,
-    );
+    expect(enableNovelSkill).not.toHaveBeenCalled();
+    const openingPreparations = prepareNovelSkill.mock.calls
+      .map(([input]) => input)
+      .filter(({ taskType }) => taskType === "book_start_guidance");
+    expect(openingPreparations.length).toBeGreaterThan(0);
+    expect(
+      openingPreparations.every(
+        ({ explicitSkillIds, maximumSkillTokens }) =>
+          JSON.stringify(explicitSkillIds) ===
+            JSON.stringify(["core.scene_craft", "core.prose_specificity"]) &&
+          maximumSkillTokens === 2_000,
+      ),
+    ).toBe(true);
     const active = await harness.runtime.creativeJourneys.listActive("idea");
     expect(active[0]?.snapshot.experimentalNovelSkillsOptIn).toBe(true);
     const projectId = active[0]?.projectId;
@@ -3427,7 +3873,7 @@ describe("one-sentence idea journey", () => {
       );
       await user.click(screen.getByRole("button", { name: "生成第一段" }));
       await confirmOpeningProviderAction(user, 3);
-      await waitFor(() => expect(harness.generate).toHaveBeenCalledTimes(3));
+      await waitFor(() => expect(harness.generate).toHaveBeenCalledTimes(1));
 
       const plannedRecords = await harness.runtime.creativeJourneys.listActive("idea");
       const planned = plannedRecords[0];
@@ -3441,41 +3887,79 @@ describe("one-sentence idea journey", () => {
       expect(plannedSuggestions.every(({ status }) => status === "pending")).toBe(true);
       expect(new Set(plannedSuggestions.map(({ id }) => id)).size).toBe(3);
       expect(new Set(plannedSuggestions.map(({ openingAngle }) => openingAngle)).size).toBe(3);
-      expect(new Set(harness.generate.mock.calls.map(([request]) => request.generationId))).toEqual(
-        new Set(plannedSuggestions.map(({ id }) => id)),
-      );
+      expect(harness.generate.mock.calls[0]?.[0].generationId).toBe(plannedSuggestions[0]?.id);
 
       expect(screen.getByRole("button", { name: "返回创作首页" })).toBeDisabled();
-      first.unmount();
-      renderJourney(harness.runtime);
-      await user.click(await screen.findByRole("button", { name: "继续这次构思" }));
-      await waitFor(() =>
-        expect(screen.getByText(/生成仍在进行，3 个方案尚未返回/u)).toBeVisible(),
-      );
-      expect(screen.getAllByText("等待生成")).toHaveLength(3);
-      expect(screen.getByRole("button", { name: "换一批" })).toBeDisabled();
-      expect(screen.queryByRole("button", { name: "增加一个悬念" })).not.toBeInTheDocument();
-      expect(screen.queryByRole("button", { name: "保留开头，确认创建" })).not.toBeInTheDocument();
-      await user.click(screen.getByRole("button", { name: "结束未完成请求" }));
-      await waitFor(() => expect(screen.getAllByText("结果待核对")).toHaveLength(3));
-      await waitFor(() => expect(harness.cancelGeneration).toHaveBeenCalledTimes(3));
-      for (const { id } of plannedSuggestions) {
-        expect(harness.cancelGeneration).toHaveBeenCalledWith(id);
-        const invocation = await harness.runtime.modelHub.findInvocation(id);
-        expect(invocation).toMatchObject({
-          status: "failed",
-          attempt: 1,
-          errorCode: "OPENING_DISPATCH_AMBIGUOUS",
-        });
-        expect(typeof invocation?.providerDispatchStartedAt).toBe("string");
+      if (cancelOutcome === true) {
+        await user.click(screen.getByRole("button", { name: "改为只生成一个" }));
+        const reduceDialog = await screen.findByRole("dialog", { name: "改为只生成一个" });
+        expect(reduceDialog).toHaveTextContent("尚未发出的两个方案不会发送");
+        expect(reduceDialog).toHaveTextContent("系统不会自动重试");
+        await user.click(within(reduceDialog).getByRole("button", { name: "结束本批并改为一个" }));
+      } else {
+        first.unmount();
+        renderJourney(harness.runtime);
+        await user.click(await screen.findByRole("button", { name: "继续这次构思" }));
+        await waitFor(() =>
+          expect(screen.getByText(/生成仍在进行，1 个方案尚未返回/u)).toBeVisible(),
+        );
+        expect(screen.getAllByText("等待生成")).toHaveLength(1);
+        expect(screen.getAllByText("未发送")).toHaveLength(2);
+        expect(screen.getByRole("button", { name: "换一批" })).toBeDisabled();
+        expect(screen.queryByRole("button", { name: "增加一个悬念" })).not.toBeInTheDocument();
+        expect(
+          screen.queryByRole("button", { name: "保留开头，确认创建" }),
+        ).not.toBeInTheDocument();
+        await user.click(screen.getByRole("button", { name: "结束未完成请求" }));
       }
-      expect(screen.getByRole("button", { name: "换一批" })).toBeEnabled();
-      const turnsAfterAuthorEnd = await harness.runtime.creativeJourneys.listTurns(planned.id);
-      expect(turnsAfterAuthorEnd.at(-1)).toMatchObject({
-        kind: "regenerate",
-        requestId: null,
-        snapshot: { status: "author_ended" },
+      await waitFor(() =>
+        expect(screen.getAllByText("请求可能已经发出，暂时无法确认结果")).toHaveLength(1),
+      );
+      expect(screen.getAllByText("未发送")).toHaveLength(2);
+      const dispatchedRequestId = plannedSuggestions[0]?.id;
+      if (dispatchedRequestId === undefined) throw new Error("第一个固定建议槽没有请求编号。");
+      await waitFor(() => expect(harness.cancelGeneration).toHaveBeenCalled());
+      expect(harness.cancelGeneration.mock.calls.map(([requestId]) => requestId)).toEqual([
+        dispatchedRequestId,
+      ]);
+      expect(harness.cancelGeneration).toHaveBeenCalledWith(dispatchedRequestId);
+      const dispatchedInvocation =
+        await harness.runtime.modelHub.findInvocation(dispatchedRequestId);
+      expect(dispatchedInvocation).toMatchObject({
+        status: "failed",
+        attempt: 1,
+        errorCode: "OPENING_DISPATCH_AMBIGUOUS",
       });
+      expect(typeof dispatchedInvocation?.providerDispatchStartedAt).toBe("string");
+      for (const { id } of plannedSuggestions.slice(1)) {
+        expect(harness.cancelGeneration).not.toHaveBeenCalledWith(id);
+        expect(await harness.runtime.modelHub.findInvocation(id)).toBeNull();
+      }
+      if (cancelOutcome === true) {
+        expect(screen.getByText("本批请求已结束；下一次只生成一个开头。")).toBeVisible();
+        expect(screen.getByRole("button", { name: "重新生成一个开头" })).toBeEnabled();
+      } else {
+        expect(screen.getByRole("button", { name: "换一批" })).toBeEnabled();
+      }
+      const turnsAfterAuthorEnd = await harness.runtime.creativeJourneys.listTurns(planned.id);
+      expect(
+        turnsAfterAuthorEnd.some(
+          (turn) =>
+            turn.kind === "regenerate" &&
+            turn.requestId === null &&
+            turn.snapshot.status === "author_ended",
+        ),
+      ).toBe(true);
+      if (cancelOutcome === true) {
+        expect(turnsAfterAuthorEnd.at(-1)).toMatchObject({
+          kind: "regenerate",
+          requestId: null,
+          snapshot: {
+            status: "next_opening_request_count_changed",
+            nextOpeningRequestCount: 1,
+          },
+        });
+      }
       const endedRecord = await harness.runtime.creativeJourneys.findById(planned.id);
       const endedRun = readOpeningJourneyRun(endedRecord?.snapshot.openingRun);
       if (endedRun === null) throw new Error("作者结束后没有保留开书运行终态。");
@@ -3503,11 +3987,9 @@ describe("one-sentence idea journey", () => {
         },
       });
 
-      const thirdRequestId = plannedSuggestions[2]?.id;
-      if (thirdRequestId === undefined) throw new Error("第三个固定建议槽没有请求编号。");
       await act(async () => {
-        resolvers.get(thirdRequestId)?.({
-          text: "这是一段乱序返回但已经完成计费的正文。",
+        resolvers.get(dispatchedRequestId)?.({
+          text: "这是一段等待结束后才返回但已经完成计费的正文。",
           usage: null,
         });
         await Promise.resolve();
@@ -3518,7 +4000,7 @@ describe("one-sentence idea journey", () => {
         expect(turns).toHaveLength(turnsAfterAuthorEnd.length + 1);
         expect(turns.at(-1)).toMatchObject({
           kind: "regenerate",
-          requestId: thirdRequestId,
+          requestId: dispatchedRequestId,
           snapshot: { status: "review", historicalResult: true },
         });
         const latest = await harness.runtime.creativeJourneys.findById(planned.id);
@@ -3531,39 +4013,47 @@ describe("one-sentence idea journey", () => {
         expect(suggestions?.filter(({ status }) => status === "ready")).toHaveLength(0);
         expect(
           suggestions?.filter(({ dispatchState }) => dispatchState === "ambiguous"),
-        ).toHaveLength(2);
-        expect(history?.find(({ id }) => id === thirdRequestId)).toMatchObject({
+        ).toHaveLength(0);
+        expect(history?.find(({ id }) => id === dispatchedRequestId)).toMatchObject({
           status: "review",
-          text: "这是一段乱序返回但已经完成计费的正文。",
+          text: "这是一段等待结束后才返回但已经完成计费的正文。",
           dispatchState: "ambiguous",
         });
       });
       const turnsAfterLateResult = await harness.runtime.creativeJourneys.listTurns(planned.id);
-      expect(harness.generate).toHaveBeenCalledTimes(3);
-      expect(screen.queryByText("这是一段乱序返回但已经完成计费的正文。")).not.toBeInTheDocument();
+      expect(harness.generate).toHaveBeenCalledTimes(1);
+      expect(
+        screen.queryByText("这是一段等待结束后才返回但已经完成计费的正文。"),
+      ).not.toBeInTheDocument();
 
       await user.click(screen.getByRole("button", { name: "返回创作首页" }));
       await user.click(await screen.findByRole("button", { name: "继续这次构思" }));
-      expect(screen.getByText("这是一段乱序返回但已经完成计费的正文。")).toBeVisible();
-      expect(screen.getAllByText("结果待核对")).toHaveLength(2);
-      expect(screen.getByText("结果需要核对")).toBeVisible();
-      expect(screen.getByRole("button", { name: "换一批" })).toBeEnabled();
-      expect(harness.generate).toHaveBeenCalledTimes(3);
-      expect(harness.cancelGeneration).toHaveBeenCalledTimes(3);
+      expect(screen.getByText("这是一段等待结束后才返回但已经完成计费的正文。")).toBeVisible();
+      expect(screen.getAllByText("请求可能已经发出，暂时无法确认结果")).toHaveLength(1);
+      const retryButtonName = cancelOutcome === true ? "重新生成一个开头" : "换一批";
+      expect(screen.getByRole("button", { name: retryButtonName })).toBeEnabled();
+      expect(harness.generate).toHaveBeenCalledTimes(1);
+      expect(harness.cancelGeneration).toHaveBeenCalledTimes(1);
 
       const turns = await harness.runtime.creativeJourneys.listTurns(planned.id);
       expect(turns).toEqual(turnsAfterLateResult);
       expect(turns.at(-1)?.snapshot.status).toBe("review");
 
-      await user.click(screen.getByRole("button", { name: "换一批" }));
-      await confirmOpeningProviderAction(user, 3);
-      await waitFor(() => expect(harness.generate).toHaveBeenCalledTimes(6));
+      harness.generate.mockImplementation(({ generationId }) =>
+        Promise.resolve({
+          text: `新批次 ${generationId} 已安全返回。`,
+          usage: null,
+        }),
+      );
+      await user.click(screen.getByRole("button", { name: retryButtonName }));
+      const retryRequestCount = cancelOutcome === true ? 1 : 3;
+      await confirmOpeningProviderAction(user, retryRequestCount);
+      await waitFor(() => expect(harness.generate).toHaveBeenCalledTimes(1 + retryRequestCount));
       const history = screen.getByRole("region", { name: "较早请求返回的结果" });
-      expect(within(history).getAllByText("结果待核对")).toHaveLength(2);
-      expect(within(history).getByText("结果需要核对")).toBeVisible();
+      expect(within(history).getAllByText("请求可能已经发出，暂时无法确认结果")).toHaveLength(1);
       expect(
-        within(history).getAllByText("已向所选服务发送，但结果无法确认；系统不会自动再次发送。"),
-      ).toHaveLength(2);
+        within(history).queryByText("已向所选服务发送，但结果无法确认；系统不会自动再次发送。"),
+      ).not.toBeInTheDocument();
       expect(
         within(history).getByText(
           "这份文字在等待结束后才返回，只保存在历史记录中，不能直接选择或写入正文。",
@@ -3572,6 +4062,70 @@ describe("one-sentence idea journey", () => {
     },
     30_000,
   );
+
+  it("persists the next one-opening choice across remount and discloses at most one new call", async () => {
+    const harness = createTauriIdeaRuntime(false);
+    const user = userEvent.setup();
+    const first = renderJourney(harness.runtime);
+    await connectOllamaForAiOpening(user);
+    harness.generate.mockClear();
+    harness.generate.mockImplementation(() => new Promise(() => undefined));
+
+    await user.type(
+      screen.getByRole("textbox", { name: "一句话灵感" }),
+      "一座只在退潮时出现的车站，每晚都送走同一个乘客。",
+    );
+    await user.click(screen.getByRole("button", { name: "生成第一段" }));
+    await confirmOpeningProviderAction(user, 3);
+    await waitFor(() => expect(harness.generate).toHaveBeenCalledTimes(1));
+    const [planned] = await harness.runtime.creativeJourneys.listActive("idea");
+    if (planned === undefined) throw new Error("单方案偏好测试没有保存首批旅程。");
+    const historicalRequestIds = (
+      planned.snapshot.openingSuggestions as readonly Readonly<{ id: string }>[]
+    ).map(({ id }) => id);
+    expect(historicalRequestIds).toHaveLength(3);
+
+    await user.click(screen.getByRole("button", { name: "改为只生成一个" }));
+    const reduceDialog = await screen.findByRole("dialog", { name: "改为只生成一个" });
+    await user.click(within(reduceDialog).getByRole("button", { name: "结束本批并改为一个" }));
+    expect(await screen.findByText("本批请求已结束；下一次只生成一个开头。")).toBeVisible();
+    const persistedPreference = await harness.runtime.creativeJourneys.findById(planned.id);
+    expect(persistedPreference?.snapshot.nextOpeningRequestCount).toBe(1);
+
+    first.unmount();
+    renderJourney(harness.runtime);
+    await user.click(await screen.findByRole("button", { name: "继续这次构思" }));
+    expect(await screen.findByRole("button", { name: "重新生成一个开头" })).toBeEnabled();
+    expect(harness.generate).toHaveBeenCalledTimes(1);
+    harness.generate.mockClear();
+
+    await user.click(screen.getByRole("button", { name: "重新生成一个开头" }));
+    const confirmation = await screen.findByRole("dialog");
+    expect(
+      within(confirmation).getByRole("button", { name: "确认并发送最多 1 个生成请求" }),
+    ).toBeEnabled();
+    expect(harness.generate).not.toHaveBeenCalled();
+    await user.click(
+      within(confirmation).getByRole("button", { name: "确认并发送最多 1 个生成请求" }),
+    );
+
+    await waitFor(() => expect(harness.generate).toHaveBeenCalledTimes(1));
+    expect(harness.generate.mock.calls[0]?.[0].config.retryLimit).toBe(0);
+    const restarted = await harness.runtime.creativeJourneys.findById(planned.id);
+    const restartedSuggestions = restarted?.snapshot.openingSuggestions as
+      readonly Readonly<{ id: string }>[] | undefined;
+    const restartedHistory = restarted?.snapshot.openingResultHistory as
+      readonly Readonly<{ id: string }>[] | undefined;
+    expect(restartedSuggestions).toHaveLength(1);
+    expect(harness.generate.mock.calls[0]?.[0].generationId).toBe(restartedSuggestions?.[0]?.id);
+    expect(restartedHistory?.map(({ id }) => id)).toEqual(
+      expect.arrayContaining(historicalRequestIds),
+    );
+    expect(readOpeningJourneyRun(restarted?.snapshot.openingRun)).toMatchObject({
+      requestIds: [restartedSuggestions?.[0]?.id],
+      autoRetryCount: 0,
+    });
+  }, 30_000);
 
   it("archives an interrupted old batch slot before replacement and ignores its late completion", async () => {
     const harness = createTauriIdeaRuntime(false);
@@ -3593,7 +4147,7 @@ describe("one-sentence idea journey", () => {
     );
     await user.click(screen.getByRole("button", { name: "生成第一段" }));
     await confirmOpeningProviderAction(user, 3);
-    await waitFor(() => expect(harness.generate).toHaveBeenCalledTimes(3));
+    await waitFor(() => expect(harness.generate).toHaveBeenCalledTimes(1));
     const oldRequestId = harness.generate.mock.calls[0]?.[0].generationId;
     const active = (await harness.runtime.creativeJourneys.listActive("idea"))[0];
     if (active === undefined || oldRequestId === undefined) {
@@ -3606,13 +4160,15 @@ describe("one-sentence idea journey", () => {
     await waitFor(() => expect(screen.getByText(/生成仍在进行，1 个方案尚未返回/u)).toBeVisible());
     expect(harness.cancelGeneration).not.toHaveBeenCalled();
     await user.click(screen.getByRole("button", { name: "结束未完成请求" }));
-    await waitFor(() => expect(screen.getByText("结果待核对")).toBeVisible());
+    await waitFor(() =>
+      expect(screen.getByText("请求可能已经发出，暂时无法确认结果")).toBeVisible(),
+    );
     expect(harness.cancelGeneration).toHaveBeenCalledOnce();
     expect(harness.cancelGeneration).toHaveBeenCalledWith(oldRequestId);
     await waitFor(() => expect(screen.getByRole("button", { name: "换一批" })).toBeEnabled());
     await user.click(screen.getByRole("button", { name: "换一批" }));
     await confirmOpeningProviderAction(user, 3);
-    await waitFor(() => expect(harness.generate).toHaveBeenCalledTimes(6));
+    await waitFor(() => expect(harness.generate).toHaveBeenCalledTimes(4));
     await screen.findByRole("heading", { name: "方案 3" });
     const replacement = await harness.runtime.creativeJourneys.findById(active.id);
     const replacementSelection = replacement?.snapshot.selectedOpeningId;
@@ -3640,7 +4196,7 @@ describe("one-sentence idea journey", () => {
       expect(latest?.snapshot.selectedOpeningId).toBe(replacementSelection);
       expect(latest?.snapshot.preview).toBe(replacementPreview);
     });
-    expect(harness.generate).toHaveBeenCalledTimes(6);
+    expect(harness.generate).toHaveBeenCalledTimes(4);
     expect(screen.queryByText("旧批次结束后才返回的已计费正文。")).not.toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "返回创作首页" }));
     await user.click(await screen.findByRole("button", { name: "继续这次构思" }));
@@ -4087,7 +4643,7 @@ describe("one-sentence idea journey", () => {
     );
     await user.click(screen.getByRole("button", { name: "换一批" }));
     await confirmOpeningProviderAction(user, 3);
-    await waitFor(() => expect(harness.generate).toHaveBeenCalledTimes(3));
+    await waitFor(() => expect(harness.generate).toHaveBeenCalledTimes(1));
     const requestId = harness.generate.mock.calls[0]?.[0].generationId;
     const active = (await harness.runtime.creativeJourneys.listActive("idea"))[0];
     if (active === undefined || requestId === undefined) {
@@ -4100,13 +4656,15 @@ describe("one-sentence idea journey", () => {
     await waitFor(() => expect(screen.getByText(/生成仍在进行，1 个方案尚未返回/u)).toBeVisible());
     expect(harness.cancelGeneration).not.toHaveBeenCalled();
     await user.click(screen.getByRole("button", { name: "结束未完成请求" }));
-    await waitFor(() => expect(screen.getByText("结果待核对")).toBeVisible());
+    await waitFor(() =>
+      expect(screen.getByText("请求可能已经发出，暂时无法确认结果")).toBeVisible(),
+    );
     expect(harness.cancelGeneration).toHaveBeenCalledTimes(1);
     expect(harness.cancelGeneration).toHaveBeenCalledWith(requestId);
     await waitFor(() => expect(screen.getByRole("button", { name: "换一批" })).toBeEnabled());
     await user.click(screen.getByRole("button", { name: "换一批" }));
     await confirmOpeningProviderAction(user, 3);
-    await waitFor(() => expect(harness.generate).toHaveBeenCalledTimes(6));
+    await waitFor(() => expect(harness.generate).toHaveBeenCalledTimes(4));
     const alternativeChoice = screen.getAllByRole("button", {
       name: /^选择方案 \d+$/u,
     })[0];
@@ -4138,13 +4696,13 @@ describe("one-sentence idea journey", () => {
       expect(latest?.snapshot.selectedOpeningId).toBe(selectedId);
       expect(latest?.snapshot.preview).toBe(selectedPreview);
     });
-    expect(harness.generate).toHaveBeenCalledTimes(6);
+    expect(harness.generate).toHaveBeenCalledTimes(4);
 
     await user.click(screen.getByRole("button", { name: "返回创作首页" }));
     await user.click(await screen.findByRole("button", { name: "继续这次构思" }));
     expect(await screen.findByText("较早请求返回的结果")).toBeVisible();
     expect(screen.getByText("这是一份结束等待后才返回、已经计费的正文。")).toBeVisible();
-    expect(screen.getByText("结果需要核对")).toBeVisible();
+    expect(screen.getByText("请求可能已经发出，暂时无法确认结果")).toBeVisible();
     const reloaded = await harness.runtime.creativeJourneys.findById(active.id);
     expect(reloaded?.snapshot.selectedOpeningId).toBe(selectedId);
     expect(reloaded?.snapshot.preview).toBe(selectedPreview);
@@ -4397,7 +4955,7 @@ describe("one-sentence idea journey", () => {
 
     await user.click(await screen.findByRole("button", { name: "继续这次构思" }));
     expect(await screen.findByText("这是旧版本保存的一段开头。")).toBeVisible();
-    expect(screen.getByText("1/3 可用")).toBeVisible();
+    expect(screen.getByText("1/1 可用")).toBeVisible();
     expect(screen.queryByText("有一条旧构思暂时无法读取")).not.toBeInTheDocument();
   });
 
@@ -4454,6 +5012,29 @@ describe("one-sentence idea journey", () => {
 
 function createTauriIdeaRuntime(failSeedOnce: boolean) {
   const base = createDevelopmentRuntime(window.localStorage);
+  const publishConnectionCommit = base.modelHub.publishConnectionCommit.bind(base.modelHub);
+  vi.spyOn(base.modelHub, "publishConnectionCommit").mockImplementation(async (input) => {
+    const published = await publishConnectionCommit(input);
+    for (const catalogEntry of published.catalog) {
+      await base.modelHub.recordCapabilityScan({
+        scanId: base.ids.next(),
+        catalogEntryId: catalogEntry.id,
+        scanKind: "provider_metadata",
+        status: "succeeded",
+        evidenceVersion: "controlled-text-gateway-v1",
+        evidence: [
+          {
+            id: base.ids.next(),
+            capability: "text_generation",
+            verdict: "supported",
+            evidenceSource: "provider_metadata",
+            evidenceSummary: "合成测试网关明确声明为纯文字生成模型。",
+          },
+        ],
+      });
+    }
+    return published;
+  });
   const generate = vi.fn((input: Parameters<NativeModelGatewayClient["generate"]>[0]) =>
     Promise.resolve({
       text: input.messages.at(-1)?.content.includes("只回复：OK")
@@ -4462,7 +5043,9 @@ function createTauriIdeaRuntime(failSeedOnce: boolean) {
       usage: null,
     }),
   );
-  const cancelGeneration = vi.fn(() => Promise.resolve(true));
+  const cancelGeneration = vi.fn<(generationId: string) => Promise<boolean>>(() =>
+    Promise.resolve(true),
+  );
   const modelGateway: NativeModelGatewayClient = {
     available: true,
     checkConnection: (config) =>

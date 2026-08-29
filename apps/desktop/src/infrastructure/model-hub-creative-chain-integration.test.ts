@@ -78,6 +78,12 @@ describe("real creative chains use Model Hub routes", () => {
         },
         model: provider.modelId,
       });
+      expect(harness.generate.mock.calls[0]?.[0].messages[0]?.content).toContain(
+        "故事或文章的开篇助手",
+      );
+      expect(harness.generate.mock.calls[0]?.[0].messages[0]?.content).not.toContain(
+        "长篇小说开篇助手",
+      );
       if (provider.providerKind === "anthropic_claude") {
         expect(harness.generate.mock.calls[0]?.[0]).not.toHaveProperty("temperature");
       }
@@ -396,6 +402,72 @@ describe("real creative chains use Model Hub routes", () => {
     ).toBe(true);
   });
 
+  it("dispatches a three-opening batch one slot at a time and exposes each settled result before starting the next", async () => {
+    const harness = createNativeHarness();
+    const chapter = await createChapter(harness.runtime, "");
+    await seedModelHubTextRoute(harness.runtime.modelHub, {
+      task: "book_start_guidance",
+      providerKind: "openai",
+      connectionId: "opening-low-concurrency",
+      catalogEntryId: "opening-low-concurrency-catalog",
+      modelId: "opening-low-concurrency-model",
+    });
+    const requestIds = nextOpeningRequestIds(harness.runtime, 3);
+    const releases = new Map<string, () => void>();
+    let activeProviderCalls = 0;
+    let maximumActiveProviderCalls = 0;
+    harness.generate.mockImplementation(
+      (input) =>
+        new Promise((resolve) => {
+          activeProviderCalls += 1;
+          maximumActiveProviderCalls = Math.max(maximumActiveProviderCalls, activeProviderCalls);
+          releases.set(input.generationId, () => {
+            activeProviderCalls -= 1;
+            resolve({ text: `顺序结果 ${input.generationId}`, usage: null });
+          });
+        }),
+    );
+    const action: CreativeOpeningProviderActionInput = {
+      actionId: "opening-low-concurrency-action",
+      kind: "initial_batch",
+      idea: "三位守夜人分别听见来自不同年代的钟声。",
+      projectContext: { projectId: chapter.projectId, chapterId: chapter.id },
+      requestIds,
+    };
+    const disclosure = await prepareCreativeOpeningProviderAction(harness.runtime, action);
+    const settledRequestIds: string[] = [];
+    const execution = executeCreativeOpeningProviderAction(harness.runtime, {
+      ...action,
+      humanConfirmed: true,
+      disclosureFingerprint: disclosure.fingerprint,
+      onResult: (result) => {
+        settledRequestIds.push(result.requestId);
+      },
+    });
+
+    await vi.waitFor(() => expect(harness.generate).toHaveBeenCalledTimes(1));
+    expect(harness.generate.mock.calls[0]?.[0].generationId).toBe(requestIds[0]);
+    expect(settledRequestIds).toEqual([]);
+
+    releases.get(requestIds[0] ?? "")?.();
+    await vi.waitFor(() => expect(settledRequestIds).toEqual(requestIds.slice(0, 1)));
+    await vi.waitFor(() => expect(harness.generate).toHaveBeenCalledTimes(2));
+    expect(harness.generate.mock.calls[1]?.[0].generationId).toBe(requestIds[1]);
+
+    releases.get(requestIds[1] ?? "")?.();
+    await vi.waitFor(() => expect(settledRequestIds).toEqual(requestIds.slice(0, 2)));
+    await vi.waitFor(() => expect(harness.generate).toHaveBeenCalledTimes(3));
+    expect(harness.generate.mock.calls[2]?.[0].generationId).toBe(requestIds[2]);
+
+    releases.get(requestIds[2] ?? "")?.();
+    await expect(execution).resolves.toHaveLength(3);
+    expect(settledRequestIds).toEqual(requestIds);
+    expect(maximumActiveProviderCalls).toBe(1);
+    expect(harness.generate.mock.calls.every(([request]) => request.config.retryLimit === 0)).toBe(
+      true,
+    );
+  });
+
   it("keeps all three provider slots independent when one local result callback rejects", async () => {
     const harness = createNativeHarness();
     const chapter = await createChapter(harness.runtime, "");
@@ -640,8 +712,9 @@ describe("real creative chains use Model Hub routes", () => {
         () => null,
         (cause: unknown) => cause,
       );
+      await vi.waitFor(() => expect(onResult).toHaveBeenCalledTimes(2));
+      await vi.advanceTimersByTimeAsync(CREATIVE_OPENING_SLOT_SETTLEMENT_TIMEOUT_MS);
       await vi.waitFor(() => expect(onResult).toHaveBeenCalledTimes(3));
-
       await vi.advanceTimersByTimeAsync(CREATIVE_OPENING_SLOT_SETTLEMENT_TIMEOUT_MS);
       const cause = await terminal;
 
@@ -871,6 +944,9 @@ describe("real creative chains use Model Hub routes", () => {
       requestIds,
     };
     const disclosure = await prepareCreativeOpeningProviderAction(harness.runtime, action);
+    harness.generate.mockImplementation((input) =>
+      Promise.resolve({ text: `预留独立结果 ${input.generationId}`, usage: null }),
+    );
     const originalStartInvocation = harness.runtime.modelHub.startInvocation.bind(
       harness.runtime.modelHub,
     );
@@ -896,29 +972,38 @@ describe("real creative chains use Model Hub routes", () => {
       disclosureFingerprint: disclosure.fingerprint,
       onInvocationPrepared,
     });
-    const rejection = expect(pending).rejects.toMatchObject({ code: "MODEL_TIMEOUT" });
+    const terminal = pending.then(
+      () => null,
+      (cause: unknown) => cause,
+    );
     try {
       await vi.waitFor(() => expect(reservationCount).toBe(2));
       await vi.advanceTimersByTimeAsync(CREATIVE_OPENING_SLOT_SETTLEMENT_TIMEOUT_MS);
-      await rejection;
+      const cause = await terminal;
+      expect(creativeOpeningTimedOutRequestIds(cause)).toEqual(requestIds.slice(1, 2));
     } finally {
       vi.useRealTimers();
     }
 
-    expect(harness.generate).not.toHaveBeenCalled();
-    expect(onInvocationPrepared).toHaveBeenCalledTimes(1);
-    await expect(
-      harness.runtime.modelHub.findInvocation(requestIds[0] ?? "missing"),
-    ).resolves.toMatchObject({
-      status: "failed",
-      providerDispatchStartedAt: null,
-    });
+    expect(harness.generate).toHaveBeenCalledTimes(2);
+    expect(harness.generate.mock.calls.map(([input]) => input.generationId)).toEqual([
+      requestIds[0],
+      requestIds[2],
+    ]);
+    expect(onInvocationPrepared).toHaveBeenCalledTimes(2);
+    const firstCompletedInvocation = await harness.runtime.modelHub.findInvocation(
+      requestIds[0] ?? "missing",
+    );
+    expect(firstCompletedInvocation).toMatchObject({ status: "succeeded" });
+    expect(typeof firstCompletedInvocation?.providerDispatchStartedAt).toBe("string");
     await expect(
       harness.runtime.modelHub.findInvocation(requestIds[1] ?? "missing"),
     ).resolves.toBeNull();
-    await expect(
-      harness.runtime.modelHub.findInvocation(requestIds[2] ?? "missing"),
-    ).resolves.toBeNull();
+    const thirdCompletedInvocation = await harness.runtime.modelHub.findInvocation(
+      requestIds[2] ?? "missing",
+    );
+    expect(thirdCompletedInvocation).toMatchObject({ status: "succeeded" });
+    expect(typeof thirdCompletedInvocation?.providerDispatchStartedAt).toBe("string");
 
     releaseSecondReservation();
     const settledLateReservation = lateReservation.value;
@@ -931,8 +1016,8 @@ describe("real creative chains use Model Hub routes", () => {
         harness.runtime.modelHub.findInvocation(requestIds[1] ?? "missing"),
       ).resolves.toMatchObject({ status: "failed", providerDispatchStartedAt: null });
     });
-    expect(onInvocationPrepared).toHaveBeenCalledTimes(1);
-    expect(harness.generate).not.toHaveBeenCalled();
+    expect(onInvocationPrepared).toHaveBeenCalledTimes(2);
+    expect(harness.generate).toHaveBeenCalledTimes(2);
   });
 
   it("rejects route, cost and request-source drift against the confirmed fingerprint before dispatch", async () => {

@@ -269,6 +269,10 @@ export function WorkspacePage() {
       ? current
       : latest;
   }, null);
+  const latestChapterNumber =
+    latestChapter === null
+      ? null
+      : activeChapters.findIndex((candidate) => candidate.id === latestChapter.id) + 1;
   const totalCharacters = activeChapters.reduce(
     (total, chapter) => total + chapter.content.length,
     0,
@@ -363,7 +367,7 @@ export function WorkspacePage() {
               <ErrorState
                 title={normalizedError.title}
                 description={`${normalizedError.description}${
-                  loadSupportId === null ? "" : ` 支持编号：${loadSupportId}。`
+                  loadSupportId === null ? "" : ` 问题编号（联系支持时提供）：${loadSupportId}。`
                 }`}
                 primaryAction={{ label: "重试", onClick: () => void load() }}
               />
@@ -387,7 +391,9 @@ export function WorkspacePage() {
               className="button-link workspace-resume__action"
               to={`/projects/${latestChapter.projectId}/chapters/${latestChapter.id}`}
             >
-              {readonly ? "继续阅读" : "继续写作"}
+              {readonly
+                ? `继续阅读第 ${String(latestChapterNumber)} 章《${latestChapter.title}》`
+                : `继续写第 ${String(latestChapterNumber)} 章《${latestChapter.title}》`}
             </Link>
           </section>
         )}
@@ -463,7 +469,9 @@ export function WorkspacePage() {
                       className="button-link"
                       to={`/projects/${chapter.projectId}/chapters/${chapter.id}`}
                     >
-                      {readonly ? "阅读" : "继续写作"}
+                      {readonly
+                        ? `阅读第 ${String(index + 1)} 章《${chapter.title}》`
+                        : `继续写第 ${String(index + 1)} 章《${chapter.title}》`}
                     </Link>
                   </div>
                 </CardContent>

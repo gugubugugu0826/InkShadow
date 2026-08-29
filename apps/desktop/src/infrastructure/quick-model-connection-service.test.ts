@@ -4,6 +4,7 @@ import {
   configureQuickBookStartRoute,
   connectQuickModelProvider,
   inspectQuickBookStartRouteProbe,
+  listQuickBookStartTextCatalogEntries,
   QUICK_MODEL_PROVIDERS,
   QuickModelConnectionError,
   selectQuickBookStartCatalogEntry,
@@ -70,7 +71,7 @@ describe("quick Model Hub connection", () => {
       publishConnectionCommit.mock.invocationCallOrder[0] ?? Number.MAX_SAFE_INTEGER,
     );
     expect(connected.catalog.map(({ providerModelId }) => providerModelId)).toEqual([
-      "novel-text-model",
+      "gpt-5.6-sol",
     ]);
     const serializedMetadata = JSON.stringify({
       connections: await harness.runtime.modelHub.listConnections(),
@@ -475,6 +476,75 @@ describe("quick Model Hub connection", () => {
     await expect(selectQuickBookStartCatalogEntry(harness.runtime, connected)).resolves.toBeNull();
   });
 
+  it("keeps vector and unknown-capability models out of the quick text-opening catalog", async () => {
+    const harness = createHarness({
+      models: [
+        { id: "text-embedding-3-small", displayName: "text-embedding-3-small" },
+        { id: "unknown-account-model", displayName: "Unknown account model" },
+        { id: "gpt-5.6-sol", displayName: "GPT-5.6 Sol" },
+      ],
+    });
+    const connected = await connectQuickModelProvider(harness.runtime, {
+      provider: "openai",
+      secret: "test-text-filter-secret",
+    });
+
+    const textCatalog = await listQuickBookStartTextCatalogEntries(harness.runtime, connected);
+
+    expect(textCatalog.map(({ providerModelId }) => providerModelId)).toEqual(["gpt-5.6-sol"]);
+    await expect(
+      selectQuickBookStartCatalogEntry(harness.runtime, connected),
+    ).resolves.toMatchObject({ providerModelId: "gpt-5.6-sol" });
+    expect(harness.generate).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["text-embedding-3-small", "QUICK_MODEL_TEXT_CAPABILITY_MISMATCH"],
+    ["unknown-account-model", "QUICK_MODEL_TEXT_CAPABILITY_UNKNOWN"],
+  ] as const)(
+    "rejects an explicitly selected non-text model %s before any generation probe",
+    async (modelId, code) => {
+      const harness = createHarness({ models: [{ id: modelId, displayName: modelId }] });
+      const startInvocation = vi.spyOn(harness.runtime.modelHub, "startInvocation");
+      const connected = await connectQuickModelProvider(harness.runtime, {
+        provider: "openai",
+        secret: "test-non-text-model-secret",
+      });
+      const catalogEntry = connected.catalog[0];
+      if (catalogEntry === undefined) throw new Error("测试目录缺少所选模型");
+
+      await expect(
+        inspectQuickBookStartRouteProbe(harness.runtime, {
+          connectionId: connected.connection.id,
+          catalogEntryId: catalogEntry.id,
+        }),
+      ).rejects.toMatchObject({
+        code,
+        failureStage: "probe_preparation",
+        providerDispatchCount: 0,
+      });
+      await expect(
+        configureQuickBookStartRoute(harness.runtime, {
+          connectionId: connected.connection.id,
+          catalogEntryId: catalogEntry.id,
+          targetSnapshot: { connection: connected.connection, catalogEntry },
+          invocationId: harness.runtime.ids.next(),
+          humanConfirmed: true,
+          disclosureFingerprint: "explicit-non-text-selection",
+        }),
+      ).rejects.toMatchObject({
+        code,
+        failureStage: "probe_preparation",
+        providerDispatchCount: 0,
+      });
+      expect(harness.generate).not.toHaveBeenCalled();
+      expect(startInvocation).not.toHaveBeenCalled();
+      await expect(
+        harness.runtime.modelHub.findTaskRoute("book_start_guidance"),
+      ).resolves.toBeNull();
+    },
+  );
+
   it("reports the authoritative route for review when post-save validation and rollback both fail", async () => {
     const harness = createHarness();
     const connected = await connectQuickModelProvider(harness.runtime, {
@@ -772,6 +842,23 @@ describe("quick Model Hub connection", () => {
       authenticationMode: "none",
       connectionStatus: "ready",
     });
+    const localTextCatalogEntry = connected.catalog[0];
+    if (localTextCatalogEntry === undefined) throw new Error("测试目录缺少本地文字模型");
+    await harness.runtime.modelHub.recordCapabilityScan({
+      scanId: "verified-local-text-scan",
+      catalogEntryId: localTextCatalogEntry.id,
+      scanKind: "user_review",
+      status: "succeeded",
+      evidenceVersion: "verified-local-text-v1",
+      evidence: [
+        {
+          id: "verified-local-text-evidence",
+          capability: "text_generation",
+          verdict: "supported",
+          evidenceSource: "user_confirmed",
+        },
+      ],
+    });
     const ready = await configureConfirmedQuickBookStartRoute(harness.runtime, {
       connectionId: connected.connection.id,
       catalogEntryId: connected.catalog[0]?.id ?? "missing",
@@ -830,7 +917,7 @@ describe("quick Model Hub connection", () => {
       secret: "test-qwen-key",
       region: "singapore",
       workspaceId: "workspace-demo",
-      manualModelId: "qwen-account-model",
+      manualModelId: "qwen3.7-plus",
     });
 
     expect(harness.checkConnection).toHaveBeenCalledOnce();
@@ -842,9 +929,9 @@ describe("quick Model Hub connection", () => {
     });
     expect(disclosure).toMatchObject({
       connectionDisplayName: "阿里云百炼 / Qwen",
-      modelId: "qwen-account-model",
+      modelId: "qwen3.7-plus",
       maximumProviderCalls: 1,
-      sends: ["固定短句“只回复：OK”", "最多 64 个输出内容额度"],
+      sends: ["固定短句“只回复：OK”", "AI 最多返回 64 个文字量单位（不是金额）"],
       automaticRetryCount: 0,
       estimatedMaximumCostMicros: null,
       dataDestination: "remote",
@@ -859,7 +946,7 @@ describe("quick Model Hub connection", () => {
     });
     expect(harness.generate).toHaveBeenCalledOnce();
     expect(harness.generate.mock.calls[0]?.[0]).toMatchObject({
-      model: "qwen-account-model",
+      model: "qwen3.7-plus",
       messages: [{ role: "user", content: "只回复：OK" }],
       dispatchScope: { kind: "non_project", reason: "connection_probe" },
       maxOutputTokens: 64,
@@ -874,7 +961,7 @@ describe("quick Model Hub connection", () => {
     });
     expect(connected.catalog).toEqual([
       expect.objectContaining({
-        providerModelId: "qwen-account-model",
+        providerModelId: "qwen3.7-plus",
         catalogSource: "manual",
       }),
     ]);
@@ -1116,12 +1203,14 @@ function createHarness(
       });
     },
   );
-  const listModels = vi.fn((config: Parameters<NativeModelGatewayClient["listModels"]>[0]) =>
-    Promise.resolve({
-      provider: config.provider,
-      models: input.models ?? [{ id: "novel-text-model", displayName: "Novel Text Model" }],
-    }),
-  );
+  const listModels = vi.fn((config: Parameters<NativeModelGatewayClient["listModels"]>[0]) => {
+    const defaultModels = config.baseUrl.includes("api.deepseek.com")
+      ? [{ id: "deepseek-v4-flash", displayName: "DeepSeek V4 Flash" }]
+      : config.baseUrl.includes("127.0.0.1") || config.baseUrl.includes("localhost")
+        ? [{ id: "llama3.2", displayName: "Llama 3.2" }]
+        : [{ id: "gpt-5.6-sol", displayName: "GPT-5.6 Sol" }];
+    return Promise.resolve({ provider: config.provider, models: input.models ?? defaultModels });
+  });
   const generate = vi.fn<NativeModelGatewayClient["generate"]>(async (request) => {
     if (input.rejectBeforeNativeInvocationReceipt === true) {
       throw Object.assign(new Error("native preparation rejected"), {

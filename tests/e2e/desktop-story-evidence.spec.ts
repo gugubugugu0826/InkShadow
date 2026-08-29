@@ -212,7 +212,10 @@ async function createChapter(page: Page, title: string): Promise<void> {
   const dialog = page.getByRole("dialog", { name: "新建章节" });
   await dialog.getByRole("textbox", { name: "章节标题" }).fill(title);
   await dialog.getByRole("button", { name: "创建章节" }).click();
-  await page.getByLabel(title).getByRole("link", { name: "继续写作", exact: true }).click();
+  await page
+    .getByLabel(title)
+    .getByRole("link", { name: `继续写第 1 章《${title}》`, exact: true })
+    .click();
   await expect(page.getByRole("heading", { level: 1, name: title })).toBeVisible();
 }
 

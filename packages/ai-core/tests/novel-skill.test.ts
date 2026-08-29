@@ -1,13 +1,16 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  MAX_NOVEL_SKILLS_PER_INVOCATION,
   NOVEL_SKILL_EVALUATION_FIXTURES,
+  compileFixedNovelSkillEvaluationArm,
   compileNovelSkills,
   createCoreNovelSkillDefinitions,
   createNovelSkillEvaluationExecutionPlan,
   createNovelSkillEvaluationPlan,
   estimateNovelSkillPromptTokens,
   evaluateNovelSkillAbEvidence,
+  isFixedNovelSkillEvaluationConfiguration,
   sealNovelSkillDefinition,
   validateNovelSkillConfigurationSnapshot,
   validateNovelSkillInvocationItem,
@@ -157,6 +160,50 @@ describe("Novel Skill registry and compiler", () => {
     ).rejects.toMatchObject({ code: "NOVEL_SKILL_CONFLICT" });
   });
 
+  it("records deterministic conflict omissions for skills already enabled in a project", async () => {
+    const higher = await sealNovelSkillDefinition(
+      draft({
+        skillId: "custom.project_higher",
+        kind: "custom",
+        ownerScope: "user",
+        precedence: 550,
+        exclusiveGroup: "project_method",
+      }),
+    );
+    const lower = await sealNovelSkillDefinition(
+      draft({
+        skillId: "custom.project_lower",
+        kind: "custom",
+        ownerScope: "user",
+        precedence: 450,
+        exclusiveGroup: "project_method",
+      }),
+    );
+    const bindings = [
+      projectBinding(higher.skillId, higher.version, "manual"),
+      projectBinding(lower.skillId, lower.version, "manual"),
+    ];
+
+    const compiled = await compileNovelSkills({
+      projectId: PROJECT_ID,
+      taskType: "continuation",
+      invocationMode: "draft",
+      maximumSkillTokens: 1_000,
+      genreTags: [],
+      explicitSkillIds: [lower.skillId, higher.skillId],
+      availableContextLayers: ["current_task"],
+      allowExperimental: false,
+      definitions: [lower, higher],
+      bindings,
+    });
+
+    expect(compiled.selectedDefinitions.map(({ skillId }) => skillId)).toEqual([higher.skillId]);
+    expect(compiled.items.find(({ skillId }) => skillId === lower.skillId)).toMatchObject({
+      included: false,
+      discardedReason: "conflict",
+    });
+  });
+
   it("gives an explicit rule priority and rejects two explicit rule disagreements", async () => {
     const automatic = await sealNovelSkillDefinition(
       draft({
@@ -267,6 +314,107 @@ describe("Novel Skill registry and compiler", () => {
     expect(estimateNovelSkillPromptTokens(exact)).toBeLessThanOrEqual(
       exact.configuration.maximumSkillTokens,
     );
+  });
+
+  it("records project-enabled skills omitted by the skill count and text budgets", async () => {
+    const definitions = await Promise.all(
+      Array.from(
+        { length: MAX_NOVEL_SKILLS_PER_INVOCATION + 2 },
+        async (_, index) =>
+          await sealNovelSkillDefinition(
+            draft({
+              skillId: `custom.project_count_${String(index + 1)}`,
+              kind: "custom",
+              ownerScope: "user",
+              precedence: 550 - index,
+            }),
+          ),
+      ),
+    );
+    const bindings = definitions.map((definition) =>
+      projectBinding(definition.skillId, definition.version, "manual"),
+    );
+    const base = {
+      projectId: PROJECT_ID,
+      taskType: "continuation" as const,
+      invocationMode: "draft" as const,
+      genreTags: [] as const,
+      explicitSkillIds: definitions.map(({ skillId }) => skillId),
+      availableContextLayers: ["current_task"] as const,
+      allowExperimental: false,
+      definitions,
+      bindings,
+    };
+    const countLimited = await compileNovelSkills({
+      ...base,
+      maximumSkillTokens: 100_000,
+    });
+    expect(countLimited.selectedDefinitions).toHaveLength(MAX_NOVEL_SKILLS_PER_INVOCATION);
+    expect(
+      countLimited.items.filter(
+        ({ included, discardedReason }) =>
+          !included && discardedReason === "token_budget_exhausted",
+      ),
+    ).toHaveLength(2);
+
+    const textLimited = await compileNovelSkills({
+      ...base,
+      maximumSkillTokens: 1,
+    });
+    expect(textLimited.selectedDefinitions).toHaveLength(0);
+    expect(
+      textLimited.items.every(
+        ({ included, discardedReason }) =>
+          !included && discardedReason === "token_budget_exhausted",
+      ),
+    ).toBe(true);
+  });
+
+  it("keeps ordinary explicit selections at six and reserves the wider fixed arm for built-ins", async () => {
+    const definitions = await Promise.all(
+      Array.from(
+        { length: MAX_NOVEL_SKILLS_PER_INVOCATION + 2 },
+        async (_, index) =>
+          await sealNovelSkillDefinition(
+            draft({
+              skillId: `core.fixed_evaluation_${String(index + 1)}`,
+              kind: "core",
+              ownerScope: "builtin",
+              precedence: 550 - index,
+            }),
+          ),
+      ),
+    );
+    const base = {
+      projectId: PROJECT_ID,
+      taskType: "continuation" as const,
+      invocationMode: "draft" as const,
+      maximumSkillTokens: 100_000,
+      genreTags: [] as const,
+      explicitSkillIds: definitions.map(({ skillId }) => skillId),
+      availableContextLayers: ["current_task"] as const,
+      allowExperimental: true,
+      definitions,
+      bindings: [],
+    };
+
+    await expect(compileNovelSkills(base)).rejects.toMatchObject({
+      code: "NOVEL_SKILL_BUDGET_EXCEEDED",
+    });
+    const fixed = await compileFixedNovelSkillEvaluationArm(base);
+    expect(fixed.selectedDefinitions).toHaveLength(MAX_NOVEL_SKILLS_PER_INVOCATION + 2);
+    expect(isFixedNovelSkillEvaluationConfiguration(fixed.configuration)).toBe(true);
+
+    const userDefinition = await sealNovelSkillDefinition(
+      draft({ skillId: "custom.not_a_fixed_arm", kind: "custom", ownerScope: "user" }),
+    );
+    await expect(
+      compileFixedNovelSkillEvaluationArm({
+        ...base,
+        explicitSkillIds: [...base.explicitSkillIds, userDefinition.skillId],
+        definitions: [...definitions, userDefinition],
+      }),
+    ).rejects.toMatchObject({ code: "NOVEL_SKILL_INVALID" });
   });
 
   it("rejects non-boolean values and malformed containers at runtime", async () => {

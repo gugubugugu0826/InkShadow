@@ -80,7 +80,7 @@ describe("ProjectChecksPage", () => {
 
     await waitFor(() => expect(findById).toHaveBeenCalledWith(missingProjectId));
     expect(screen.queryByText("还没有可检查的章节")).not.toBeInTheDocument();
-    expect(await screen.findByText(/支持编号：UI-/u)).toBeVisible();
+    expect(await screen.findByText(/问题编号：UI-.*联系支持时提供/u)).toBeVisible();
   });
 
   it("records a redacted support incident when project authority cannot be read", async () => {
@@ -101,7 +101,7 @@ describe("ProjectChecksPage", () => {
 
     renderPage(runtime, projectId);
 
-    const supportNotice = await screen.findByText(/支持编号：UI-/u);
+    const supportNotice = await screen.findByText(/问题编号：UI-.*联系支持时提供/u);
     const supportId = /UI-[0-9]{14}-[0-9]{3,}/u.exec(supportNotice.textContent)?.[0];
     if (supportId === undefined) throw new Error("检查页没有生成支持编号。");
     const incident = readSafeUiRouteIncidents(runtime).find(
@@ -321,7 +321,7 @@ describe("ProjectChecksPage", () => {
 
     expect(await screen.findByText("本章暂时没有足够证据完成检查")).toBeInTheDocument();
     expect(
-      screen.getByText("本章还没有带原文位置的明确事实，系统不会从语气或暗示中猜测。"),
+      screen.getByText("本章还没有带正文原句和位置的明确事实，系统不会从语气或暗示中猜测。"),
     ).toBeInTheDocument();
     expect(screen.getByText("尚无足够证据")).toBeInTheDocument();
     expect(screen.queryByText(/已发现\s*\d+\s*个问题/u)).not.toBeInTheDocument();
@@ -331,6 +331,34 @@ describe("ProjectChecksPage", () => {
     expect(screen.getByText("普通检查不会向 AI 发送内容")).toBeInTheDocument();
     expect(screen.getByText(/使用页面上方的一致性调查/u)).toBeInTheDocument();
     expect(aiReview).not.toHaveBeenCalled();
+  });
+
+  it("guides the author to review pending settings when deterministic checks lack confirmed facts", async () => {
+    const user = userEvent.setup();
+    const fixture = await seededRuntime(false);
+    const parsedProjectId = parseStoryUuid(fixture.projectId);
+    if (!parsedProjectId.ok) throw parsedProjectId.error;
+    for (let index = 1; index <= 9; index += 1) {
+      unwrap(
+        await fixture.runtime.story.factService.stageUserDraftFact({
+          projectId: parsedProjectId.value,
+          factType: "world_rule",
+          contentText: `待确认设定 ${String(index)}`,
+          actorId: fixture.runtime.story.actorId,
+        }),
+      );
+    }
+
+    renderPage(fixture.runtime, fixture.projectId);
+    await user.click(await screen.findByRole("button", { name: "检查本章" }));
+
+    expect(
+      await screen.findByText("已经找到 9 条待确认设定。确认后可用于确定性检查。"),
+    ).toBeVisible();
+    expect(screen.getByRole("link", { name: "去确认设定" })).toHaveAttribute(
+      "href",
+      `/projects/${fixture.projectId}/story`,
+    );
   });
 
   it("keeps direct checks task-focused and hides professional investigation controls", async () => {

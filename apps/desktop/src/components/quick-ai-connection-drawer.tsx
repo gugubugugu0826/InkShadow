@@ -12,6 +12,7 @@ import {
   configureQuickBookStartRoute,
   connectQuickModelProvider,
   inspectQuickBookStartRouteProbe,
+  listQuickBookStartTextCatalogEntries,
   selectQuickBookStartCatalogEntry,
   type QuickBookStartProbeDisclosure,
   type QuickModelConnectionResult,
@@ -304,7 +305,7 @@ function OpenQuickAiConnectionDrawer({
       : `暂时不能测试连接：${connectionActionBlockers.join("；")}。也可以先不连接，继续开书。`;
   const catalogContinueBlocked = choice === "ai" && selectedCatalogEntryId.length === 0;
   const catalogContinueHelp = automaticTextSelectionUnavailable
-    ? "暂时不能继续：实验性视觉模型不会被自动选作纯文字开书模型。请明确选择已确认支持纯文字的模型；也可以选择“我自己写”或“先看看示例”。"
+    ? "暂时不能继续：当前目录没有已确认可用于纯文字开书的模型。实验性视觉模型不会被自动选作纯文字开书模型，向量模型和能力不明确的模型也不会出现在这里。请到完整模型中心核对能力；也可以选择“我自己写”或“先看看示例”。"
     : "暂时不能继续：请先选择一个开书模型；如果不想使用 AI，可以选择“我自己写”或“先看看示例”。";
 
   async function deleteDiscoveredCredential(discoveryId: string): Promise<void> {
@@ -358,9 +359,11 @@ function OpenQuickAiConnectionDrawer({
           ? {}
           : { discoveredCredentialId: selectedDiscoveredCredentialId }),
       });
-      const selected = await selectQuickBookStartCatalogEntry(runtime, connected);
+      const textCatalog = await listQuickBookStartTextCatalogEntries(runtime, connected);
+      const textConnection = Object.freeze({ ...connected, catalog: textCatalog });
+      const selected = await selectQuickBookStartCatalogEntry(runtime, textConnection);
       setAutomaticTextSelectionUnavailable(selected === null && connected.catalog.length > 0);
-      setResult(connected);
+      setResult(textConnection);
       setSelectedCatalogEntryId(selected?.id ?? "");
       setProbeDisclosure(null);
       setSecret("");
@@ -576,7 +579,7 @@ function OpenQuickAiConnectionDrawer({
         description={
           sharedReadinessSnapshot.failure === null
             ? `${sharedReadiness.description} 已保存连接：${String(sharedReadiness.savedConnectionCount)}；${sharedReadiness.needsRecheck ? "需要重新核对" : "当前证据已核对"}。`
-            : `${sharedReadinessSnapshot.failure.description} 支持编号：${sharedReadinessSnapshot.failure.supportId}。${sharedReadinessSnapshot.failure.recovery}`
+            : `${sharedReadinessSnapshot.failure.description} 问题编号：${sharedReadinessSnapshot.failure.supportId}（联系支持时提供）。${sharedReadinessSnapshot.failure.recovery}`
         }
       />
       {sharedReadinessSnapshot.failure !== null && (
@@ -617,7 +620,7 @@ function OpenQuickAiConnectionDrawer({
             <InlineAlert
               tone="error"
               title="暂时无法检查本机已保存的接口密钥"
-              description={`${credentialDiscoveryFailure.description} 支持编号：${credentialDiscoveryFailure.supportId}`}
+              description={`${credentialDiscoveryFailure.description} 问题编号：${credentialDiscoveryFailure.supportId}（联系支持时提供）`}
             />
           )}
 
@@ -773,7 +776,7 @@ function OpenQuickAiConnectionDrawer({
               label={provider === "volcengine_doubao" ? "模型或接入点编号" : "模型编号"}
               hint={
                 provider === "custom_openai_compatible"
-                  ? "可选；接口没有提供模型目录时填写，墨影会用固定短句验证。"
+                  ? "可选；接口没有提供可用模型列表时填写，墨影会用固定短句验证。"
                   : "从模型服务控制台复制；墨影不会把某个模型名称永久写死。"
               }
               required={needsManualModel}
@@ -855,7 +858,7 @@ function OpenQuickAiConnectionDrawer({
           <InlineAlert
             tone="info"
             title="连接成功 · 已找到模型"
-            description={`连接和模型目录检查已完成，共找到 ${String(result.catalog.length)} 个可用模型；这一步没有发送作品内容，也没有向模型发送生成请求。选择“让 AI 起个头”后，墨影会先展示固定验证的精确范围。`}
+            description={`连接和可用模型检查已完成，共找到 ${String(result.catalog.length)} 个可用模型；这一步没有发送作品内容，也没有向模型发送生成请求。选择“让 AI 起个头”后，墨影会先展示固定验证的精确范围。`}
           />
           <FormField label="开书使用的模型" required>
             {(fieldProps) => (
@@ -903,7 +906,7 @@ function OpenQuickAiConnectionDrawer({
             <InlineAlert
               tone="warning"
               title="发送固定验证前确认"
-              description={`将通过“${probeDisclosure.connectionDisplayName}”的“${probeDisclosure.modelId}”发送固定短句“只回复：OK”，最多 ${String(probeDisclosure.maximumOutputTokens)} 个输出内容额度；最多向模型服务发送 ${String(probeDisclosure.maximumProviderCalls)} 次，自动重试 ${String(probeDisclosure.automaticRetryCount)} 次。${probeDisclosure.dataDestination === "local" ? "验证只在本机运行。" : "验证会发送到所选远程模型服务。"} 不发送作品正文、灵感、设定或接口密钥；当前没有可核验的费用上限，模型服务仍可能收取少量费用。`}
+              description={`将通过“${probeDisclosure.connectionDisplayName}”的“${probeDisclosure.modelId}”发送固定短句“只回复：OK”，AI 最多返回 ${String(probeDisclosure.maximumOutputTokens)} 个文字量单位（这不是金额）；最多向模型服务发送 ${String(probeDisclosure.maximumProviderCalls)} 次，自动重试 ${String(probeDisclosure.automaticRetryCount)} 次。${probeDisclosure.dataDestination === "local" ? "验证只在本机运行。" : "验证会发送到所选远程模型服务。"} 不发送作品正文、灵感、设定或接口密钥；当前没有可核验的费用上限，模型服务仍可能收取少量费用。`}
             />
           )}
         </div>
@@ -916,14 +919,14 @@ function OpenQuickAiConnectionDrawer({
             title={failureTitle}
             description={failure.message}
           />
-          {failure.supportId !== null && <p>支持编号：{failure.supportId}</p>}
+          {failure.supportId !== null && <p>问题编号：{failure.supportId}（联系支持时提供）</p>}
           <p>
             {routeStateRequiresReview
               ? "请到模型中心核对开书设置。系统不会自动验证或改动作品。"
               : probeResultAmbiguous
                 ? "项目、正文和 AI 建议未修改，也不会自动重发；可先跳过，或到模型使用与费用核对记录。"
                 : probePreparationFailed
-                  ? "连接和模型目录仍可用，作品未发送或修改；可查看说明后再试。"
+                  ? "连接和可用模型列表仍可用，作品未发送或修改；可查看说明后再试。"
                   : "项目、正文和 AI 建议未修改；可重试或先跳过。"}
           </p>
           <Link
@@ -987,7 +990,7 @@ function normalizeDrawerError(
   }
   return new QuickModelConnectionError(
     "QUICK_MODEL_CONNECTION_FAILED",
-    "连接检查未完成。请核对模型服务和连接资料；仍失败时使用支持编号排查。",
+    "连接检查未完成。请核对模型服务和连接资料；仍失败时请记下问题编号并联系支持。",
     true,
     fallbackSupportId,
     "connection",

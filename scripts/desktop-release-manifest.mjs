@@ -41,6 +41,10 @@ export const UNSIGNED_RELEASE_CANDIDATE_STEPS = Object.freeze([
     arguments: Object.freeze(["--filter", "@inkshadow/desktop", "tauri:package:unsigned:prebuilt"]),
   }),
   Object.freeze({
+    label: "Windows installer version verification",
+    arguments: Object.freeze(["release:verify:installer-version"]),
+  }),
+  Object.freeze({
     label: "packaged release provenance verification",
     arguments: Object.freeze(["release:verify:unsigned"]),
   }),

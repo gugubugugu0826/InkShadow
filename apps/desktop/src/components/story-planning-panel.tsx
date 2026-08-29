@@ -47,6 +47,8 @@ export interface StoryPlanningPanelProps {
     | "rejectCandidate"
   >;
   readonly disabled?: boolean;
+  readonly onAddChapter?: () => void;
+  readonly onCreateVolume?: () => void;
   readonly onOutlineChanged: () => void | Promise<void>;
 }
 
@@ -58,6 +60,8 @@ interface PlanningPanelMessage {
 
 export function StoryPlanningPanel({
   disabled = false,
+  onAddChapter,
+  onCreateVolume,
   onOutlineChanged,
   outline,
   projectId,
@@ -66,6 +70,10 @@ export function StoryPlanningPanel({
   const outlineSnapshot = useMemo(() => outline.toSnapshot(), [outline]);
   const chapters = useMemo(
     () => outlineSnapshot.nodes.filter(({ kind }) => kind === "chapter"),
+    [outlineSnapshot],
+  );
+  const volumes = useMemo(
+    () => outlineSnapshot.nodes.filter(({ kind }) => kind === "volume"),
     [outlineSnapshot],
   );
   const [task, setTask] = useState<StoryPlanningTask>("outline_planning");
@@ -348,7 +356,7 @@ export function StoryPlanningPanel({
                 disabled={disabled || busyAction !== null}
                 options={[
                   { value: "outline_planning", label: "规划全书故事方向" },
-                  { value: "scene_breakdown", label: "拆解一个章节的场景" },
+                  { value: "scene_breakdown", label: "规划章节场景" },
                 ]}
                 onChange={(event) => {
                   setTask(event.currentTarget.value as StoryPlanningTask);
@@ -359,24 +367,54 @@ export function StoryPlanningPanel({
           </FormField>
 
           {task === "scene_breakdown" && (
-            <FormField label="要拆解的章节" required>
-              {(fieldProps) => (
-                <Select
-                  {...fieldProps}
-                  value={resolvedTargetNodeId}
-                  placeholder={chapters.length === 0 ? "请先添加章节" : "选择章节"}
-                  disabled={disabled || busyAction !== null || chapters.length === 0}
-                  options={chapters.map((chapter) => ({
-                    value: chapter.id,
-                    label: chapter.title,
-                  }))}
-                  onChange={(event) => {
-                    setTargetNodeId(event.currentTarget.value);
-                    setDisclosure(null);
-                  }}
-                />
+            <>
+              <FormField label="要规划的章节" required>
+                {(fieldProps) => (
+                  <Select
+                    {...fieldProps}
+                    value={resolvedTargetNodeId}
+                    placeholder={chapters.length === 0 ? "还没有可用章节" : "选择章节"}
+                    disabled={disabled || busyAction !== null || chapters.length === 0}
+                    options={chapters.map((chapter) => ({
+                      value: chapter.id,
+                      label: chapter.title,
+                    }))}
+                    onChange={(event) => {
+                      setTargetNodeId(event.currentTarget.value);
+                      setDisclosure(null);
+                    }}
+                  />
+                )}
+              </FormField>
+              {chapters.length === 0 && (
+                <div className="story-planning-structure-empty" aria-live="polite">
+                  <strong>还没有可规划的章节</strong>
+                  <p>
+                    {volumes.length === 0 ? "先新建卷，再为它添加章节。" : "为现有卷添加一个章节。"}
+                    创建后会留在这里继续规划章节场景。
+                  </p>
+                  {volumes.length === 0
+                    ? onCreateVolume !== undefined && (
+                        <Button
+                          variant="secondary"
+                          disabled={disabled || busyAction !== null}
+                          onClick={onCreateVolume}
+                        >
+                          新建卷
+                        </Button>
+                      )
+                    : onAddChapter !== undefined && (
+                        <Button
+                          variant="secondary"
+                          disabled={disabled || busyAction !== null}
+                          onClick={onAddChapter}
+                        >
+                          添加章节
+                        </Button>
+                      )}
+                </div>
               )}
-            </FormField>
+            </>
           )}
 
           <FormField
@@ -401,12 +439,21 @@ export function StoryPlanningPanel({
           </FormField>
 
           {disclosure !== null && (
-            <InlineAlert
-              tone="warning"
-              title="确认后会发送 1 次"
-              description={`${disclosure.connectionDisplayName} · ${disclosure.modelId}；${disclosure.privacy} 发送内容：${disclosure.sends.join("；")}。自动重试 0 次；${formatPlanningCost(disclosure)}。`}
-              onDismiss={() => setDisclosure(null)}
-            />
+            <>
+              <InlineAlert
+                tone="warning"
+                title="发送确认摘要"
+                description={`模型：${disclosure.connectionDisplayName} · ${disclosure.modelId}；资料：当前大纲、已确认设定和有正文依据的主线事件；预计发送 1 次；${formatPlanningCostSummary(disclosure)}；私密内容：不包含私密章节正文。`}
+                onDismiss={() => setDisclosure(null)}
+              />
+              <details className="candidate-panel__disclosure-details">
+                <summary>查看详细信息</summary>
+                <p>{disclosure.privacy}</p>
+                <p>发送内容：{disclosure.sends.join("；")}。</p>
+                <p>本次最多向模型服务发送 1 次，自动重试 0 次。</p>
+                <p>{formatPlanningCost(disclosure)}</p>
+              </details>
+            </>
           )}
           <Button
             loading={busyAction === "generate"}
@@ -418,9 +465,7 @@ export function StoryPlanningPanel({
             onClick={() => void generate()}
           >
             {disclosure === null
-              ? task === "outline_planning"
-                ? "查看故事方向发送信息"
-                : "查看场景拆解发送信息"
+              ? "查看本次发送内容"
               : task === "outline_planning"
                 ? "确认并生成故事方向建议"
                 : "确认并生成场景拆解建议"}
@@ -442,7 +487,9 @@ export function StoryPlanningPanel({
               description={
                 <>
                   <span>{notice.message}</span>
-                  {notice.supportId !== undefined && <span> 支持编号：{notice.supportId}</span>}
+                  {notice.supportId !== undefined && (
+                    <span> 问题编号：{notice.supportId}（联系支持时提供）</span>
+                  )}
                 </>
               }
               onDismiss={() => setNotice(null)}
@@ -455,7 +502,9 @@ export function StoryPlanningPanel({
               description={
                 <>
                   <span>{error.message}</span>
-                  {error.supportId !== undefined && <span> 支持编号：{error.supportId}</span>}
+                  {error.supportId !== undefined && (
+                    <span> 问题编号：{error.supportId}（联系支持时提供）</span>
+                  )}
                 </>
               }
               onDismiss={() => setError(null)}
@@ -710,9 +759,16 @@ function candidateStatusTone(
 
 function formatPlanningCost(disclosure: StoryPlanningDisclosure): string {
   if (disclosure.estimatedMaximumCostMicros === null || disclosure.currency === null) {
-    return "当前无法核定费用上限，AI 服务仍可能收费";
+    return "服务商没有提供可计算的单价，实际费用请以服务商账单为准。";
   }
   return `本次费用上限 ${disclosure.estimatedMaximumCostMicros} 微单位 ${disclosure.currency}`;
+}
+
+function formatPlanningCostSummary(disclosure: StoryPlanningDisclosure): string {
+  if (disclosure.estimatedMaximumCostMicros === null || disclosure.currency === null) {
+    return "费用：暂时无法计算";
+  }
+  return `费用上限：${disclosure.estimatedMaximumCostMicros} 微单位 ${disclosure.currency}`;
 }
 
 function errorMessage(cause: unknown, fallback: string): string {

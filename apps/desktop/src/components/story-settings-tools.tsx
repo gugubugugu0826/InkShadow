@@ -621,7 +621,7 @@ function BulkStorySettingsToolForProject(props: BulkStorySettingsToolProps) {
           savedCount > 0
             ? `${String(savedCount)} 条已安全保存，其余内容仍留在这里。${projected.description}`
             : writeAttempted
-              ? `保存结果需要核对，内容和批次身份仍留在本机。重新打开后可以继续；不会自动重复创建。${projected.description}`
+              ? `保存操作的结果暂时无法确认，内容和本次整理记录仍留在本机。重新打开后可以继续；不会自动重复创建。${projected.description}`
               : `${projected.description} 没有写入任何设定，请修正后重试。`,
       });
     } finally {

@@ -130,6 +130,7 @@ describe("context history panel", () => {
                 summary: "让场景围绕目标和变化前进。",
                 version: "1.0.0",
                 kind: "core" as const,
+                ownerScope: "builtin" as const,
                 included: true,
                 selectionReason: "selected" as const,
                 estimatedTokens: 320,
@@ -139,6 +140,7 @@ describe("context history panel", () => {
                 summary: "管理线索与揭示。",
                 version: "1.0.0",
                 kind: "genre" as const,
+                ownerScope: "builtin" as const,
                 included: false,
                 selectionReason: "not_enabled" as const,
                 estimatedTokens: 260,
@@ -161,18 +163,18 @@ describe("context history panel", () => {
     expect(screen.getByText("当前场景目标")).toBeTruthy();
     expect(screen.getAllByText("已采用").length).toBeGreaterThanOrEqual(2);
     expect(screen.getByText("未采用")).toBeTruthy();
-    expect(screen.getByText(/预算不足/u)).toBeTruthy();
+    expect(screen.getByText(/可参考文字量已用完/u)).toBeTruthy();
     expect(screen.getByText("锁定的故事规则 · 故事规则")).toBeTruthy();
-    expect(screen.getAllByText(/历史记录只保存来源类别、选择原因与预算/u)).toHaveLength(2);
+    expect(screen.getAllByText(/历史记录只保存来源类别、选择原因与文字量/u)).toHaveLength(2);
     expect(findById).toHaveBeenCalledWith(TRACE_ID);
     expect(screen.getByText("已精确关联 AI 建议版本")).toBeTruthy();
     expect(screen.getByText("这条记录与 AI 建议版本精确关联")).toBeTruthy();
     expect(screen.getByText("场景推进")).toBeTruthy();
     expect(screen.getAllByText(/版本 1.0.0/u)).toHaveLength(2);
-    expect(screen.getByText(/保守估算约/u)).toBeTruthy();
-    await user.click(screen.getByText(/查看未采用的方法/u));
+    expect(screen.getAllByText(/发送给 AI 的文字量（不是金额）/u).length).toBeGreaterThan(0);
+    await user.click(screen.getByText(/查看本次未采用的写作技能及原因/u));
     expect(screen.getByText("悬疑与推理")).toBeTruthy();
-    expect(screen.getByText(/没有开启/u)).toBeTruthy();
+    expect(screen.getByText(/没有启用/u)).toBeTruthy();
     expect(screen.queryByText("core.scene_craft")).toBeNull();
     expect(screen.queryByText("a".repeat(64))).toBeNull();
     expect(novelSkills.findInvocationByContextTrace).toHaveBeenCalledWith(TRACE_ID);
@@ -295,7 +297,7 @@ describe("context history panel", () => {
               status: "unavailable" as const,
               availability: {
                 status: "unavailable" as const,
-                reason: "浏览器演示不会生成写作方法收据。",
+                reason: "浏览器演示不会生成写作技能采用记录。",
               },
               invocation: null,
             }),
@@ -474,7 +476,7 @@ function makeUnavailableNovelSkills() {
         status: "unavailable" as const,
         availability: {
           status: "unavailable" as const,
-          reason: "当前运行环境没有写作方法收据。",
+          reason: "当前运行环境没有写作技能采用记录。",
         },
         invocation: null,
       }),

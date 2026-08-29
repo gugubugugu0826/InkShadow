@@ -156,7 +156,7 @@ function RuntimeProviderContent({
             : "脱敏诊断已保存并核验。",
       );
     } catch {
-      setDiagnosticExportStatus("诊断未导出。请保留支持编号，检查保存权限后重试。");
+      setDiagnosticExportStatus("诊断未导出。请记下问题编号，检查保存权限后重试。");
     } finally {
       setDiagnosticExporting(false);
     }
@@ -182,7 +182,7 @@ function RuntimeProviderContent({
         <main className="desktop-bootstrap">
           <section className="desktop-page" aria-label="本地数据恢复">
             <ErrorState title="无法启动墨影" description={normalized.description} />
-            <p>支持编号：{startupIncident.supportId}</p>
+            <p>问题编号：{startupIncident.supportId}（联系支持时提供）</p>
             <div className="settings-actions" role="group" aria-label="启动恢复操作">
               <Button onClick={retryMigrationRead}>重新读取</Button>
               <Button
@@ -202,7 +202,7 @@ function RuntimeProviderContent({
               <summary>查看恢复说明</summary>
               <strong>请先保留当前数据</strong>
               <p>
-                不要删除数据库，也不要清空作品。请保留数据库原件并重新读取；仍无法打开时，导出脱敏诊断并连同支持编号交给支持人员。
+                不要删除数据库，也不要清空作品。请保留数据库原件并重新读取；仍无法打开时，导出脱敏诊断并连同问题编号交给支持人员。
               </p>
               <p>确认安装来源和备份完整后，才可使用匹配该数据库的已发布版本或经验证备份恢复。</p>
             </details>

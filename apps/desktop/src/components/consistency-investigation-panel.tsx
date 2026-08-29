@@ -313,7 +313,7 @@ export function ConsistencyInvestigationPanel({
           <CardTitle headingLevel={3}>只读深入调查</CardTitle>
           <CardDescription>
             本地检索和核验固定使用 5 个只读步骤；最多向模型服务发送 1 次、自动重试 0
-            次。结果不会改写正文或不可变版本。
+            次。结果不会改写正文或不会被改动的历史版本。
           </CardDescription>
         </CardHeader>
         <CardContent>
@@ -343,68 +343,79 @@ export function ConsistencyInvestigationPanel({
       {disclosure !== null && (
         <Card>
           <CardHeader>
-            <CardTitle headingLevel={3}>发送前确认</CardTitle>
+            <CardTitle headingLevel={3}>发送确认摘要</CardTitle>
             <CardDescription>只有点击下方确认按钮才会向所选模型服务发送内容。</CardDescription>
           </CardHeader>
           <CardContent>
-            <dl className="settings-definition-list">
-              <div>
-                <dt>提供方与模型</dt>
-                <dd>
-                  {disclosure.connectionDisplayName} · {disclosure.modelId}
-                </dd>
+            <p>
+              模型：{disclosure.connectionDisplayName} · {disclosure.modelId}；资料：
+              {disclosure.chapterCount} 章已接受正文与已确认设定；预计发送{" "}
+              {disclosure.maximumModelCalls} 次；{formatCostSummary(disclosure)}
+              ；私密内容：
+              {disclosure.includesPrivateContent ? "包含私密章节，只在本机处理" : "不包含私密章节"}
+              。
+            </p>
+            <details className="candidate-panel__disclosure-details">
+              <summary>查看详细信息</summary>
+              <dl className="settings-definition-list">
+                <div>
+                  <dt>提供方与模型</dt>
+                  <dd>
+                    {disclosure.connectionDisplayName} · {disclosure.modelId}
+                  </dd>
+                </div>
+                <div>
+                  <dt>发送位置</dt>
+                  <dd>{destinationLabel(disclosure.dataDestination)}</dd>
+                </div>
+                <div>
+                  <dt>范围</dt>
+                  <dd>
+                    {disclosure.chapterCount} 章；预计输入约 {disclosure.estimatedInputTokens}{" "}
+                    个文字量单位（不是金额）
+                  </dd>
+                </div>
+                <div>
+                  <dt>发送与重试</dt>
+                  <dd>
+                    最多 {disclosure.maximumModelCalls} 次；自动重试{" "}
+                    {disclosure.automaticRetryCount} 次
+                  </dd>
+                </div>
+                <div>
+                  <dt>最长等待</dt>
+                  <dd>{Math.round(disclosure.maximumDurationMs / 1000)} 秒</dd>
+                </div>
+                <div>
+                  <dt>费用上限</dt>
+                  <dd>{formatCost(disclosure)}</dd>
+                </div>
+              </dl>
+              <div className="settings-grid">
+                <div>
+                  <h4>会发送</h4>
+                  <ul className="privacy-list">
+                    {disclosure.sends.map((item) => (
+                      <li key={item}>{plainLanguageDisclosure(item)}</li>
+                    ))}
+                  </ul>
+                </div>
+                <div>
+                  <h4>不会发送</h4>
+                  <ul className="privacy-list">
+                    {disclosure.doesNotSend.map((item) => (
+                      <li key={item}>{plainLanguageDisclosure(item)}</li>
+                    ))}
+                  </ul>
+                </div>
               </div>
-              <div>
-                <dt>发送位置</dt>
-                <dd>{destinationLabel(disclosure.dataDestination)}</dd>
-              </div>
-              <div>
-                <dt>范围</dt>
-                <dd>
-                  {disclosure.chapterCount} 章；预计输入约 {disclosure.estimatedInputTokens}{" "}
-                  个内容额度
-                </dd>
-              </div>
-              <div>
-                <dt>发送与重试</dt>
-                <dd>
-                  最多 {disclosure.maximumModelCalls} 次；自动重试 {disclosure.automaticRetryCount}{" "}
-                  次
-                </dd>
-              </div>
-              <div>
-                <dt>最长等待</dt>
-                <dd>{Math.round(disclosure.maximumDurationMs / 1000)} 秒</dd>
-              </div>
-              <div>
-                <dt>费用上限</dt>
-                <dd>{formatCost(disclosure)}</dd>
-              </div>
-            </dl>
-            <div className="settings-grid">
-              <div>
-                <h4>会发送</h4>
-                <ul className="privacy-list">
-                  {disclosure.sends.map((item) => (
-                    <li key={item}>{plainLanguageDisclosure(item)}</li>
-                  ))}
-                </ul>
-              </div>
-              <div>
-                <h4>不会发送</h4>
-                <ul className="privacy-list">
-                  {disclosure.doesNotSend.map((item) => (
-                    <li key={item}>{plainLanguageDisclosure(item)}</li>
-                  ))}
-                </ul>
-              </div>
-            </div>
-            <InlineAlert
-              title="隐私与中断规则"
-              description={plainLanguageDisclosure(
-                `${disclosure.privacy} ${disclosure.interruption}`,
-              )}
-            />
+              <InlineAlert
+                title="隐私与中断规则"
+                description={plainLanguageDisclosure(
+                  `${disclosure.privacy} ${disclosure.interruption}`,
+                )}
+              />
+            </details>
             <div className="settings-actions">
               <Button
                 variant="ai-primary"
@@ -431,7 +442,7 @@ export function ConsistencyInvestigationPanel({
         <InlineAlert
           tone="error"
           title={normalizedError.title}
-          description={`${normalizedError.description} 正文和不可变版本没有改变。`}
+          description={`${normalizedError.description} 正文和不会被改动的历史版本没有改变。`}
         />
       )}
 
@@ -440,72 +451,86 @@ export function ConsistencyInvestigationPanel({
       {repairDisclosure !== null && (
         <Card>
           <CardHeader>
-            <CardTitle headingLevel={3}>修复建议发送前确认</CardTitle>
+            <CardTitle headingLevel={3}>修复建议发送确认摘要</CardTitle>
             <CardDescription>
               这是调查之外的一次独立模型动作。确认前不会向模型发送内容，也不会创建 AI 建议草稿。
             </CardDescription>
           </CardHeader>
           <CardContent>
-            <dl className="settings-definition-list">
-              <div>
-                <dt>目标与任务</dt>
-                <dd>
-                  《{repairDisclosure.targetChapterTitle}》· {repairDisclosure.taskLabel}
-                </dd>
+            <p>
+              作品章节：《{repairDisclosure.targetChapterTitle}》；模型：
+              {repairDisclosure.connectionDisplayName} · {repairDisclosure.modelId}
+              ；资料：当前章节正文与调查证据；预计发送 {repairDisclosure.maximumModelCalls} 次；
+              {formatCostSummary(repairDisclosure)}
+              ；私密内容：
+              {repairDisclosure.includesPrivateContent
+                ? "包含私密章节，只在本机处理"
+                : "不包含私密章节"}
+              。
+            </p>
+            <details className="candidate-panel__disclosure-details">
+              <summary>查看详细信息</summary>
+              <dl className="settings-definition-list">
+                <div>
+                  <dt>目标与任务</dt>
+                  <dd>
+                    《{repairDisclosure.targetChapterTitle}》· {repairDisclosure.taskLabel}
+                  </dd>
+                </div>
+                <div>
+                  <dt>提供方与模型</dt>
+                  <dd>
+                    {repairDisclosure.connectionDisplayName} · {repairDisclosure.modelId}
+                  </dd>
+                </div>
+                <div>
+                  <dt>发送位置</dt>
+                  <dd>{destinationLabel(repairDisclosure.dataDestination)}</dd>
+                </div>
+                <div>
+                  <dt>范围</dt>
+                  <dd>
+                    预计发送给 AI 的文字量约 {repairDisclosure.estimatedInputTokens} 个单位；AI
+                    返回的文字量上限 {repairDisclosure.maximumOutputTokens} 个单位（这不是金额）
+                  </dd>
+                </div>
+                <div>
+                  <dt>发送与重试</dt>
+                  <dd>
+                    精确 {repairDisclosure.maximumModelCalls} 次；自动重试{" "}
+                    {repairDisclosure.automaticRetryCount} 次
+                  </dd>
+                </div>
+                <div>
+                  <dt>费用上限</dt>
+                  <dd>{formatCost(repairDisclosure)}</dd>
+                </div>
+              </dl>
+              <div className="settings-grid">
+                <div>
+                  <h4>会发送</h4>
+                  <ul className="privacy-list">
+                    {repairDisclosure.sends.map((item) => (
+                      <li key={item}>{plainLanguageDisclosure(item)}</li>
+                    ))}
+                  </ul>
+                </div>
+                <div>
+                  <h4>不会发送</h4>
+                  <ul className="privacy-list">
+                    {repairDisclosure.doesNotSend.map((item) => (
+                      <li key={item}>{plainLanguageDisclosure(item)}</li>
+                    ))}
+                  </ul>
+                </div>
               </div>
-              <div>
-                <dt>提供方与模型</dt>
-                <dd>
-                  {repairDisclosure.connectionDisplayName} · {repairDisclosure.modelId}
-                </dd>
-              </div>
-              <div>
-                <dt>发送位置</dt>
-                <dd>{destinationLabel(repairDisclosure.dataDestination)}</dd>
-              </div>
-              <div>
-                <dt>范围</dt>
-                <dd>
-                  预计输入约 {repairDisclosure.estimatedInputTokens} 个内容额度；输出上限{" "}
-                  {repairDisclosure.maximumOutputTokens} 个内容额度
-                </dd>
-              </div>
-              <div>
-                <dt>发送与重试</dt>
-                <dd>
-                  精确 {repairDisclosure.maximumModelCalls} 次；自动重试{" "}
-                  {repairDisclosure.automaticRetryCount} 次
-                </dd>
-              </div>
-              <div>
-                <dt>费用上限</dt>
-                <dd>{formatCost(repairDisclosure)}</dd>
-              </div>
-            </dl>
-            <div className="settings-grid">
-              <div>
-                <h4>会发送</h4>
-                <ul className="privacy-list">
-                  {repairDisclosure.sends.map((item) => (
-                    <li key={item}>{plainLanguageDisclosure(item)}</li>
-                  ))}
-                </ul>
-              </div>
-              <div>
-                <h4>不会发送</h4>
-                <ul className="privacy-list">
-                  {repairDisclosure.doesNotSend.map((item) => (
-                    <li key={item}>{plainLanguageDisclosure(item)}</li>
-                  ))}
-                </ul>
-              </div>
-            </div>
-            <InlineAlert
-              title="隐私与中断规则"
-              description={plainLanguageDisclosure(
-                `${repairDisclosure.privacy} ${repairDisclosure.interruption}`,
-              )}
-            />
+              <InlineAlert
+                title="隐私与中断规则"
+                description={plainLanguageDisclosure(
+                  `${repairDisclosure.privacy} ${repairDisclosure.interruption}`,
+                )}
+              />
+            </details>
             <div className="settings-actions">
               <Button
                 variant="ai-primary"
@@ -797,8 +822,9 @@ function taskGraphObservationSummary(node: InvestigationTaskGraphNode): string {
 function taskGraphResultSummary(node: InvestigationTaskGraphNode): string {
   const summary = node.safeSummary;
   if (node.status === "ambiguous")
-    return "这次发送的结果需要核对，未自动重发；正文和不可变版本没有改变。";
-  if (node.status === "failed") return "结果未通过格式或本地证据核验；正文和不可变版本没有改变。";
+    return "请求可能已经发出，暂时无法确认结果。系统没有自动重发；正文和不会被改动的历史版本没有改变。";
+  if (node.status === "failed")
+    return "结果未通过格式或本地证据核验；正文和不会被改动的历史版本没有改变。";
   if (node.status === "cancelled") return "调查已取消，未完成步骤不会在重启后自动续跑。";
   if (node.status === "not_dispatched") return "调查在发送前终止，本次没有发送正文。";
   if (node.status === "partial")
@@ -969,7 +995,7 @@ function statusMessage(run: ConsistencyInvestigationRun): Readonly<{
   if (run.status === "ambiguous")
     return {
       tone: "error",
-      title: "这次发送的结果需要核对，未自动重发",
+      title: "请求可能已经发出，暂时无法确认结果",
       description:
         "内容已经发送给所选模型服务，但应用无法确认结果。请先查看模型使用记录；正文和版本未改变。",
     };
@@ -1017,11 +1043,23 @@ function formatCost(
   }>,
 ): string {
   if (disclosure.estimatedMaximumCostMicros === null || disclosure.currency === null)
-    return "未知；提供方可能计费";
+    return "服务商没有提供可计算的单价，实际费用请以服务商账单为准。";
   const padded = disclosure.estimatedMaximumCostMicros.padStart(7, "0");
   const whole = padded.slice(0, -6);
   const fraction = padded.slice(-6).replace(/0+$/u, "");
   return `${disclosure.currency} ${whole}${fraction.length === 0 ? "" : `.${fraction}`}（估算上限）`;
+}
+
+function formatCostSummary(
+  disclosure: Readonly<{
+    estimatedMaximumCostMicros: string | null;
+    currency: string | null;
+  }>,
+): string {
+  if (disclosure.estimatedMaximumCostMicros === null || disclosure.currency === null) {
+    return "费用：暂时无法计算";
+  }
+  return "费用上限：" + formatCost(disclosure);
 }
 
 function destinationLabel(destination: "local" | "remote"): string {
@@ -1036,7 +1074,7 @@ function plainLanguageDisclosure(value: string): string {
     .replaceAll(/未接受\s+candidates?/giu, "未接受隔离建议")
     .replaceAll(/其他\s+candidates?/giu, "其他隔离建议")
     .replaceAll(/candidates?/giu, "隔离建议")
-    .replaceAll(/tokens?/giu, "内容额度")
+    .replaceAll(/tokens?/giu, "文字量单位（不是金额）")
     .replaceAll(/invocations?/giu, "模型使用记录")
     .replaceAll(/providers?/giu, "模型服务")
     .replaceAll(/agents?/giu, "智能流程");

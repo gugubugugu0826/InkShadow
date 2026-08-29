@@ -1,9 +1,19 @@
 # InkShadow Desktop 原生层逐文件指引
 
-> 基于源码快照：2026-08-28  
+> 基于源码快照：2026-08-29  
 > 文档状态：`SUPPORTING_CURRENT`  
-> 当前发布目标：`0.2.14`；当前工作树迁移上限 Data `0081`／Tauri `84`，数据与原生迁移聚焦自动化已通过，最终同源候选门禁尚未结束；0.2.13 候选和 v0.2.12 及更早发布证据保持不可变；设计基线：`DESIGN v0.3.1b`  
+> 当前发布目标：`0.2.15`；当前源码迁移上限 Data `0082`／Tauri `85`，本轮后续工作树没有再新增迁移；候选提交、安装包、标签和 Release 结果以最终发布证据为准；设计基线：`DESIGN v0.3.1b`  
 > 覆盖范围：`apps/desktop/src-tauri`、本地 SQLite 原生桥、自动备份、系统凭据库、原生网络、项目密钥、安全更新与系统容量
+
+## 0. 0.2.15 当前事实
+
+- 开书调度在渲染层先保存可恢复旅程和稳定方案槽位，再经过资料、隐私、连接、模型与费用检查；原生模型网关只有在调用标识、连接、目录项、修订、范围与隐私边界全部核对后，才在 SQLite 写入不含作品内容的发送回执并开始网络请求。发送后的不确定结果不会自动重发，成功结果仍只保存为隔离建议。
+- 作者明确开启的写作技能会先编译为有界方法段，并在 Provider 发送前提交采用快照；快照把技能身份、版本、项目、任务和调用连成同一审计链。原生层不解释或自行启用技能，只执行已通过上层最终身份围栏的请求。
+- F10 的文字检查调用 `start_native_generation`，语义向量检查调用 `embed_native_model`。向量请求使用供应商的向量端点、固定无作品内容输入、零自动重试和同一调用回执；原生响应还要经过模型、数量、维度和数值完整性核对，不能用文字生成成功替代向量能力证明。
+- U8 编辑失败活动连接时不读取或回填密钥原文，未明确输入新密钥就沿用既有 Keyring 引用；持久化和重试均携带加载时连接修订，修订冲突在网络前失败。成功与失败会分别形成准确连接状态，退役命令不会被“编辑并重试”隐式触发。
+- 导出安全边界包含 `native_choose_export_destination`、`native_write_export_artifact` 和 `native_open_export_artifact`。前两者以五分钟单次票据、目录和目标身份复核、64 MiB 上限、临时文件同步、原子安装及最终 SHA-256 回读保护落盘；打开命令只允许规范化后的现有普通文件和受支持扩展名，并把路径作为独立进程参数传递，不接受 shell 文本。
+- 当前源码沿用已提交的 Data `0082_author_recovery_records.sql`／Tauri `85`，用于备份兼容的作者恢复记录；本轮后续工作树没有再新增迁移。v0.2.14 及更早迁移字节、校验和与发布保持不变。
+- 当前自动化没有执行真实供应商请求、真实 Windows 凭据交互或 0.2.15 安装程序人工验证；本地 HTTP、SQLite 和网关测试不得表述为真实服务或真实安装结论。
 
 `v0.2.6` 已冻结 Tauri `74`、SQLite 重载恢复、自动备份清单第 2 版和能力验证调用回执。
 `v0.2.7` 只向前追加 Data `0072`–`0075` / Tauri `75`–`78`，并已随最终候选提交冻结公开；
@@ -18,7 +28,7 @@ Data `0078_generation_attempt_prose_invocation.sql` / Tauri `81` 已随 v0.2.12 
 ```text
 React 页面
   → Desktop runtime / packages/data
-  → Tauri invoke（60 个受控 command）
+  → Tauri invoke（61 个受控 command）
   ├─ SQLite：应用配置目录/inkshadow.db
   ├─ OS Credential Store：模型密钥、设备私钥、Cloud Token、团队密钥回执
   ├─ 原生 HTTP：模型服务、Cloud API、更新源
@@ -39,7 +49,7 @@ React 页面
 | 文件                                                  | 内容                                                                                                           |
 | ----------------------------------------------------- | -------------------------------------------------------------------------------------------------------------- |
 | `apps/desktop/src-tauri/src/main.rs`                  | 原生进程入口；Release 启用 `windows_subsystem = "windows"` 隐藏控制台，并调用 `inkshadow_desktop_lib::run()`。 |
-| `apps/desktop/src-tauri/src/lib.rs`                   | Tauri Builder、共享状态、插件、单实例逻辑和全部 60 个 command 的注册入口。                                     |
+| `apps/desktop/src-tauri/src/lib.rs`                   | Tauri Builder、共享状态、插件、单实例逻辑和全部 61 个 command 的注册入口。                                     |
 | `apps/desktop/src-tauri/Cargo.toml`                   | Rust/Tauri、SQLx SQLite、Reqwest/Rustls、Keyring、HPKE、AES-GCM、Argon2、Ring 和 Windows API 依赖。            |
 | `apps/desktop/src-tauri/Cargo.lock`                   | Rust 完整依赖锁文件；由 Cargo 维护。                                                                           |
 | `apps/desktop/src-tauri/build.rs`                     | 监听六个 `INKSHADOW_UPDATE_*` 编译期变量并运行 Tauri build。                                                   |
@@ -57,8 +67,8 @@ React 页面
 | 文件                                                   | 内容                                                                                               |
 | ------------------------------------------------------ | -------------------------------------------------------------------------------------------------- |
 | `apps/desktop/src-tauri/src/main.rs`                   | Windows GUI subsystem 入口；Release 隐藏控制台。                                                   |
-| `apps/desktop/src-tauri/src/lib.rs`                    | 模块组合、Tauri 启动、共享状态、插件和 60 个 command 注册。                                        |
-| `apps/desktop/src-tauri/src/local_migrations.rs`       | 把 `packages/data` 与 `packages/story-core` 的 78 个 SQL migration 编译进二进制并交给 SQLx。       |
+| `apps/desktop/src-tauri/src/lib.rs`                    | 模块组合、Tauri 启动、共享状态、插件和 61 个 command 注册。                                        |
+| `apps/desktop/src-tauri/src/local_migrations.rs`       | 把 `packages/data` 与 `packages/story-core` 的 85 个 SQL migration 编译进二进制并交给 SQLx。       |
 | `apps/desktop/src-tauri/src/automatic_backup.rs`       | 应用专属自动备份根、所有权标记、租约、清单第 2 版、独立快照创建、完整性核验和受限清理。            |
 | `apps/desktop/src-tauri/src/native_export_artifact.rs` | 导出保存对话框、一次性目标票据、目标身份复核、无覆盖竞态写入及落盘后大小/SHA 回读验证。            |
 | `apps/desktop/src-tauri/src/native_sqlite.rs`          | 固定库打开、迁移、查询、写入、事务、备份/恢复受控语句、资源上限和失败关闭。                        |
@@ -77,7 +87,7 @@ React 页面
 | `apps/desktop/src-tauri/src/model_gateway/image.rs`    | OpenAI-compatible base64 PNG 解析、签名/尺寸/体积校验和单次路径票据安全写入。                      |
 | `apps/desktop/src-tauri/src/model_gateway/gateway.rs`  | 模型列表、连接检查、Embedding、Qwen Rerank、流式生成、图片生成、事件、超时、限制和取消。           |
 
-## 4. 60 个 Tauri command
+## 4. 61 个 Tauri command
 
 详细参数和返回值见 [`../front-end/INTERFACE_REFERENCE.md`](../front-end/INTERFACE_REFERENCE.md)。
 
@@ -89,18 +99,20 @@ React 页面
 | SQLite           |    9 | `native_sqlite_open`、`native_sqlite_select`、`native_sqlite_execute`、`native_sqlite_begin`、`native_sqlite_transaction_select`、`native_sqlite_transaction_execute`、`native_sqlite_commit`、`native_sqlite_rollback`、`native_sqlite_close`                                                                                                                                                                           |
 | 模型密钥         |    3 | `save_model_secret`、`get_model_secret_summary`、`delete_model_secret`                                                                                                                                                                                                                                                                                                                                                   |
 | 模型网关         |    9 | `list_native_models`、`check_native_model_connection`、`embed_native_model`、`rerank_native_model`、`choose_native_image_destination`、`generate_native_image_to_file`、`start_native_generation`、`cancel_native_generation`、`reconcile_native_model_dispatch_leases`                                                                                                                                                  |
-| 导出文件保存     |    2 | `native_choose_export_destination`、`native_write_export_artifact`                                                                                                                                                                                                                                                                                                                                                       |
+| 导出文件保存     |    3 | `native_choose_export_destination`、`native_write_export_artifact`、`native_open_export_artifact`                                                                                                                                                                                                                                                                                                                        |
 | 系统容量         |    1 | `inspect_native_model_capacity`                                                                                                                                                                                                                                                                                                                                                                                          |
 | 安全更新         |    3 | `inspect_secure_update_configuration`、`check_for_signed_update`、`stage_signed_update`                                                                                                                                                                                                                                                                                                                                  |
 | 项目密钥         |    9 | `create_device_identity`、`get_device_identity_status`、`generate_project_data_key`、`wrap_project_data_key_for_device`、`unwrap_project_data_key_for_device`、`rewrap_project_data_key_for_team_recipients`、`create_project_recovery_kit`、`verify_project_recovery_kit`、`recover_project_data_key`                                                                                                                   |
 | 云会话与团队密钥 |   12 | `login_cloud_identity`、`verify_cloud_identity_email`、`refresh_cloud_session`、`get_cloud_session_status`、`send_cloud_api_request`、`send_cloud_deletion_credential_request`、`accept_current_device_team_project_key_envelope_from_cloud`、`inspect_stored_team_project_key_receipt`、`open_stored_team_project_key_receipt`、`remove_stored_team_project_key_receipt`、`logout_cloud_session`、`clear_cloud_session` |
 
-导出保存分成“选择目标”和“写入制品”两个原生命令。选择成功只签发五分钟、单次消费且绑定
+导出操作分成“选择目标”“写入制品”和“打开或定位文件”三个原生命令。选择成功只签发五分钟、单次消费且绑定
 格式、媒体类型、规范父目录与既有目标身份的 ticket；取消不会签发 ticket，也不会写文件。写入前
 再次核对父目录与目标身份，使用临时文件同步落盘后，以 hard-link 新建语义或 Windows
 `ReplaceFileW` 原子安装，避免竞态覆盖；随后从最终路径回读并复核字节数与 SHA-256。成功回执
 只返回绝对 `path`、`fileName`、`format`、`byteLength`、`status=success` 和 `verified=true`；失败使用
-稳定公开错误且不泄漏目标路径。真实 Windows 保存对话框仍需外部 Tauri 交互验收。
+稳定公开错误且不泄漏目标路径。打开命令只接受规范化后的现有普通文件和 `txt`、`md`、`json`、
+`epub`、`docx`、`pdf` 扩展名，并把路径作为独立参数交给系统文件管理器。真实 Windows 保存对话框
+和外部打开仍需安装程序人工验收。
 
 唯一主动事件为 `model-generation-event`，状态为 `started`、`delta`、`completed`、`cancelled` 或 `failed`。事件不会包含 Prompt 或 API Key。完成事件可声明原生响应是否实际流式；失败事件只携带
 扁平、有界的 request ID、HTTP/终止原因、可见内容长度、推理是否出现/长度、流式标记和 usage，
@@ -114,8 +126,8 @@ React 页面
 - 打开时强制 `foreign_keys=ON`、WAL、`synchronous=NORMAL`、5 秒 busy timeout。
 - 配置和全部 migration 验证成功后才返回随机会话 token。
 - migration 校验和不一致会报 `SQLITE_MIGRATION_INTEGRITY_FAILED` 并停止，而不是覆盖用户数据。
-- 当前工作树前向上限为 Data `0081_story_fact_evidence_guard_performance.sql` / Tauri `84`；
-  81 个 Data migration 与 3 个 story-core migration 合并为一个原生连续序列，所以目录前缀与
+- 当前工作树前向上限为 Data `0082_author_recovery_records.sql` / Tauri `85`；
+  82 个 Data migration 与 3 个 story-core migration 合并为一个原生连续序列，所以目录前缀与
   原生版本不要求相同。`0066`–`0068` / Tauri `69`–`71` 依次追加写作体验偏好与 Provider 披露
   grant、有界一致性调查四表，以及只统计 active grant 的上限修复。`0069` / Tauri `72` 在模型
   step 上预留 content-free invocation UUID；账本 INSERT 会在同一 SQLite 语句中绑定 step 和
@@ -131,7 +143,7 @@ React 页面
   迁移前旧行保留空值，新行缺失、部分缺失、关联不一致或后续改写均失败关闭。
   `0076` / Tauri `79` 为直接模式本地故事事实增加带审计的作者修订；`0077` / Tauri `80` 增加
   不含作品正文的项目显示标识与修订历史。两项均已随 v0.2.9 冻结；0.2.10 与 0.2.11 均没有新增迁移。
-  `0078` / Tauri `81` 不新增字段或表，只扩展 `0075` 的不可变生成尝试隐私守卫，使 `continuation` 和 `prose_generation` 均可保存精确 Model Hub 调用标识；`0079` / Tauri `82` 追加不可变故事事实多证据关系；`0080` / Tauri `83` 为新选区隔离结果保存不可变准确动作；`0081` / Tauri `84` 只替换尚未发布的证据插入保护触发器实现，保持校验条件并缩短长正文扫描。`0078` 及其他已发布迁移和校验保持原样。
+  `0078` / Tauri `81` 不新增字段或表，只扩展 `0075` 的不可变生成尝试隐私守卫，使 `continuation` 和 `prose_generation` 均可保存精确 Model Hub 调用标识；`0079` / Tauri `82` 追加不可变故事事实多证据关系；`0080` / Tauri `83` 为新选区隔离结果保存不可变准确动作；`0081` / Tauri `84` 只替换尚未发布的证据插入保护触发器实现，保持校验条件并缩短长正文扫描；`0082` / Tauri `85` 追加备份兼容的作者恢复记录。本轮后续工作树未再新增迁移，v0.2.14 及更早迁移字节和校验保持原样。
 - 启动恢复以 `provider_dispatch_started_at` 为网络边界：发送前中断把 running ledger 结清为
   `cancelled`、run 结清为 `not_dispatched`；发送后中断把 ledger 结清为 `timed_out`、run 结清为
   `ambiguous`。两者都会把非终态 task 对账到相应终态，且绝不自动重发。

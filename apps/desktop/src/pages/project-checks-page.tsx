@@ -1,8 +1,12 @@
 import { parseUuidV7, type Chapter } from "@inkshadow/domain";
-import type {
-  NarrativeAnalysisField,
-  NarrativeEvidenceReference,
-  NarrativeQualityFinding,
+import {
+  directLocalPendingEvidenceIdentity,
+  parseUuidV7 as parseStoryUuid,
+  type StoryFact,
+  type StoryFactSnapshot,
+  type NarrativeAnalysisField,
+  type NarrativeEvidenceReference,
+  type NarrativeQualityFinding,
 } from "@inkshadow/story-core";
 import {
   Badge,
@@ -104,7 +108,7 @@ const missingRequirementLabels: Readonly<Record<string, string>> = {
     "当前正文与已保存版本不一致，请先保存或重新打开章节。",
   verified_current_version_sha256: "当前版本的完整性校验未通过，请从版本历史或备份恢复。",
   current_claim_with_explicit_structured_fields_and_current_version_evidence:
-    "本章还没有带原文位置的明确事实，系统不会从语气或暗示中猜测。",
+    "本章还没有带正文原句和位置的明确事实，系统不会从语气或暗示中猜测。",
   confirmed_reference_fact_or_locked_hard_rule_with_exact_evidence:
     "项目还没有可与本章比较的已确认设定或锁定规则。",
   comparable_current_claim_and_confirmed_source:
@@ -154,6 +158,9 @@ export function ProjectChecksPage() {
   const [selectedChapterId, setSelectedChapterId] = useState("");
   const [loading, setLoading] = useState(true);
   const chapterListLoadSequence = useRef(0);
+  const pendingFactLoadSequence = useRef(0);
+  const [pendingFactCount, setPendingFactCount] = useState<number | null>(null);
+  const [pendingFactReadUnavailable, setPendingFactReadUnavailable] = useState(false);
   const routeIdentityRef = useRef(diagnosticRoute);
   const checkOperationSequence = useRef(0);
   useLayoutEffect(() => {
@@ -271,6 +278,39 @@ export function ProjectChecksPage() {
       checkOperationSequence.current += 1;
     };
   }, [loadChapters]);
+
+  useEffect(() => {
+    const requestSequence = pendingFactLoadSequence.current + 1;
+    pendingFactLoadSequence.current = requestSequence;
+    void Promise.resolve().then(async () => {
+      if (pendingFactLoadSequence.current !== requestSequence) return;
+      setPendingFactCount(null);
+      setPendingFactReadUnavailable(false);
+      const storyProjectId = parseStoryUuid(projectIdValue);
+      if (projectId === null || !storyProjectId.ok) {
+        setPendingFactReadUnavailable(projectId !== null);
+        return;
+      }
+      try {
+        const factResult = await runtime.story.facts.listByProjectId(storyProjectId.value);
+        if (pendingFactLoadSequence.current !== requestSequence) return;
+        if (!factResult.ok) {
+          setPendingFactReadUnavailable(true);
+          return;
+        }
+        setPendingFactCount(countPendingAuthorReviewFacts(factResult.value));
+      } catch {
+        if (pendingFactLoadSequence.current === requestSequence) {
+          setPendingFactReadUnavailable(true);
+        }
+      }
+    });
+    return () => {
+      if (pendingFactLoadSequence.current === requestSequence) {
+        pendingFactLoadSequence.current += 1;
+      }
+    };
+  }, [projectId, projectIdValue, runtime]);
 
   useEffect(() => {
     const requestSequence = snapshotLoadSequence.current + 1;
@@ -649,7 +689,7 @@ export function ProjectChecksPage() {
         <ErrorState
           title={normalizedLoadError.title}
           description={`${normalizedLoadError.description}${
-            loadSupportId === null ? "" : ` 支持编号：${loadSupportId}。`
+            loadSupportId === null ? "" : ` 问题编号：${loadSupportId}（联系支持时提供）。`
           }`}
           primaryAction={{ label: "重新读取章节", onClick: () => void loadChapters() }}
         />
@@ -716,11 +756,11 @@ export function ProjectChecksPage() {
         />
       )}
       {actionNotice !== null && <InlineAlert title="处理结果已保存" description={actionNotice} />}
-      {snapshotLoading && <div role="status">正在读取最近一次检查快照…</div>}
+      {snapshotLoading && <div role="status">正在读取最近一次检查记录…</div>}
       {validationSnapshot !== null && (
         <InlineAlert
           tone={snapshotIsCurrent ? "info" : "warning"}
-          title={snapshotIsCurrent ? "已读取当前版本的检查快照" : "这是较早版本的检查快照"}
+          title={snapshotIsCurrent ? "已读取当前版本的检查记录" : "这是较早版本的检查记录"}
           description={`第 ${String(validationSnapshot.runSequence)} 次检查 · 规则 ${validationSnapshot.ruleSetVersion} · ${formatTimestamp(validationSnapshot.generatedAt)}${
             snapshotIsCurrent ? "" : "。正文版本已经变化，请重新检查后再处理问题。"
           }`}
@@ -743,6 +783,25 @@ export function ProjectChecksPage() {
             </Badge>
           )}
         </div>
+        {!directMode && pendingFactCount !== null && pendingFactCount > 0 && (
+          <InlineAlert
+            tone="info"
+            title="有待确认的设定"
+            description={
+              <div>
+                <p>已经找到 {pendingFactCount} 条待确认设定。确认后可用于确定性检查。</p>
+                <Link to={`${projectRoot}/story`}>去确认设定</Link>
+              </div>
+            }
+          />
+        )}
+        {!directMode && pendingFactReadUnavailable && (
+          <InlineAlert
+            tone="warning"
+            title="暂时无法读取待确认设定"
+            description="正文和现有检查结果不受影响。请重新打开本页后再试。"
+          />
+        )}
         {!directMode && result !== null && (
           <DeterministicCoverageSummary coverage={result.coverage} />
         )}
@@ -1054,7 +1113,7 @@ function CharacterEvidenceList({
               “{source.excerpt}”
               <br />
               <small>
-                {evidenceSourceLabel(source.sourceKind)} · 已绑定对应不可变版本 · 位置
+                {evidenceSourceLabel(source.sourceKind)} · 已绑定对应的历史版本 · 位置
                 {source.startOffset}–{source.endOffset}
               </small>
             </li>
@@ -1713,7 +1772,7 @@ function SupplementalFindingActions({
       <InlineAlert
         tone="warning"
         title="缺少精确证据，不能保存处置"
-        description="请补充带不可变版本、原文位置和内容校验值的证据后重新检查。"
+        description="请补充带历史版本、正文原句和位置、内容校验值的依据后重新检查。"
       />
     );
   }
@@ -1784,7 +1843,7 @@ function SupplementalEvidenceList({
             “{source.excerpt}”
             <br />
             <small>
-              {evidenceSourceLabel(source.sourceKind)} · 已绑定对应不可变版本 · 位置
+              {evidenceSourceLabel(source.sourceKind)} · 已绑定对应的历史版本 · 位置
               {source.startOffset}–{source.endOffset}
             </small>
           </li>
@@ -1830,7 +1889,7 @@ function NarrativeEvidenceList({ evidence }: { evidence: readonly NarrativeEvide
             <span>“{source.excerpt}”</span>
             <br />
             <small>
-              {evidenceSourceLabel(source.sourceKind)} · 已绑定对应不可变版本 · 位置
+              {evidenceSourceLabel(source.sourceKind)} · 已绑定对应的历史版本 · 位置
               {source.startOffset}–{source.endOffset}
             </small>
           </li>
@@ -2004,7 +2063,7 @@ function DeterministicCoverageSummary({
     return (
       <InlineAlert
         tone="warning"
-        title="旧检查快照没有记录覆盖范围"
+        title="旧检查记录没有保存覆盖范围"
         description="不能判断哪些类别实际运行。请重新检查本章；旧结果不会被当作完整通过。"
       />
     );
@@ -2061,7 +2120,7 @@ function DeterministicCoverageSummary({
 function coverageReasonLabel(item: ChapterValidationCoverageItem): string {
   switch (item.reason) {
     case "current_claim_missing":
-      return "本章没有带精确原文位置的明确主张。";
+      return "本章没有带正文原句和位置的明确事实。";
     case "confirmed_reference_or_rule_missing":
       return "没有已确认设定或锁定规则可供比较。";
     case "no_comparable_source":
@@ -2082,7 +2141,7 @@ function SkippedCheckResult({ result }: { result: ChapterNovelValidationResult }
           <ul>
             {result.missingRequirements.map((requirement) => (
               <li key={requirement}>
-                {missingRequirementLabels[requirement] ?? "需要补充可核验的结构化故事资料。"}
+                {missingRequirementLabels[requirement] ?? "需要补充可核验的故事设定。"}
               </li>
             ))}
           </ul>
@@ -2093,6 +2152,32 @@ function SkippedCheckResult({ result }: { result: ChapterNovelValidationResult }
       }
     />
   );
+}
+
+function countPendingAuthorReviewFacts(facts: readonly StoryFact[]): number {
+  const identities = new Set<string>();
+  for (const fact of facts) {
+    const identity = pendingAuthorReviewIdentity(fact.toSnapshot());
+    if (identity !== null) identities.add(identity);
+  }
+  return identities.size;
+}
+
+function pendingAuthorReviewIdentity(snapshot: StoryFactSnapshot): string | null {
+  const directLocalIdentity = directLocalPendingEvidenceIdentity(snapshot);
+  if (directLocalIdentity !== null) return `local:${directLocalIdentity.key}`;
+  if (
+    snapshot.status === "unconfirmed" &&
+    snapshot.origin === "user" &&
+    snapshot.needsReview &&
+    !snapshot.userConfirmed &&
+    !snapshot.locked &&
+    snapshot.source.kind === "user_statement" &&
+    snapshot.source.reference.startsWith("user-statement:draft:")
+  ) {
+    return `author:${snapshot.source.reference}`;
+  }
+  return null;
 }
 
 function IssueCard({
@@ -2225,7 +2310,7 @@ function EvidencePanel({
           {evidence.map((source) => (
             <li key={`${source.sourceVersionId}:${String(source.startOffset)}`}>
               <span>{evidenceSourceLabel(source.sourceKind)}</span>
-              <span>已绑定对应不可变版本</span>
+              <span>已绑定对应的历史版本</span>
               <span>
                 位置 {source.startOffset}–{source.endOffset}
               </span>

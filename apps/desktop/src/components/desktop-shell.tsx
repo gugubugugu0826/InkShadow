@@ -276,6 +276,17 @@ export function DesktopShell({ children }: DesktopShellProps) {
       if (heading === null) {
         return;
       }
+      const activeElement = document.activeElement;
+      if (
+        activeElement instanceof HTMLElement &&
+        activeElement !== main &&
+        activeElement !== heading &&
+        main.contains(activeElement)
+      ) {
+        focused = true;
+        observer.disconnect();
+        return;
+      }
       if (!heading.hasAttribute("tabindex")) {
         heading.tabIndex = -1;
       }
@@ -316,11 +327,11 @@ export function DesktopShell({ children }: DesktopShellProps) {
   const sharedAiDescription =
     aiReadinessSnapshot.failure === null
       ? aiReadiness.description
-      : `${aiReadiness.description} 支持编号：${aiReadinessSnapshot.failure.supportId}。${aiReadinessSnapshot.failure.recovery}`;
+      : `${aiReadiness.description} 问题编号：${aiReadinessSnapshot.failure.supportId}（联系支持时提供）。${aiReadinessSnapshot.failure.recovery}`;
   const aiStatusDescription =
     scopedBlockerCode === null
       ? sharedAiDescription
-      : `${scopedTaskLabel}受影响：${modelHubReadinessBlockerLabel(scopedBlockerCode)}。${scopedRepair.guidance}；正文、不可变版本和隔离建议均未改变。`;
+      : `${scopedTaskLabel}受影响：${modelHubReadinessBlockerLabel(scopedBlockerCode)}。${scopedRepair.guidance}；正文、不会被改动的历史版本和隔离建议均未改变。`;
   const aiStatusTone = scopedBlockerCode === null ? aiReadiness.tone : "warning";
   const currentAppearanceLabel = resolvedSurface === "dark" ? "深色" : "浅色";
   const nextAppearanceLabel = resolvedSurface === "dark" ? "浅色" : "深色";
@@ -423,6 +434,7 @@ export function DesktopShell({ children }: DesktopShellProps) {
           <>
             <Link
               className="desktop-topbar__ai-status"
+              data-tone={aiStatusTone}
               to={scopedBlockerCode === null ? "/settings#model-center" : scopedRepair.href}
               aria-label={`${aiStatusDescription} ${scopedBlockerCode === null ? "打开模型中心" : scopedRepair.linkAction}`}
               title={aiStatusDescription}

@@ -232,6 +232,7 @@ export function StoryOutlinePage() {
     () => (outline === null || book === null ? [] : outline.orderedChildren(book.id)),
     [book, outline],
   );
+  const firstEditableVolume = volumes.find((volume) => !volume.locked) ?? null;
   const readonly = project?.status !== "active";
   const normalizedError = error === null ? null : projectOrdinaryUiError(error);
   const currentOutline = outline;
@@ -374,7 +375,7 @@ export function StoryOutlinePage() {
         <InlineAlert
           tone="warning"
           title="章节摘要暂不可用"
-          description={`${derivedReadWarning.section}没有读取成功；正文和大纲仍可使用，也没有删除任何记录。支持编号：${derivedReadWarning.supportId}。`}
+          description={`${derivedReadWarning.section}没有读取成功；正文和大纲仍可使用，也没有删除任何记录。问题编号：${derivedReadWarning.supportId}（联系支持时提供）。`}
         />
       )}
 
@@ -476,7 +477,7 @@ export function StoryOutlinePage() {
               <ErrorState
                 title={normalizedError.title}
                 description={`${normalizedError.description}${
-                  loadSupportId === null ? "" : ` 支持编号：${loadSupportId}。`
+                  loadSupportId === null ? "" : ` 问题编号：${loadSupportId}（联系支持时提供）。`
                 }`}
                 primaryAction={{ label: "重试", onClick: () => void load() }}
               />
@@ -490,6 +491,15 @@ export function StoryOutlinePage() {
               outline={currentOutline}
               service={runtime.story.storyPlanning}
               disabled={readonly || busy}
+              {...(book.locked
+                ? {}
+                : { onCreateVolume: () => openAdd({ kind: "volume", parentId: book.id }) })}
+              {...(firstEditableVolume === null
+                ? {}
+                : {
+                    onAddChapter: () =>
+                      openAdd({ kind: "chapter", parentId: firstEditableVolume.id }),
+                  })}
               onOutlineChanged={load}
             />
             <section aria-labelledby="outline-structure-title">
@@ -714,6 +724,7 @@ function OutlineVolumeCard({
             {volume.locked ? "解锁" : "锁定"}
           </Button>
         </div>
+        <p className="outline-lock-explanation">锁定后不会被意外移动或重命名。</p>
 
         {chapters.length === 0 ? (
           <p className="outline-empty-chapters">本卷还没有章节节点。</p>

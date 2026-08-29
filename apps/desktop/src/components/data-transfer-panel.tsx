@@ -40,6 +40,7 @@ import {
 import { collectProjectExportSnapshot } from "../infrastructure/project-export-snapshot";
 import {
   ExportArtifactSaveError,
+  openSavedExportArtifact,
   persistLastExportReceipt,
   readLastExportReceipt,
   saveExportArtifact,
@@ -126,6 +127,7 @@ interface ExportNotice {
   readonly tone: "info" | "warning";
   readonly title: string;
   readonly description: string;
+  readonly receipt?: ExportArtifactSaveReceipt;
 }
 
 function formatBytes(bytes: number): string {
@@ -230,6 +232,8 @@ export function DataTransferPanel({
   const [includeLocalOnlyChapters, setIncludeLocalOnlyChapters] = useState(false);
   const [transferError, setTransferError] = useState<string | null>(null);
   const [exportNotice, setExportNotice] = useState<ExportNotice | null>(null);
+  const [exportDestinationPromptOpen, setExportDestinationPromptOpen] = useState(false);
+  const [exportFollowUpMessage, setExportFollowUpMessage] = useState<string | null>(null);
   const importAbortRef = useRef<AbortController | null>(null);
   const exportAbortRef = useRef<AbortController | null>(null);
   const importFileInputRef = useRef<HTMLInputElement>(null);
@@ -435,6 +439,8 @@ export function DataTransferPanel({
     setPdfProgress(null);
     setTransferError(null);
     setExportNotice(null);
+    setExportDestinationPromptOpen(false);
+    setExportFollowUpMessage(null);
     let omittedLocalOnlyChapterCount = 0;
     try {
       const chaptersResult = await runtime.repositories.chapters.listByProjectId(project.id);
@@ -585,6 +591,7 @@ export function DataTransferPanel({
       setDocxProgress(null);
       setPdfProgress(null);
       setExportBusy(null);
+      setExportDestinationPromptOpen(false);
     }
   }
 
@@ -594,9 +601,38 @@ export function DataTransferPanel({
     omittedLocalOnlyChapterCount: number,
     detail = "",
   ): Promise<void> {
-    const receipt = await saveExportArtifact(artifact, { format, mode: runtime.mode });
+    const receipt = await saveExportArtifact(artifact, {
+      format,
+      mode: runtime.mode,
+      onDestinationPromptChange: setExportDestinationPromptOpen,
+    });
     rememberExportReceipt(receipt);
     setExportNotice(exportReceiptNotice(receipt, omittedLocalOnlyChapterCount, detail));
+  }
+
+  async function handleSavedExportAction(
+    receipt: ExportArtifactSaveReceipt,
+    action: "open_file" | "show_in_folder" | "copy_path",
+  ): Promise<void> {
+    setTransferError(null);
+    setExportFollowUpMessage(null);
+    try {
+      if (action === "copy_path") {
+        await navigator.clipboard.writeText(receipt.path);
+        setExportFollowUpMessage("保存路径已复制。");
+        return;
+      }
+      await openSavedExportArtifact(receipt.path, action);
+      setExportFollowUpMessage(
+        action === "open_file" ? "已交给系统打开文件。" : "已打开文件所在位置。",
+      );
+    } catch {
+      setTransferError(
+        action === "copy_path"
+          ? "暂时无法复制保存路径，请从上方完整路径手动复制。"
+          : "暂时无法打开保存位置，文件仍保留在上方显示的完整路径中。",
+      );
+    }
   }
 
   function rememberExportReceipt(receipt: ExportArtifactSaveReceipt): void {
@@ -657,6 +693,11 @@ export function DataTransferPanel({
       setExportBusy(null);
     }
   }
+
+  const completedExportReceipt =
+    exportNotice?.receipt?.status === "success" && exportNotice.receipt.verification === "verified"
+      ? exportNotice.receipt
+      : null;
 
   return (
     <Card id="data-transfer" className="settings-card--wide" aria-labelledby="data-transfer-title">
@@ -895,6 +936,9 @@ export function DataTransferPanel({
                     <Button
                       variant="secondary"
                       loading={exportBusy === "text"}
+                      loadingLabel={
+                        exportDestinationPromptOpen ? "等待你选择保存位置" : "正在准备 TXT"
+                      }
                       disabled={exportBusy !== null || selectedProjectId.length === 0}
                       onClick={() => void exportProject("text")}
                     >
@@ -903,6 +947,9 @@ export function DataTransferPanel({
                     <Button
                       variant="secondary"
                       loading={exportBusy === "markdown"}
+                      loadingLabel={
+                        exportDestinationPromptOpen ? "等待你选择保存位置" : "正在准备 Markdown"
+                      }
                       disabled={exportBusy !== null || selectedProjectId.length === 0}
                       onClick={() => void exportProject("markdown")}
                     >
@@ -911,6 +958,9 @@ export function DataTransferPanel({
                     <Button
                       variant="secondary"
                       loading={exportBusy === "epub"}
+                      loadingLabel={
+                        exportDestinationPromptOpen ? "等待你选择保存位置" : "正在生成 EPUB"
+                      }
                       disabled={exportBusy !== null || selectedProjectId.length === 0}
                       onClick={() => void exportProject("epub")}
                     >
@@ -919,6 +969,9 @@ export function DataTransferPanel({
                     <Button
                       variant="secondary"
                       loading={exportBusy === "docx"}
+                      loadingLabel={
+                        exportDestinationPromptOpen ? "等待你选择保存位置" : "正在生成 DOCX"
+                      }
                       disabled={exportBusy !== null || selectedProjectId.length === 0}
                       onClick={() => void exportProject("docx")}
                     >
@@ -927,6 +980,9 @@ export function DataTransferPanel({
                     <Button
                       variant="secondary"
                       loading={exportBusy === "pdf"}
+                      loadingLabel={
+                        exportDestinationPromptOpen ? "等待你选择保存位置" : "正在生成 PDF"
+                      }
                       disabled={exportBusy !== null || selectedProjectId.length === 0}
                       onClick={() => void exportProject("pdf")}
                     >
@@ -934,6 +990,9 @@ export function DataTransferPanel({
                     </Button>
                     <Button
                       loading={exportBusy === "bundle"}
+                      loadingLabel={
+                        exportDestinationPromptOpen ? "等待你选择保存位置" : "正在准备项目包"
+                      }
                       disabled={exportBusy !== null || selectedProjectId.length === 0}
                       onClick={() => void exportProject("bundle")}
                     >
@@ -991,6 +1050,9 @@ export function DataTransferPanel({
                     <Button
                       variant="secondary"
                       loading={exportBusy === "report"}
+                      loadingLabel={
+                        exportDestinationPromptOpen ? "等待你选择保存位置" : "正在准备领域报告"
+                      }
                       disabled={exportBusy !== null || selectedProjectId.length === 0}
                       onClick={() => void exportProjectReport()}
                     >
@@ -1000,11 +1062,42 @@ export function DataTransferPanel({
                 </>
               )}
               {exportNotice !== null && (
-                <InlineAlert
-                  tone={exportNotice.tone}
-                  title={exportNotice.title}
-                  description={exportNotice.description}
-                />
+                <>
+                  <InlineAlert
+                    tone={exportNotice.tone}
+                    title={exportNotice.title}
+                    description={exportNotice.description}
+                  />
+                  {runtime.mode === "tauri" && completedExportReceipt !== null && (
+                    <div className="settings-actions" aria-label="导出完成操作">
+                      <Button
+                        variant="secondary"
+                        onClick={() =>
+                          void handleSavedExportAction(completedExportReceipt, "open_file")
+                        }
+                      >
+                        打开文件
+                      </Button>
+                      <Button
+                        variant="secondary"
+                        onClick={() =>
+                          void handleSavedExportAction(completedExportReceipt, "show_in_folder")
+                        }
+                      >
+                        打开所在文件夹
+                      </Button>
+                      <Button
+                        variant="ghost"
+                        onClick={() =>
+                          void handleSavedExportAction(completedExportReceipt, "copy_path")
+                        }
+                      >
+                        复制路径
+                      </Button>
+                    </div>
+                  )}
+                  {exportFollowUpMessage !== null && <p role="status">{exportFollowUpMessage}</p>}
+                </>
               )}
             </section>
           )}
@@ -1066,6 +1159,7 @@ function exportReceiptNotice(
         ? ` 已按默认保护排除 ${String(omittedLocalOnlyChapterCount)} 个私密章节。`
         : ""
     }`,
+    receipt,
   };
 }
 

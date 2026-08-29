@@ -122,7 +122,10 @@ export function ContextHistoryPanel({ projectId, store, novelSkills }: ContextHi
       <div className="section-heading">
         <div>
           <h2 id="context-history-title">AI 本次参考了什么</h2>
-          <p>查看每次创作采用和舍弃的资料、来源与预算。记录不保存正文、提示词或模型回复。</p>
+          <p>
+            查看每次创作采用和舍弃的资料、来源，以及发送给 AI
+            的文字量（不是金额）。记录不保存正文、提示词或模型回复。
+          </p>
         </div>
         <Button size="sm" variant="secondary" disabled={loading} onClick={() => void load()}>
           刷新记录
@@ -144,7 +147,7 @@ export function ContextHistoryPanel({ projectId, store, novelSkills }: ContextHi
       ) : summaries.length === 0 ? (
         <EmptyState
           title="还没有上下文记录"
-          description="第一次使用“继续创作”等 AI 功能后，这里会显示 AI 采用了哪些设定，以及哪些资料因为预算或相关性被舍弃。"
+          description="第一次使用“继续创作”等 AI 功能后，这里会显示 AI 采用了哪些设定，以及哪些资料因为可参考文字量或相关性被舍弃。"
         />
       ) : (
         <div className="story-governance-grid">
@@ -160,7 +163,7 @@ export function ContextHistoryPanel({ projectId, store, novelSkills }: ContextHi
               </CardHeader>
               <CardContent>
                 <p>
-                  估算输入内容额度 {summary.usedTokens.toLocaleString("zh-CN")}/
+                  发送给 AI 的文字量（不是金额）约 {summary.usedTokens.toLocaleString("zh-CN")}/
                   {summary.maximumContextTokens.toLocaleString("zh-CN")}；未发送{" "}
                   {summary.discardedCount}
                   项。
@@ -223,17 +226,17 @@ export function ContextHistoryPanel({ projectId, store, novelSkills }: ContextHi
             {selectedNovelSkills?.status === "not_found" && (
               <InlineAlert
                 tone="info"
-                title="这次没有可追溯的写作方法收据"
-                description="这可能是启用写作方法之前生成的旧记录，或使用了无法建立精确调用链的兼容路线；不会把它误报为已采用。"
+                title="这次没有可追溯的写作技能采用记录"
+                description="这可能是启用写作技能之前生成的旧记录，或使用了无法建立准确调用链的兼容路线；不会把它误报为已采用。"
               />
             )}
             {selectedNovelSkills?.status === "unavailable" && (
               <InlineAlert
                 tone="info"
-                title="本环境不提供写作方法收据"
+                title="本环境不提供写作技能采用记录"
                 description={
                   selectedNovelSkills.availability.reason ??
-                  "写作方法记录当前不可用；故事资料记录仍可正常查看。"
+                  "写作技能采用记录当前不可用；故事资料记录仍可正常查看。"
                 }
               />
             )}
@@ -256,10 +259,10 @@ export function ContextHistoryPanel({ projectId, store, novelSkills }: ContextHi
                     {humanReadableSourceTitle(entry)}
                   </p>
                   <p className="candidate-panel__hint">
-                    为保护作品内容，历史记录只保存来源类别、选择原因与预算，不保存正文摘录。
+                    为保护作品内容，历史记录只保存来源类别、选择原因与文字量，不保存正文摘录。
                   </p>
                   <p className="candidate-panel__hint">
-                    估算 {entry.estimatedTokens.toLocaleString("zh-CN")} 个输入内容额度；处理前剩余
+                    估算文字量 {entry.estimatedTokens.toLocaleString("zh-CN")}；处理前剩余
                     {entry.budgetRemainingBefore.toLocaleString("zh-CN")}，处理后剩余
                     {entry.budgetRemainingAfter.toLocaleString("zh-CN")}。
                   </p>
@@ -295,7 +298,7 @@ async function loadNovelSkillLookup(
       availability: Object.freeze({
         status: "degraded",
         reason:
-          "这次写作方法收据暂时无法读取；故事资料记录仍可正常查看，也不会把未知状态误报为已采用。",
+          "这次写作技能采用记录暂时无法读取；故事资料记录仍可正常查看，也不会把未知状态误报为已采用。",
       }),
       invocation: null,
     });
@@ -450,7 +453,7 @@ function sourceTypeLabel(
 
 function discardLabel(reason: string | null): string {
   const labels: Readonly<Record<string, string>> = {
-    token_budget_exhausted: "本次上下文预算不足，未发送给模型。",
+    token_budget_exhausted: "本次可参考文字量已用完，未发送给 AI。",
     duplicate_source: "内容与更高优先级资料重复；证据已合并，没有重复发送。",
   };
   return reason === null ? "本次未采用。" : (labels[reason] ?? "因其他安全规则未采用。");

@@ -20,6 +20,30 @@
   max-width: 100%;
 }
 
+.idea-journey__opening-count {
+  display: grid;
+  gap: var(--space-2);
+  padding: var(--space-3);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  background: var(--surface-subtle);
+}
+
+.idea-journey__opening-count > p,
+.idea-journey__opening-count > small {
+  margin: 0;
+}
+
+.idea-journey__opening-count > p {
+  color: var(--text-primary);
+  font-weight: var(--font-weight-medium);
+}
+
+.idea-journey__opening-count > small {
+  color: var(--text-secondary);
+  line-height: var(--line-sm);
+}
+
 .idea-journey__disabled-reason {
   margin: 0;
   color: var(--text-secondary);

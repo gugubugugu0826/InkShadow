@@ -379,7 +379,7 @@ export function ProjectMaterialsPage() {
           </Link>
           <p className="page-heading__eyebrow">素材库 · 权利与引用治理</p>
           <h1>{project?.name ?? "项目素材库"}</h1>
-          <p>每条素材都保留来源、授权依据和引用快照；未经明确授权不会进入生成或训练。</p>
+          <p>每条素材都保留来源、授权依据和引用时的出处信息；未经明确授权不会进入生成或训练。</p>
         </div>
         <div className="settings-actions">
           <Button disabled={readonly} onClick={openCreate}>
@@ -483,7 +483,7 @@ export function ProjectMaterialsPage() {
                 <div className="section-heading">
                   <div>
                     <h2 id="disposed-title">已处置素材</h2>
-                    <p>正文暂存 {MATERIAL_RETENTION_DAYS} 天；引用继续显示不可变的最小出处快照。</p>
+                    <p>正文暂存 {MATERIAL_RETENTION_DAYS} 天；引用继续显示保存时的最小出处信息。</p>
                   </div>
                   <Badge tone="warning">{disposedMaterials.length} 条</Badge>
                 </div>
@@ -676,7 +676,7 @@ export function ProjectMaterialsPage() {
           }
         }}
         title="记录章节引用"
-        description="引用会绑定目标章节的当前版本，并保存此刻的素材出处快照。"
+        description="引用会绑定目标章节的当前版本，并保存此刻的素材出处信息。"
         footer={
           <>
             <Button variant="secondary" onClick={() => setReferenceMaterial(null)}>
@@ -747,7 +747,7 @@ export function ProjectMaterialsPage() {
           <strong>{deleteMaterial?.toSnapshot().title}</strong>
           <p>
             当前影响：{deleteMaterial === null ? 0 : (references[deleteMaterial.id]?.length ?? 0)}{" "}
-            条章节引用。引用保留最小出处快照，素材正文保留 {MATERIAL_RETENTION_DAYS} 天供恢复。
+            条章节引用。引用保留最小出处信息，素材正文保留 {MATERIAL_RETENTION_DAYS} 天供恢复。
           </p>
         </div>
       </Dialog>
@@ -761,7 +761,7 @@ export function ProjectMaterialsPage() {
           }
         }}
         title="合并重复素材"
-        description="源素材会变为已合并状态；既有引用仍指向原始出处快照，不会被静默改写。"
+        description="源素材会变为已合并状态；既有引用仍指向原始出处信息，不会被静默改写。"
         footer={
           <>
             <Button variant="secondary" onClick={() => setMergeMaterial(null)}>
@@ -920,7 +920,7 @@ function MaterialCard({
                     <strong>{chapter?.title ?? "已移除章节"}</strong>
                     <span>{referenceSnapshot.note}</span>
                     <small>
-                      出处快照：{referenceSnapshot.provenance.sourceName} ·{" "}
+                      保存的出处：{referenceSnapshot.provenance.sourceName} ·{" "}
                       {licenseLabel(referenceSnapshot.provenance.license)} · 版本{" "}
                       {referenceSnapshot.targetVersionId.slice(0, 8)}…
                     </small>

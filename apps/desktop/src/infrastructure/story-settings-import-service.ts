@@ -989,7 +989,7 @@ async function assertUndoFences(
       if (receipt.createdRecordIds.some((id) => containsExactString(value, id))) {
         throw new StorySettingsImportError(
           "STORY_SETTINGS_UNDO_CONFLICT",
-          "导入后已有其他正式设定引用了新人物；请先处理引用或使用导入前快照恢复。",
+          "导入后已有其他正式设定引用了新人物；请先处理引用或使用导入前恢复记录还原。",
         );
       }
     }
@@ -1066,7 +1066,7 @@ async function tableExists(transaction: TransactionExecutor, table: string): Pro
 function undoConflict(): StorySettingsImportError {
   return new StorySettingsImportError(
     "STORY_SETTINGS_UNDO_CONFLICT",
-    "导入后的设定已被继续修改，无法静默撤销；请保留当前内容或使用导入前快照恢复。",
+    "导入后的设定已被继续修改，无法静默撤销；请保留当前内容或使用导入前恢复记录还原。",
   );
 }
 

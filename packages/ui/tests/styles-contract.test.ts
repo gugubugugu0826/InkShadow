@@ -81,6 +81,14 @@ describe("layout style contracts", () => {
     expect(componentStyles).toMatch(/@media\s*\(forced-colors:\s*active\)/u);
   });
 
+  it("keeps the top-bar AI-ready status readable on the dark shell", () => {
+    const darkReadyBackground = compositeHex("#2f9e68", "#161b22", 0.14);
+    expect(contrastRatio("#48dfa9", darkReadyBackground)).toBeGreaterThanOrEqual(4.5);
+    expect(desktopStyles).toMatch(
+      /\.desktop-topbar__ai-status\[data-tone="success"\] \.ink-badge\s*\{[^}]*border-color:\s*var\(--success-text\);/su,
+    );
+  });
+
   it("applies the icon stroke through currentColor and the shared 1.75 token", () => {
     expect(componentStyles).toMatch(
       /\.ink-icon\s*\{[^}]*color:\s*inherit;[^}]*stroke:\s*currentcolor;[^}]*stroke-width:\s*var\(--icon-stroke-width\);/su,
@@ -227,4 +235,21 @@ function relativeLuminance(hex: string): number {
       (luminance, channel, index) => luminance + channel * ([0.2126, 0.7152, 0.0722][index] ?? 0),
       0,
     );
+}
+
+function compositeHex(foreground: string, background: string, alpha: number): string {
+  const foregroundChannels = parseHexChannels(foreground);
+  const backgroundChannels = parseHexChannels(background);
+  const channels = foregroundChannels.map((channel, index) =>
+    Math.round(channel * alpha + (backgroundChannels[index] ?? 0) * (1 - alpha)),
+  );
+  return `#${channels.map((channel) => channel.toString(16).padStart(2, "0")).join("")}`;
+}
+
+function parseHexChannels(hex: string): readonly number[] {
+  const match = /^#(?<red>[\da-f]{2})(?<green>[\da-f]{2})(?<blue>[\da-f]{2})$/iu.exec(hex);
+  if (match?.groups === undefined) throw new Error(`Invalid hex colour: ${hex}`);
+  return [match.groups.red, match.groups.green, match.groups.blue].map((channel) =>
+    Number.parseInt(channel, 16),
+  );
 }

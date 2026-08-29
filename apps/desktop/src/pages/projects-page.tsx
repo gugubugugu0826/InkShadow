@@ -908,6 +908,9 @@ function ProjectLibraryCard({
       </CardHeader>
       <CardContent>
         <p className="project-meta">
+          创建于 <time dateTime={snapshot.createdAt}>{formatDate(snapshot.createdAt)}</time>
+        </p>
+        <p className="project-meta">
           更新于 <time dateTime={snapshot.updatedAt}>{formatDate(snapshot.updatedAt)}</time>
         </p>
         {project.retentionUntil !== null && (

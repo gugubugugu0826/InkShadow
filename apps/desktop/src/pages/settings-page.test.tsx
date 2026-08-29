@@ -651,7 +651,9 @@ describe("SettingsPage model routing", () => {
     expect(within(confirmation).getByText(/DeepSeek/u)).toBeVisible();
     expect(within(confirmation).getByText(/deepseek-v4-flash/u)).toBeVisible();
     expect(within(confirmation).getByText(/固定用户句：雨停了。/u)).toBeVisible();
-    expect(within(confirmation).getByText(/最大输出：\s*64 个输出内容额度/u)).toBeVisible();
+    expect(
+      within(confirmation).getByText(/最大输出：\s*AI 最多返回 64\s*个文字量单位（这不是金额）/u),
+    ).toBeVisible();
     expect(
       within(confirmation).getByText(/最多向模型服务发送：\s*1 次；自动重试：\s*0 次/u),
     ).toBeVisible();
@@ -1056,32 +1058,30 @@ describe("SettingsPage model routing", () => {
 
     expect(await screen.findByRole("heading", { name: "模型中心 · 模型评测" })).toBeVisible();
     expect(
-      screen.queryByRole("button", { name: "写作方法 A/B 评测（专家）" }),
+      screen.queryByRole("button", { name: "写作技能对照验证（专家）" }),
     ).not.toBeInTheDocument();
     expect(
-      screen.queryByRole("heading", { name: "内置小说 Skill 付费 A/B 评测" }),
+      screen.queryByRole("heading", { name: "内置写作技能付费对照验证" }),
     ).not.toBeInTheDocument();
     expect(initializePaidEvaluation).not.toHaveBeenCalled();
 
     await user.click(screen.getByRole("button", { name: "专家设置" }));
-    const expand = screen.getByRole("button", { name: "写作方法 A/B 评测（专家）" });
+    const expand = screen.getByRole("button", { name: "写作技能对照验证（专家）" });
     expect(expand).toHaveAttribute("aria-expanded", "false");
     expect(
-      screen.queryByRole("heading", { name: "内置小说 Skill 付费 A/B 评测" }),
+      screen.queryByRole("heading", { name: "内置写作技能付费对照验证" }),
     ).not.toBeInTheDocument();
     expect(initializePaidEvaluation).not.toHaveBeenCalled();
 
     await user.click(expand);
-    expect(
-      await screen.findByRole("heading", { name: "内置小说 Skill 付费 A/B 评测" }),
-    ).toBeVisible();
+    expect(await screen.findByRole("heading", { name: "内置写作技能付费对照验证" })).toBeVisible();
     expect(initializePaidEvaluation).toHaveBeenCalledTimes(1);
     expect(screen.getByText("当前不能进行付费评测")).toBeVisible();
     expect(generate).not.toHaveBeenCalled();
 
     await user.click(screen.getByRole("button", { name: "收起专家设置" }));
     expect(
-      screen.queryByRole("heading", { name: "内置小说 Skill 付费 A/B 评测" }),
+      screen.queryByRole("heading", { name: "内置写作技能付费对照验证" }),
     ).not.toBeInTheDocument();
     expect(generate).not.toHaveBeenCalled();
   });
@@ -1097,7 +1097,7 @@ describe("SettingsPage model routing", () => {
     ).toBeVisible();
     expect(screen.queryByLabelText("基础地址")).not.toBeInTheDocument();
     expect(screen.queryByLabelText("认证方式")).not.toBeInTheDocument();
-    expect(screen.queryByLabelText(/^单次读取上限（内容额度）/u)).not.toBeInTheDocument();
+    expect(screen.queryByLabelText(/^单次可发送的文字量上限（不是金额）/u)).not.toBeInTheDocument();
     expect(screen.queryByRole("option", { name: "Google Gemini" })).not.toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: "专家设置" }));
@@ -1106,7 +1106,7 @@ describe("SettingsPage model routing", () => {
     expect(screen.getByRole("option", { name: "Anthropic Claude" })).toBeInTheDocument();
     expect(screen.getByLabelText("基础地址")).toBeVisible();
     expect(screen.getByLabelText("认证方式")).toBeVisible();
-    expect(screen.getByLabelText(/^单次读取上限（内容额度）/u)).toBeInTheDocument();
+    expect(screen.getByLabelText(/^单次可发送的文字量上限（不是金额）/u)).toBeInTheDocument();
     expect(screen.getByText("重试不会重复计费请求")).toBeVisible();
     expect(screen.queryByText("专家兼容设置：旧 7 角色任务安排")).not.toBeInTheDocument();
     await user.click(screen.getByRole("link", { name: "创作任务安排" }));
@@ -1149,7 +1149,7 @@ describe("SettingsPage model routing", () => {
       "未连接",
       "正在验证",
       "基础配置可用",
-      "基础配置完整",
+      "AI 写作功能已准备好",
       "部分能力不可用",
       "连接失败",
       "额度不足",
@@ -1671,7 +1671,7 @@ describe("SettingsPage model routing", () => {
       },
     };
     const user = userEvent.setup();
-    renderRoute(runtime);
+    renderRoute(runtime, "/settings?connectionId=failed-editable-provider#model-center");
 
     const editAndRetry = await screen.findByRole("button", { name: "编辑并重试" });
     expect(screen.getByText(/连接设置和已保存密钥都仍然保留/u)).toBeVisible();
@@ -3174,8 +3174,8 @@ describe("SettingsPage model routing", () => {
       await screen.findByRole("combobox", { name: "要检查的能力" }),
       "text_generation",
     );
-    expect(await screen.findByText(/最多请求 64 个输出内容额度/u)).toBeVisible();
-    expect(screen.queryByText(/最多请求 8 个输出内容额度/u)).not.toBeInTheDocument();
+    expect(await screen.findByText(/AI 最多返回 64 个文字量单位/u)).toBeVisible();
+    expect(screen.queryByText(/AI 最多返回 8 个文字量单位/u)).not.toBeInTheDocument();
     await waitFor(() => expect(verifyButton).toBeEnabled());
     await user.click(verifyButton);
 
@@ -3573,7 +3573,7 @@ describe("SettingsPage model routing", () => {
     expect(within(alert).getByText(/阶段：服务商响应/u)).toBeVisible();
     expect(within(alert).getByText(/模型或接口路径.*证据不足以判断是哪一项不匹配/u)).toBeVisible();
     expect(within(alert).getByText(/同时核对模型标识和接口路径/u)).toBeVisible();
-    expect(within(alert).getByText(/支持编号：墨影-/u)).toBeVisible();
+    expect(within(alert).getByText(/问题编号：墨影-.*联系支持时提供/u)).toBeVisible();
     expect(within(alert).queryByText(/404|MODEL_HTTP_NOT_FOUND/u)).not.toBeInTheDocument();
 
     const advanced = screen.getByText("查看高级诊断详情").closest("details");
@@ -3691,7 +3691,9 @@ describe("SettingsPage model routing", () => {
     expect(textGeneration).not.toBeNull();
     expect(within(textGeneration as HTMLElement).getByText(/结果待核对/u)).toBeVisible();
     expect(
-      within(textGeneration as HTMLElement).getByText(/这次发送的结果需要核对，系统不会自动重发/u),
+      within(textGeneration as HTMLElement).getByText(
+        /请求可能已经发出，暂时无法确认结果；系统不会自动重发/u,
+      ),
     ).toBeVisible();
     expect(screen.getByText("最近结果待核对")).toBeVisible();
     expect(screen.queryByText("验证失败")).not.toBeInTheDocument();

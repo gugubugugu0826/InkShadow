@@ -140,11 +140,18 @@ describe("TaskCenterPage", () => {
     expect(await screen.findByRole("heading", { name: "生成开书建议" })).toBeVisible();
     expect(screen.getByText(/不会自动重试/u)).toBeVisible();
     expect(screen.getByText("等待模型返回")).toBeVisible();
-    expect(screen.getByText("支持编号：墨影-20260726000000-00002A")).toBeVisible();
+    expect(
+      screen.getByText("问题编号：墨影-20260726000000-00002A（联系支持时提供）"),
+    ).toBeVisible();
     expect(document.body).not.toHaveTextContent(uuid(42));
     expect(document.body).not.toHaveTextContent(uuid(41));
     expect(screen.queryByText("ai.opening.generate")).not.toBeInTheDocument();
     expect(screen.queryByText("OPENING_RESULT_PENDING_REVIEW")).not.toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "导出问题信息" })).toHaveAttribute(
+      "href",
+      "/settings#diagnostics",
+    );
+    expect(document.body).not.toHaveTextContent("导出诊断");
     expect(screen.getByRole("link", { name: "返回开书页面处理" })).toHaveAttribute(
       "href",
       "/create/idea",

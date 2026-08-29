@@ -279,6 +279,11 @@ async function checkConfiguration() {
     "post-package release provenance gate",
   );
   expectEqual(
+    rootManifest?.scripts?.["release:verify:installer-version"],
+    "node scripts/check-windows-installer-version.mjs",
+    "Windows installer version gate",
+  );
+  expectEqual(
     rootManifest?.scripts?.["test:scripts"],
     "node scripts/script-test-runner.mjs",
     "script test gate",
@@ -298,6 +303,9 @@ async function checkConfiguration() {
   }
   if (!/run:\s+pnpm --filter @inkshadow\/desktop tauri:package:unsigned:prebuilt/u.test(ci)) {
     fail("CI native packaging must package the already exercised release frontend.");
+  }
+  if (!/run:\s+pnpm release:verify:installer-version/u.test(ci)) {
+    fail("CI native packaging must verify the packaged Windows version fields.");
   }
   const qualityJobOffset = ci.indexOf("\n  quality:");
   const qualityBuildOffset = ci.indexOf("- name: Build workspace", qualityJobOffset);

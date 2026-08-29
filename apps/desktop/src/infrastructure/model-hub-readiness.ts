@@ -90,7 +90,7 @@ export const MODEL_HUB_STATE_EXPLANATIONS: Readonly<
       "正文生成、续写、改写和润色所需的连接、模型与创作任务安排已通过基础检查；当前作品仍会在发送前单独检查隐私、参考资料和请求长度。",
   }),
   fully_ready: Object.freeze({
-    label: "基础配置完整",
+    label: "AI 写作功能已准备好",
     description:
       "写作、续写、润色、长程记忆和核心检查的基础配置均已通过；每个章节在发送前仍会单独检查。",
   }),
