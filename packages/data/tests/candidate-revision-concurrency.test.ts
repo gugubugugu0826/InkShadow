@@ -73,6 +73,11 @@ const UNKNOWN_ACCEPT_TASK_ID = uuid(8);
 const DUPLICATE_ACCEPT_VERSION_ID = uuid(9);
 const NOW = iso("2026-08-08T00:00:00.000Z");
 const LATER = iso("2026-08-08T00:01:00.000Z");
+// This restart-safety scenario performs synchronous file creation, migration,
+// close, reopen, authoritative reads, and recursive cleanup. Keep the ordinary
+// file-backed budget at 15 seconds, but allow one shared-runner disk stall here;
+// every state, single-dispatch, and idempotency assertion below remains strict.
+const UNKNOWN_COMMIT_RESTART_RECONCILIATION_TIMEOUT_MS = 60_000;
 
 describe("SQLite Candidate revision authority", () => {
   fileSqliteIt("rejects stale revise and accept writes across two real connections", async () => {
@@ -373,6 +378,8 @@ describe("SQLite Candidate revision authority", () => {
           },
         });
         expect(outcome.error.actions).toEqual(["EXPORT_DRAFT"]);
+        expect(uncertainExecutor.transactionCallCount).toBe(1);
+        expect(first.database.isTransaction).toBe(false);
 
         await first.close();
         firstOpen = false;
@@ -418,6 +425,12 @@ describe("SQLite Candidate revision authority", () => {
             versionId: UNKNOWN_ACCEPT_VERSION_ID,
           },
         });
+        await expect(
+          restarted.select<{ count: number }>(
+            "SELECT COUNT(*) AS count FROM background_tasks WHERE idempotency_key = ?",
+            [`story.accepted-version:${UNKNOWN_ACCEPT_VERSION_ID}`],
+          ),
+        ).resolves.toEqual([{ count: 1 }]);
 
         const duplicate = await new AcceptAiCandidate(
           restartedRepositories.aiCandidates,
@@ -435,19 +448,31 @@ describe("SQLite Candidate revision authority", () => {
         expect(
           expectOk(await restartedRepositories.chapterVersions.listByChapterId(CHAPTER_ID)),
         ).toHaveLength(2);
+        await expect(
+          restarted.select<{ count: number }>(
+            "SELECT COUNT(*) AS count FROM background_tasks WHERE idempotency_key = ?",
+            [`story.accepted-version:${UNKNOWN_ACCEPT_VERSION_ID}`],
+          ),
+        ).resolves.toEqual([{ count: 1 }]);
       } finally {
         await restarted?.close();
         if (firstOpen) await first.close();
         rmSync(directory, { recursive: true, force: true });
       }
     },
+    UNKNOWN_COMMIT_RESTART_RECONCILIATION_TIMEOUT_MS,
   );
 });
 
 class LostCommitReceiptExecutor implements SqlExecutor {
   private loseNextTransactionReceipt = true;
+  private transactionCalls = 0;
 
   public constructor(private readonly delegate: SqlExecutor) {}
+
+  public get transactionCallCount(): number {
+    return this.transactionCalls;
+  }
 
   public select<Row extends object>(
     query: string,
@@ -463,6 +488,7 @@ class LostCommitReceiptExecutor implements SqlExecutor {
   public async transaction<Value>(
     operation: (transaction: TransactionExecutor) => Promise<Value>,
   ): Promise<Value> {
+    this.transactionCalls += 1;
     const value = await this.delegate.transaction(operation);
     if (this.loseNextTransactionReceipt) {
       this.loseNextTransactionReceipt = false;
