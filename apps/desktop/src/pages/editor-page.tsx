@@ -1,6 +1,7 @@
 import {
   useCallback,
   useEffect,
+  useLayoutEffect,
   useRef,
   useState,
   type ChangeEvent as ReactChangeEvent,
@@ -2190,7 +2191,7 @@ export function EditorPage() {
     );
   }, [location.hash, location.pathname, location.search, location.state, navigate]);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (pageState !== "ready") {
       return;
     }
