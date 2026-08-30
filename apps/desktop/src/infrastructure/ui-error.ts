@@ -61,6 +61,13 @@ export function projectOrdinaryUiError(error: unknown): OrdinaryUiError {
 }
 
 function databaseErrorPresentation(error: AppError): OrdinaryUiError | null {
+  if (error.details.databaseCode === "PROJECT_REMOTE_DISPATCH_ACTIVE") {
+    return {
+      title: "暂时无法完成这项操作",
+      description:
+        "本作品仍有一次 AI 处理正在发送或等待结束。请先停止该任务，或等它结束后重新读取当前页面，再重试刚才的操作。",
+    };
+  }
   if (
     error.details.databaseCode === "SQLITE_WRITE_OUTCOME_UNKNOWN" ||
     error.details.databaseCode === "SQLITE_COMMIT_OUTCOME_UNKNOWN"
@@ -158,7 +165,7 @@ function recordErrorDescription(code: string): string {
     return "这次扩展请求已经结束，但供应商没有返回可核对的用量。正文没有被覆盖；可先导出历史，确认供应商记录后再决定是否重试。";
   }
   if (code === "CREATIVE_OPENING_TIMEOUT_SCOPE_MISMATCH") {
-    return "开头超时编号与已确认的固定位置不一致。为避免误操作，墨影没有结束其他仍在进行的请求，也没有改写创作进度；请重新读取进度并核对本次发送信息。";
+    return "开头超时编号与已确认的固定位置不一致。为避免误操作，墨影没有结束其他仍在进行的请求，也没有改写创作进度；请重新读取进度并核对本次发送前说明。";
   }
   if (code === "GENERATION_ABANDONED_BY_AUTHOR") {
     return "确认前离开，未确认的生成批次已安全终止";

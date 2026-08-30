@@ -1,11 +1,20 @@
 # InkShadow Desktop 原生层逐文件指引
 
-> 基于源码快照：2026-08-29  
+> 基于源码快照：2026-08-30  
 > 文档状态：`SUPPORTING_CURRENT`  
-> 当前发布目标：`0.2.15`；当前源码迁移上限 Data `0082`／Tauri `85`，本轮后续工作树没有再新增迁移；候选提交、安装包、标签和 Release 结果以最终发布证据为准；设计基线：`DESIGN v0.3.1b`  
+> 当前发布目标：`0.2.16`；当前源码迁移上限 Data `0082`／Tauri `85`，本轮没有新增迁移；候选提交、安装包、标签和 Release 结果以最终发布证据为准；设计基线：`DESIGN v0.3.1b`  
 > 覆盖范围：`apps/desktop/src-tauri`、本地 SQLite 原生桥、自动备份、系统凭据库、原生网络、项目密钥、安全更新与系统容量
 
-## 0. 0.2.15 当前事实
+## 0. 0.2.16 当前事实
+
+- F17 在供应商内容已经返回后，失败于桌面生产 SQLite 隔离结果提交：已发布 `0080` 要求新选区结果保存准确动作，而提交单元遗漏该列。当前实现把四项动作贯穿查询、写入和幂等比较；原生迁移、守卫和校验值保持不变。
+- 本地提交失败且已有可见片段时，页面离开边界允许作者复制或明确放弃片段后释放会话。原生发送回执和调用事实不被删除或伪装成零发送，正文、不可变版本和历史候选不被改写，自动重试保持为零。
+- 章节隐私持久化仍通过现有 SQLite 权威行、预期修订和同步清理边界；只有提交成功才更新页面。私密章节仍在原生网络请求之前失败关闭，不要求配置本地模型才可设为私密。
+- 示例身份、技能任务范围、检查准备和通知隐藏均复用既有生产表与受控适配器。0.2.16 没有新增原生命令或数据库迁移。
+- 当前源码保持 Data `0082_author_recovery_records.sql`／Tauri `85`；v0.2.15 及更早迁移字节、校验和与发布对象保持不变。
+- 当前自动化没有执行真实供应商请求、真实 Windows 凭据交互或 0.2.16 安装程序人工验证；临时 SQLite、可控 HTTP 和浏览器回归不得表述为真实安装结论。
+
+## 0.1 0.2.15 历史事实
 
 - 开书调度在渲染层先保存可恢复旅程和稳定方案槽位，再经过资料、隐私、连接、模型与费用检查；原生模型网关只有在调用标识、连接、目录项、修订、范围与隐私边界全部核对后，才在 SQLite 写入不含作品内容的发送回执并开始网络请求。发送后的不确定结果不会自动重发，成功结果仍只保存为隔离建议。
 - 作者明确开启的写作技能会先编译为有界方法段，并在 Provider 发送前提交采用快照；快照把技能身份、版本、项目、任务和调用连成同一审计链。原生层不解释或自行启用技能，只执行已通过上层最终身份围栏的请求。
@@ -305,6 +314,13 @@ React 页面
 |       76 | `packages/data/migrations/0073_story_fact_user_revisions.sql`                        | 用户故事事实内容修订、治理转换与身份证据不可变约束。              |
 |       77 | `packages/data/migrations/0074_chapter_version_story_fact_responsibility.sql`        | 不可变版本的本地故事资料整理责任与不可修改约束。                  |
 |       78 | `packages/data/migrations/0075_generation_attempt_privacy_snapshot.sql`              | 生成尝试隐私快照、同一调用标识与新行完整性约束。                  |
+|       79 | `packages/data/migrations/0076_direct_local_story_fact_author_revision.sql`          | 直接模式本地故事资料的作者修订与审计，不改变权威正文和版本。      |
+|       80 | `packages/data/migrations/0077_project_display_identities.sql`                       | 内容无关的项目显示身份、修订历史和保护约束。                      |
+|       81 | `packages/data/migrations/0078_generation_attempt_prose_invocation.sql`              | 扩展隐私守卫，使续写与开头生成绑定精确模型调用标识。              |
+|       82 | `packages/data/migrations/0079_story_fact_evidence.sql`                              | 为受治理故事资料追加多处不可变正文依据。                          |
+|       83 | `packages/data/migrations/0080_candidate_selection_action.sql`                       | 为新选区隔离结果冻结改写、润色、扩写或缩写的准确动作。            |
+|       84 | `packages/data/migrations/0081_story_fact_evidence_guard_performance.sql`            | 保持精确 UTF-16 证据守卫并消除长正文重复字节扫描。                |
+|       85 | `packages/data/migrations/0082_author_recovery_records.sql`                          | 保存项目级、带版本与修订的作者恢复记录，并进入备份恢复合同。      |
 
 规则：SQL 通过 `include_str!` 编译进二进制；缺失迁移不忽略、迁移加锁且逐条事务执行。已发布 migration 的内容、描述和顺序不能修改，只能新增。
 

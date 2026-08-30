@@ -1,4 +1,5 @@
-import { Badge, InlineAlert } from "@inkshadow/ui";
+import { useId, useState } from "react";
+import { Badge, Button, InlineAlert } from "@inkshadow/ui";
 import { MAX_NOVEL_SKILLS_PER_INVOCATION } from "@inkshadow/ai-core";
 
 import type {
@@ -52,6 +53,8 @@ function NovelSkillReferenceList({
 }>) {
   const included = methods.filter((method) => method.included);
   const discarded = methods.filter((method) => !method.included);
+  const [discardedOpen, setDiscardedOpen] = useState(false);
+  const discardedListId = useId();
   return (
     <section aria-label="本次采用的写作技能" className="context-history-entry">
       <div className="card-heading-row">
@@ -79,17 +82,28 @@ function NovelSkillReferenceList({
         </ul>
       )}
       {discarded.length > 0 && (
-        <details>
-          <summary>查看本次未采用的写作技能及原因（{discarded.length}）</summary>
-          <ul>
-            {discarded.map((method) => (
-              <li key={`${method.displayName}@${method.version}`}>
-                <strong>{method.displayName}</strong> · 版本 {method.version}
-                <p>{selectionReasonLabel(method.selectionReason)}</p>
-              </li>
-            ))}
-          </ul>
-        </details>
+        <div>
+          <Button
+            type="button"
+            size="sm"
+            variant="ghost"
+            aria-controls={discardedListId}
+            aria-expanded={discardedOpen}
+            onClick={() => setDiscardedOpen((open) => !open)}
+          >
+            {discardedOpen ? "收起" : "查看"}本次未采用的写作技能及原因（{discarded.length}）
+          </Button>
+          {discardedOpen && (
+            <ul id={discardedListId} aria-label="本次未采用的写作技能及原因">
+              {discarded.map((method) => (
+                <li key={`${method.displayName}@${method.version}`}>
+                  <strong>{method.displayName}</strong> · 版本 {method.version}
+                  <p>{selectionReasonLabel(method.selectionReason)}</p>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
       )}
     </section>
   );

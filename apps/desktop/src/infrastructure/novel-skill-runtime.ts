@@ -1124,21 +1124,49 @@ function organizeCustomSkillDraft(description: string): CustomNovelSkillDraft {
   const source = boundedText(description, 8_000, "自然语言说明");
   const displayName =
     /(?:名称|技能名)[：:]\s*([^。；;!！?？\n]{1,120})/u.exec(source)?.[1]?.trim() ?? "我的写作技能";
+  const taskLabels: Readonly<Partial<Record<NovelSkillTask, readonly string[]>>> = {
+    idea_discussion: ["讨论灵感", "灵感讨论"],
+    book_start_guidance: ["设计开头", "开头设计", "开书"],
+    prose_generation: ["生成正文", "正文"],
+    continuation: ["续写"],
+    rewrite: ["改写"],
+    polish: ["润色"],
+    outline_planning: ["故事规划", "规划故事", "大纲"],
+    scene_breakdown: ["场景规划", "场景拆解"],
+    chapter_summary: ["章节总结", "章节摘要", "总结", "摘要"],
+    translation: ["翻译"],
+  };
+  const knownTaskLabels = Object.values(taskLabels).flat();
+  const taskScopeClauses = source
+    .split(/[，,。；;!！?？\n]+|(?:但是|不过|然而|但)(?=(?:只)?(?:适用于|用于|用在))/gu)
+    .map((clause) => clause.trim())
+    .filter((clause) => clause.length > 0);
+  const negativeTaskScope = taskScopeClauses
+    .filter(
+      (clause) =>
+        /(?:不适用于|不用于|不要用于|不得用于|禁止用于|不支持)/u.test(clause) &&
+        knownTaskLabels.some((label) => clause.includes(label)),
+    )
+    .join(" ");
+  const explicitTaskScope = taskScopeClauses
+    .filter(
+      (clause) =>
+        !/(?:不适用于|不用于|不要用于|不得用于|禁止用于|不支持)/u.test(clause) &&
+        /(?:适用任务|支持任务|适用于|用于|用在)/u.test(clause),
+    )
+    .join(" ");
   const taskTypes = CUSTOM_NOVEL_SKILL_TASKS.filter((task) => {
-    const labels: Readonly<Partial<Record<NovelSkillTask, readonly string[]>>> = {
-      idea_discussion: ["讨论灵感", "灵感"],
-      book_start_guidance: ["开书", "开头"],
-      prose_generation: ["生成正文", "正文"],
-      continuation: ["续写"],
-      rewrite: ["改写"],
-      polish: ["润色"],
-      outline_planning: ["规划", "大纲"],
-      scene_breakdown: ["场景"],
-      chapter_summary: ["总结", "摘要"],
-      translation: ["翻译"],
-    };
-    return labels[task]?.some((label) => source.includes(label)) ?? false;
+    const labels = taskLabels[task] ?? [];
+    return (
+      labels.some((label) => explicitTaskScope.includes(label)) &&
+      !labels.some((label) => negativeTaskScope.includes(label))
+    );
   });
+  if (taskTypes.length === 0 && negativeTaskScope.length > 0) {
+    throw customSkillError(
+      "说明里只有不适用任务，还没有说明这项技能要用于哪种写作。请补充“适用于续写”或其他明确任务；原说明仍会保留。",
+    );
+  }
   const ruleSection = /(?:规则|写作规则)[：:]\s*([^。!！?？\n]+)/u.exec(source)?.[1] ?? "";
   const rules = ruleSection
     .split(/[；;]/u)

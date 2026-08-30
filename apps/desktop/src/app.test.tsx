@@ -2,6 +2,7 @@ import { fireEvent, render, screen, waitFor, within } from "@testing-library/rea
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
 import { exportPortableBundle } from "@inkshadow/import-export/core";
+import { AppError, err } from "@inkshadow/domain";
 import { ToastProvider } from "@inkshadow/ui";
 import { describe, expect, it, vi } from "vitest";
 
@@ -531,6 +532,58 @@ describe("desktop vertical slice", () => {
     expect(within(standardDialog).getByText("以后可能离开本机")).toBeVisible();
   });
 
+  it("keeps a failed privacy change visible and retryable without changing正文 or versions", async () => {
+    const runtime = createDevelopmentRuntime(window.localStorage);
+    const { chapter, project } = await seedChapter(
+      runtime,
+      "不会离开本机的正文。\n第二段仍应保留。",
+    );
+    const versionsBefore = await runtime.repositories.chapterVersions.listByChapterId(chapter.id);
+    if (!versionsBefore.ok) throw versionsBefore.error;
+    vi.spyOn(runtime.useCases.setChapterPrivacy, "execute").mockResolvedValueOnce(
+      err(
+        new AppError({
+          code: "SAVE_FAILED",
+          message: "This project is still sending context to AI.",
+          retryable: true,
+          actions: ["RETRY"],
+          details: { databaseCode: "PROJECT_REMOTE_DISPATCH_ACTIVE" },
+        }),
+      ),
+    );
+    const user = userEvent.setup();
+    renderRoute(runtime, `/projects/${project.id}/chapters/${chapter.id}`);
+
+    await user.click(await screen.findByRole("button", { name: "设为私密" }));
+    const dialog = await screen.findByRole("dialog", { name: "将本章设为私密章节？" });
+    await user.click(within(dialog).getByRole("button", { name: "确认仅限本地" }));
+
+    expect(
+      await within(dialog).findByText(/本作品仍有一次 AI 处理正在发送或等待结束/u),
+    ).toBeVisible();
+    expect(within(dialog).getByText(/问题编号（联系支持时提供）：墨影-/u)).toBeVisible();
+    expect(within(dialog).getByRole("button", { name: "重新读取章节" })).toBeVisible();
+    expect(within(dialog).getByRole("button", { name: "重新尝试设为私密" })).toBeVisible();
+
+    const unchanged = await runtime.repositories.chapters.findById(chapter.id);
+    expect(unchanged.ok && unchanged.value?.toSnapshot()).toMatchObject({
+      content: "不会离开本机的正文。\n第二段仍应保留。",
+      privacyMode: "standard",
+      privacyRevision: 1,
+      currentVersionId: chapter.currentVersionId,
+    });
+    const versionsAfterFailure = await runtime.repositories.chapterVersions.listByChapterId(
+      chapter.id,
+    );
+    expect(versionsAfterFailure.ok && versionsAfterFailure.value).toHaveLength(
+      versionsBefore.value.length,
+    );
+
+    await user.click(within(dialog).getByRole("button", { name: "重新尝试设为私密" }));
+    expect(await screen.findByText("本地私密")).toBeVisible();
+    expect(await screen.findByText(/本章现已设为私密章节/u)).toBeVisible();
+  });
+
   it("keeps an edited suggestion isolated until the author explicitly applies it", async () => {
     const runtime = createDevelopmentRuntime(window.localStorage);
     await ensureWritingMode(runtime, "professional");
@@ -694,7 +747,7 @@ describe("desktop vertical slice", () => {
     await user.click(within(firstVersion).getByRole("button", { name: /^恢复版本 \d+$/u }));
 
     const confirmation = await screen.findByRole("dialog", { name: "恢复版本 1" });
-    expect(within(confirmation).getByText("这是追加式恢复")).toBeVisible();
+    expect(within(confirmation).getByText("目标章节：《第一章》")).toBeVisible();
     await user.click(within(confirmation).getByRole("button", { name: /^确认恢复版本 \d+$/u }));
     await waitFor(() => {
       expect(editor).toHaveValue("第一版正文。");

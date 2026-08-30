@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter, useNavigate } from "react-router-dom";
 import {
@@ -55,6 +55,30 @@ describe("editor candidate route selection", () => {
     expect(editorCandidateStatusLabel(status)).not.toMatch(
       /streaming|ready|accepted|rejected|expired|unexpected/iu,
     );
+  });
+
+  it("shows the built-in example banner from persisted project identity after restart", async () => {
+    window.localStorage.clear();
+    const runtime = createDevelopmentRuntime(window.localStorage);
+    const project = await runtime.useCases.createProject.execute({
+      name: "墨影示例：雨夜来信",
+      displayKind: "builtin_example",
+    });
+    if (!project.ok) throw project.error;
+    const chapter = await runtime.useCases.createChapter.execute({
+      projectId: project.value.id,
+      title: "第一章",
+      content: "这是可编辑的示例正文。",
+    });
+    if (!chapter.ok) throw chapter.error;
+
+    const first = renderEditor(runtime, project.value, chapter.value.chapter);
+    expect(await screen.findByText("这是示例作品，可随时删除")).toBeVisible();
+    first.unmount();
+
+    const restarted = createDevelopmentRuntime(window.localStorage);
+    renderEditor(restarted, project.value, chapter.value.chapter);
+    expect(await screen.findByText("这是示例作品，可随时删除")).toBeVisible();
   });
 
   it("keeps the newest project chapter visible when an earlier authority read finishes last", async () => {
@@ -843,7 +867,10 @@ describe("editor candidate route selection", () => {
       ({ normalizedErrorCode }) => normalizedErrorCode === "USER_CANCELLED_BEFORE_DISPATCH",
     ).length;
 
-    await user.click(screen.getByRole("button", { name: "改写" }));
+    expect(await screen.findByText("4 个字符")).toBeVisible();
+    const rewriteButton = screen.getByRole("button", { name: "改写" });
+    await waitFor(() => expect(rewriteButton).toBeEnabled(), { timeout: 5_000 });
+    await user.click(rewriteButton);
     const disclosureTitle = await screen.findByText("确认本次改写", undefined, {
       timeout: 5_000,
     });
@@ -872,7 +899,85 @@ describe("editor candidate route selection", () => {
         ({ normalizedErrorCode }) => normalizedErrorCode === "USER_CANCELLED_BEFORE_DISPATCH",
       ),
     ).toHaveLength(cancellationCountBefore + 1);
-  });
+  }, 12_000);
+
+  it("keeps a newly prepared selection rewrite disclosure when the earlier mode reset settles", async () => {
+    window.localStorage.clear();
+    const runtime = createDevelopmentRuntime(window.localStorage);
+    const preference = await runtime.writingExperience.getOrInitialize();
+    await runtime.writingExperience.switchMode("professional", preference.revision);
+    await seedRemoteContinuationRoute(runtime, "rewrite");
+    const generate = vi.fn<NativeModelGatewayClient["generate"]>(() =>
+      Promise.reject(new Error("选区改写在确认前不得发送")),
+    );
+    Object.assign(runtime, {
+      mode: "tauri" as const,
+      modelGateway: {
+        available: true,
+        listModels: () =>
+          Promise.resolve({
+            provider: "open_ai_compatible" as const,
+            models: [{ id: "direct-writer", displayName: "Direct writer" }],
+          }),
+        checkConnection: () => Promise.reject(new Error("not used")),
+        embed: () => Promise.reject(new Error("not used")),
+        generate,
+        cancelGeneration: () => Promise.resolve(true),
+      } satisfies NativeModelGatewayClient,
+    });
+    const { chapter, project } = await seedChapter(runtime, "稳定正文等待局部改写");
+    const browserTimers = window as unknown as {
+      setTimeout(
+        handler: (...arguments_: unknown[]) => void,
+        timeout?: number,
+        ...arguments_: unknown[]
+      ): number;
+      clearTimeout(timer?: number): void;
+    };
+    const pendingZeroDelayCallbacks = new Map<number, () => void>();
+    const nativeSetTimeout = browserTimers.setTimeout.bind(browserTimers);
+    const nativeClearTimeout = browserTimers.clearTimeout.bind(browserTimers);
+    let nextControlledTimer = 987_654;
+    const timeoutSpy = vi
+      .spyOn(browserTimers, "setTimeout")
+      .mockImplementation((handler, timeout, ...arguments_) => {
+        if (timeout === 0 && handler.name === "clearStaleModeState") {
+          const timer = nextControlledTimer;
+          nextControlledTimer += 1;
+          pendingZeroDelayCallbacks.set(timer, () => handler(...arguments_));
+          return timer;
+        }
+        return nativeSetTimeout(handler, timeout, ...arguments_);
+      });
+    const clearTimeoutSpy = vi.spyOn(browserTimers, "clearTimeout").mockImplementation((timer) => {
+      if (timer !== undefined && pendingZeroDelayCallbacks.delete(timer)) return;
+      nativeClearTimeout(timer);
+    });
+    renderEditor(runtime, project, chapter);
+    const editor = await screen.findByRole<HTMLTextAreaElement>("textbox", {
+      name: "章节正文",
+    });
+    expect(pendingZeroDelayCallbacks.size).toBeGreaterThan(0);
+    editor.focus();
+    editor.setSelectionRange(0, 4);
+    fireEvent.select(editor);
+    expect(await screen.findByText("4 个字符")).toBeVisible();
+    const rewriteButton = screen.getByRole("button", { name: "改写" });
+    await waitFor(() => expect(rewriteButton).toBeEnabled(), { timeout: 5_000 });
+    fireEvent.click(rewriteButton);
+    expect(await screen.findByText("确认本次改写")).toBeVisible();
+    expect(generate).not.toHaveBeenCalled();
+
+    act(() => {
+      for (const callback of pendingZeroDelayCallbacks.values()) callback();
+      pendingZeroDelayCallbacks.clear();
+    });
+    timeoutSpy.mockRestore();
+    clearTimeoutSpy.mockRestore();
+
+    expect(screen.getByText("确认本次改写")).toBeVisible();
+    expect(generate).not.toHaveBeenCalled();
+  }, 12_000);
 
   it("records selection rewrite disclosure cancel with zero provider calls", async () => {
     window.localStorage.clear();
@@ -911,7 +1016,10 @@ describe("editor candidate route selection", () => {
       ({ normalizedErrorCode }) => normalizedErrorCode === "USER_CANCELLED_BEFORE_DISPATCH",
     ).length;
 
-    await user.click(screen.getByRole("button", { name: "改写" }));
+    expect(await screen.findByText("4 个字符")).toBeVisible();
+    const rewriteButton = screen.getByRole("button", { name: "改写" });
+    await waitFor(() => expect(rewriteButton).toBeEnabled(), { timeout: 5_000 });
+    await user.click(rewriteButton);
     expect(await screen.findByText("确认本次改写", undefined, { timeout: 5_000 })).toBeVisible();
     expect(generate).not.toHaveBeenCalled();
     await user.click(screen.getByRole("button", { name: "取消，不发送" }));
@@ -921,7 +1029,7 @@ describe("editor candidate route selection", () => {
         ({ normalizedErrorCode }) => normalizedErrorCode === "USER_CANCELLED_BEFORE_DISPATCH",
       ),
     ).toHaveLength(cancellationCountBefore + 1);
-  });
+  }, 12_000);
   it("reuses only an explicit exact continuation confirmation and still requires a summary click", async () => {
     window.localStorage.clear();
     window.sessionStorage.clear();
@@ -991,6 +1099,43 @@ describe("editor candidate route selection", () => {
       within(rememberedPreflight).getByRole("button", { name: "按本次摘要生成续写建议" }),
     );
     await waitFor(() => expect(generate).toHaveBeenCalledTimes(2));
+  });
+
+  it("shows one actionable pricing notice instead of repeating the legacy warning", async () => {
+    window.localStorage.clear();
+    const runtime = createDevelopmentRuntime(window.localStorage);
+    const preference = await runtime.writingExperience.getOrInitialize();
+    await runtime.writingExperience.switchMode("professional", preference.revision);
+    await seedRemoteContinuationRoute(runtime, "continuation", false);
+    Object.assign(runtime, {
+      mode: "tauri" as const,
+      modelGateway: {
+        available: true,
+        listModels: () =>
+          Promise.resolve({
+            provider: "open_ai_compatible" as const,
+            models: [{ id: "direct-writer", displayName: "Direct writer" }],
+          }),
+        checkConnection: () => Promise.reject(new Error("not used")),
+        embed: () => Promise.reject(new Error("not used")),
+        generate: () => Promise.reject(new Error("not dispatched")),
+        cancelGeneration: () => Promise.resolve(true),
+      } satisfies NativeModelGatewayClient,
+    });
+    const { chapter, project } = await seedChapter(runtime);
+    const user = userEvent.setup();
+    renderEditor(runtime, project, chapter);
+
+    await user.click(await screen.findByRole("button", { name: "生成续写建议" }));
+    const preflight = await screen.findByRole("dialog", { name: "生成续写建议前检查" });
+
+    expect(
+      within(preflight).queryByText("该模型尚未填写价格，暂时无法估算费用"),
+    ).not.toBeInTheDocument();
+    expect(
+      within(preflight).getByText("服务商没有提供可计算的单价，实际费用请以服务商账单为准。"),
+    ).toBeVisible();
+    expect(within(preflight).getByRole("link", { name: "填写费用信息" })).toBeVisible();
   });
 
   it("stops a professional continuation before dispatch when the disclosed price changes", async () => {
@@ -1393,7 +1538,7 @@ describe("editor candidate route selection", () => {
     const supportNotice = await screen.findByText(
       /问题编号（联系支持时提供）：墨影-[0-9]{14}-[0-9]{3,}/u,
     );
-    expect(supportNotice).toHaveTextContent("准备发送信息");
+    expect(supportNotice).toHaveTextContent("准备发送前说明");
     expect(supportNotice).toHaveTextContent("本次没有发送");
     expect(customInput).toHaveValue("保留这条用户输入的方向");
     expect(generate).not.toHaveBeenCalled();
@@ -3487,6 +3632,11 @@ describe("editor candidate route selection", () => {
     const confirmation = await screen.findByRole("dialog", { name: "恢复版本 1" });
     expect(within(confirmation).getByText("作品：版本恢复作品")).toBeVisible();
     expect(within(confirmation).getByText("章节：第一章")).toBeVisible();
+    const targetChapterWarning = within(confirmation).getByText("目标章节：《第一章》");
+    expect(targetChapterWarning).toBeVisible();
+    expect(targetChapterWarning.closest(".ink-inline-alert")).toHaveClass(
+      "ink-inline-alert--warning",
+    );
     expect(within(confirmation).getByText("目标版本：版本 1")).toBeVisible();
     expect(within(confirmation).getByText("目标字数：23,000 字")).toBeVisible();
     expect(within(confirmation).getByText("当前字数：29,465 字")).toBeVisible();
@@ -3596,6 +3746,7 @@ async function seedChapter(
 async function seedRemoteContinuationRoute(
   runtime: DesktopRuntime,
   task: "continuation" | "rewrite" = "continuation",
+  includePricing = true,
 ): Promise<void> {
   const connection = await runtime.modelHub.saveConnection({
     id: "direct-writing-remote",
@@ -3644,12 +3795,12 @@ async function seedRemoteContinuationRoute(
   });
   await runtime.modelHub.saveCostPrivacyProfile({
     catalogEntryId: "direct-writing-remote-catalog",
-    currency: "USD",
-    inputMicrosPerMillionTokens: "1000000",
-    outputMicrosPerMillionTokens: "2000000",
+    currency: includePricing ? "USD" : null,
+    inputMicrosPerMillionTokens: includePricing ? "1000000" : null,
+    outputMicrosPerMillionTokens: includePricing ? "2000000" : null,
     cachedInputMicrosPerMillionTokens: null,
-    pricingVersion: "direct-writing-test-v1",
-    priceUpdatedAt: "2026-08-18T00:00:00.000Z",
+    pricingVersion: includePricing ? "direct-writing-test-v1" : null,
+    priceUpdatedAt: includePricing ? "2026-08-18T00:00:00.000Z" : null,
     dataDestination: "remote",
     retentionPolicy: "provider_default",
     trainingPolicy: "unknown",

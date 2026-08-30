@@ -2075,7 +2075,7 @@ describe("StoryGovernancePage", () => {
 
     await screen.findByRole("heading", { name: "潮汐边界", level: 1 });
     await user.click(screen.getByRole("tab", { name: "世界与规则" }));
-    expect(screen.getByRole("button", { name: "因果剧情试演" })).toBeVisible();
+    expect(screen.getByRole("button", { name: "故事关联" })).toBeVisible();
     await user.click(screen.getByRole("button", { name: "查看旧版试演记录" }));
     expect(await screen.findByRole("heading", { name: "旧版试演记录", level: 2 })).toBeVisible();
     const branchHeading = screen.getByRole("heading", {
@@ -2096,7 +2096,7 @@ describe("StoryGovernancePage", () => {
     expect(branches.value.map(({ status }) => status)).toEqual(["simulated"]);
     expect(timelineEvent.value.revision).toBe(1);
 
-    await user.click(screen.getByRole("button", { name: "前往因果剧情试演" }));
+    await user.click(screen.getByRole("button", { name: "前往故事关联" }));
     expect(
       await screen.findByRole("heading", { name: "故事关联", level: 1 }, { timeout: 10_000 }),
     ).toBeVisible();

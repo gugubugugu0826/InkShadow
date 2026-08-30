@@ -150,7 +150,7 @@ export function StoryPlanningPanel({
       if (disclosure === null) {
         setDisclosure(await service.prepareGeneration(request));
         setNotice({
-          title: "发送信息已准备好",
+          title: "发送前说明已准备好",
           message: "确认前不会向 AI 发送内容。请核对后再继续。",
         });
         return;
@@ -465,7 +465,7 @@ export function StoryPlanningPanel({
             onClick={() => void generate()}
           >
             {disclosure === null
-              ? "查看本次发送内容"
+              ? "查看发送前说明"
               : task === "outline_planning"
                 ? "确认并生成故事方向建议"
                 : "确认并生成场景拆解建议"}
@@ -807,9 +807,9 @@ function planningFailureMessage(
   }
   if (input.stage === "prepare_disclosure" && code === "MODEL_HUB_STRUCTURED_OUTPUT_NOT_VERIFIED") {
     return {
-      title: `${actionName}发送信息尚未准备好`,
+      title: `${actionName}发送前说明尚未准备好`,
       message:
-        "准备发送信息时发现所选模型尚未通过规划格式检查。本次没有向模型服务发送内容；请在 AI 模型中完成能力验证后重试。",
+        "整理发送前说明时发现所选模型尚未通过规划格式检查。本次没有向模型服务发送内容；请在 AI 模型中完成能力验证后重试。",
       supportId: incident.supportId,
     };
   }
@@ -818,9 +818,9 @@ function planningFailureMessage(
     (code === "MODEL_HUB_ROUTE_NOT_CONFIGURED" || code === "MODEL_HUB_ROUTE_NOT_FOUND")
   ) {
     return {
-      title: `${actionName}发送信息尚未准备好`,
+      title: `${actionName}发送前说明尚未准备好`,
       message:
-        "准备发送信息时没有找到可用的剧情规划模型安排。本次没有向模型服务发送内容；请先选择模型后重试。",
+        "整理发送前说明时没有找到可用的剧情规划模型安排。本次没有向模型服务发送内容；请先选择模型后重试。",
       supportId: incident.supportId,
     };
   }
@@ -834,7 +834,7 @@ function planningFailureMessage(
   return {
     title:
       input.stage === "prepare_disclosure"
-        ? `${actionName}发送信息尚未准备好`
+        ? `${actionName}发送前说明尚未准备好`
         : `${actionName}操作尚未完成`,
     message: `${errorMessage(cause, input.fallback)} ${dispatchStateMessage(input.dispatched)}`,
     supportId: incident.supportId,

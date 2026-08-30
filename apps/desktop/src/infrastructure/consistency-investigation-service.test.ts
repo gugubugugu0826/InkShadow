@@ -71,6 +71,7 @@ const migration = [
   "0069_consistency_investigation_invocation_reservation.sql",
   "0070_multigranular_search_retrieval.sql",
   "0072_ai_candidate_purpose.sql",
+  "0080_candidate_selection_action.sql",
 ]
   .map(readMigration)
   .join("\n");
@@ -538,10 +539,13 @@ describe("ConsistencyInvestigationService", () => {
         status: string;
         baseVersionId: string;
         taskIntent: string;
+        selectionAction: string | null;
         content: string;
       }>(
         `SELECT source, status, base_version_id AS baseVersionId,
-                task_intent AS taskIntent, content
+                 task_intent AS taskIntent,
+                 selection_action AS selectionAction,
+                 content
          FROM ai_candidates
          WHERE id = ?`,
         [repaired.candidateId],
@@ -552,6 +556,7 @@ describe("ConsistencyInvestigationService", () => {
         status: "ready",
         baseVersionId: VERSION_ID,
         taskIntent: "whole_chapter_rewrite",
+        selectionAction: null,
         content: CHAPTER_TEXT.replace(source, "这发生在典礼之后"),
       },
     ]);

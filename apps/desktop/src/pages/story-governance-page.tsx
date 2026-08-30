@@ -2911,7 +2911,7 @@ export function StoryGovernancePage() {
                       variant="secondary"
                       onClick={() => navigate(`/projects/${projectIdParameter}/graph`)}
                     >
-                      因果剧情试演
+                      故事关联
                     </Button>
                     {whatIfBranches.length > 0 && (
                       <Button size="sm" variant="ghost" onClick={() => setActiveTab("what-if")}>
@@ -3596,14 +3596,14 @@ export function StoryGovernancePage() {
                     <p>历史沙盒与已生成的大纲草稿保持原样，不会自动转成正式事实。</p>
                   </div>
                   <Button onClick={() => navigate(`/projects/${projectIdParameter}/graph`)}>
-                    前往因果剧情试演
+                    前往故事关联
                   </Button>
                 </div>
 
                 {whatIfBranches.length === 0 ? (
                   <EmptyState
                     title="没有旧版试演记录"
-                    description="这里不会再创建自由输入的非因果模拟；请使用统一的因果剧情试演。"
+                    description="这里不会再创建自由输入的非因果模拟；请前往“故事关联”，从明确事件开始剧情试演。"
                   />
                 ) : (
                   <div className="story-what-if-list">

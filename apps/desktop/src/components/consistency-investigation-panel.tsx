@@ -10,7 +10,7 @@ import {
   InlineAlert,
   Select,
 } from "@inkshadow/ui";
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import type { ConsistencyInvestigationRuntimePort } from "../infrastructure/consistency-investigation-port";
 import type {
@@ -33,6 +33,7 @@ import type {
   ConsistencyInvestigationRun,
 } from "../infrastructure/consistency-investigation-store";
 import { normalizeUiError } from "../infrastructure/ui-error";
+import { recordSafeOperationIncident } from "../infrastructure/safe-operation-diagnostics";
 
 const STATUS_LABELS: Readonly<Record<ConsistencyInvestigationRun["status"], string>> = {
   planned: "等待确认",
@@ -103,6 +104,8 @@ export function ConsistencyInvestigationPanel({
     | null
   >(null);
   const [error, setError] = useState<unknown>(null);
+  const [errorSupportId, setErrorSupportId] = useState<string | null>(null);
+  const disclosureSectionRef = useRef<HTMLElement>(null);
   const [severity, setSeverity] = useState<"all" | ConsistencyInvestigationFindingSeverity>("all");
   const [category, setCategory] = useState<"all" | ConsistencyInvestigationFindingCategory>("all");
   const [authority, setAuthority] = useState<
@@ -112,6 +115,10 @@ export function ConsistencyInvestigationPanel({
   const refreshHistory = useCallback(async () => {
     setHistory(await runtime.list(projectId));
   }, [projectId, runtime]);
+
+  useEffect(() => {
+    if (disclosure !== null) disclosureSectionRef.current?.focus();
+  }, [disclosure]);
 
   const filteredFindings = useMemo(
     () =>
@@ -127,6 +134,7 @@ export function ConsistencyInvestigationPanel({
   async function prepare(): Promise<void> {
     setBusy("prepare");
     setError(null);
+    setErrorSupportId(null);
     try {
       const next = await runtime.prepare({
         projectId,
@@ -137,6 +145,15 @@ export function ConsistencyInvestigationPanel({
       await refreshHistory();
     } catch (cause: unknown) {
       setError(cause);
+      setErrorSupportId(
+        recordSafeOperationIncident({
+          operation: "consistency_investigation",
+          stage: "prepare_disclosure",
+          cause,
+          projectId,
+          dispatched: false,
+        }).supportId,
+      );
     } finally {
       setBusy(null);
     }
@@ -337,113 +354,139 @@ export function ConsistencyInvestigationPanel({
               </Button>
             )}
           </div>
+          {busy === "prepare" && (
+            <p role="status" aria-live="polite">
+              正在整理调查范围和费用，请稍候。
+            </p>
+          )}
         </CardContent>
       </Card>
 
       {disclosure !== null && (
-        <Card>
-          <CardHeader>
-            <CardTitle headingLevel={3}>发送确认摘要</CardTitle>
-            <CardDescription>只有点击下方确认按钮才会向所选模型服务发送内容。</CardDescription>
-          </CardHeader>
-          <CardContent>
-            <p>
-              模型：{disclosure.connectionDisplayName} · {disclosure.modelId}；资料：
-              {disclosure.chapterCount} 章已接受正文与已确认设定；预计发送{" "}
-              {disclosure.maximumModelCalls} 次；{formatCostSummary(disclosure)}
-              ；私密内容：
-              {disclosure.includesPrivateContent ? "包含私密章节，只在本机处理" : "不包含私密章节"}
-              。
-            </p>
-            <details className="candidate-panel__disclosure-details">
-              <summary>查看详细信息</summary>
-              <dl className="settings-definition-list">
-                <div>
-                  <dt>提供方与模型</dt>
-                  <dd>
-                    {disclosure.connectionDisplayName} · {disclosure.modelId}
-                  </dd>
+        <section
+          ref={disclosureSectionRef}
+          tabIndex={-1}
+          aria-labelledby="consistency-disclosure-heading"
+        >
+          <Card>
+            <CardHeader>
+              <CardTitle id="consistency-disclosure-heading" headingLevel={3}>
+                发送确认摘要
+              </CardTitle>
+              <CardDescription>只有点击下方确认按钮才会向所选模型服务发送内容。</CardDescription>
+            </CardHeader>
+            <CardContent>
+              <p>
+                模型：{disclosure.connectionDisplayName} · {disclosure.modelId}；资料：
+                {disclosure.chapterCount} 章已接受正文与已确认设定；预计发送{" "}
+                {disclosure.maximumModelCalls} 次；{formatCostSummary(disclosure)}
+                ；私密内容：
+                {disclosure.includesPrivateContent
+                  ? "包含私密章节，只在本机处理"
+                  : "不包含私密章节"}
+                。
+              </p>
+              <details className="candidate-panel__disclosure-details">
+                <summary>查看详细信息</summary>
+                <dl className="settings-definition-list">
+                  <div>
+                    <dt>提供方与模型</dt>
+                    <dd>
+                      {disclosure.connectionDisplayName} · {disclosure.modelId}
+                    </dd>
+                  </div>
+                  <div>
+                    <dt>发送位置</dt>
+                    <dd>{destinationLabel(disclosure.dataDestination)}</dd>
+                  </div>
+                  <div>
+                    <dt>范围</dt>
+                    <dd>
+                      {disclosure.chapterCount} 章；预计输入约 {disclosure.estimatedInputTokens}{" "}
+                      个文字量单位（不是金额）
+                    </dd>
+                  </div>
+                  <div>
+                    <dt>发送与重试</dt>
+                    <dd>
+                      最多 {disclosure.maximumModelCalls} 次；自动重试{" "}
+                      {disclosure.automaticRetryCount} 次
+                    </dd>
+                  </div>
+                  <div>
+                    <dt>最长等待</dt>
+                    <dd>{Math.round(disclosure.maximumDurationMs / 1000)} 秒</dd>
+                  </div>
+                  <div>
+                    <dt>费用上限</dt>
+                    <dd>{formatCost(disclosure)}</dd>
+                  </div>
+                </dl>
+                <div className="settings-grid">
+                  <div>
+                    <h4>会发送</h4>
+                    <ul className="privacy-list">
+                      {disclosure.sends.map((item) => (
+                        <li key={item}>{plainLanguageDisclosure(item)}</li>
+                      ))}
+                    </ul>
+                  </div>
+                  <div>
+                    <h4>不会发送</h4>
+                    <ul className="privacy-list">
+                      {disclosure.doesNotSend.map((item) => (
+                        <li key={item}>{plainLanguageDisclosure(item)}</li>
+                      ))}
+                    </ul>
+                  </div>
                 </div>
-                <div>
-                  <dt>发送位置</dt>
-                  <dd>{destinationLabel(disclosure.dataDestination)}</dd>
-                </div>
-                <div>
-                  <dt>范围</dt>
-                  <dd>
-                    {disclosure.chapterCount} 章；预计输入约 {disclosure.estimatedInputTokens}{" "}
-                    个文字量单位（不是金额）
-                  </dd>
-                </div>
-                <div>
-                  <dt>发送与重试</dt>
-                  <dd>
-                    最多 {disclosure.maximumModelCalls} 次；自动重试{" "}
-                    {disclosure.automaticRetryCount} 次
-                  </dd>
-                </div>
-                <div>
-                  <dt>最长等待</dt>
-                  <dd>{Math.round(disclosure.maximumDurationMs / 1000)} 秒</dd>
-                </div>
-                <div>
-                  <dt>费用上限</dt>
-                  <dd>{formatCost(disclosure)}</dd>
-                </div>
-              </dl>
-              <div className="settings-grid">
-                <div>
-                  <h4>会发送</h4>
-                  <ul className="privacy-list">
-                    {disclosure.sends.map((item) => (
-                      <li key={item}>{plainLanguageDisclosure(item)}</li>
-                    ))}
-                  </ul>
-                </div>
-                <div>
-                  <h4>不会发送</h4>
-                  <ul className="privacy-list">
-                    {disclosure.doesNotSend.map((item) => (
-                      <li key={item}>{plainLanguageDisclosure(item)}</li>
-                    ))}
-                  </ul>
-                </div>
+                <InlineAlert
+                  title="隐私与中断规则"
+                  description={plainLanguageDisclosure(
+                    `${disclosure.privacy} ${disclosure.interruption}`,
+                  )}
+                />
+              </details>
+              <div className="settings-actions">
+                <Button
+                  variant="ai-primary"
+                  loading={busy === "run"}
+                  disabled={busy !== null}
+                  onClick={() => void run()}
+                >
+                  确认并开始 1 次调查
+                </Button>
+                <Button
+                  variant="secondary"
+                  loading={busy === "cancel"}
+                  disabled={busy !== null}
+                  onClick={() => void cancel()}
+                >
+                  不发送并取消
+                </Button>
               </div>
-              <InlineAlert
-                title="隐私与中断规则"
-                description={plainLanguageDisclosure(
-                  `${disclosure.privacy} ${disclosure.interruption}`,
-                )}
-              />
-            </details>
-            <div className="settings-actions">
-              <Button
-                variant="ai-primary"
-                loading={busy === "run"}
-                disabled={busy !== null}
-                onClick={() => void run()}
-              >
-                确认并开始 1 次调查
-              </Button>
-              <Button
-                variant="secondary"
-                loading={busy === "cancel"}
-                disabled={busy !== null}
-                onClick={() => void cancel()}
-              >
-                不发送并取消
-              </Button>
-            </div>
-          </CardContent>
-        </Card>
+            </CardContent>
+          </Card>
+        </section>
       )}
 
       {normalizedError !== null && (
-        <InlineAlert
-          tone="error"
-          title={normalizedError.title}
-          description={`${normalizedError.description} 正文和不会被改动的历史版本没有改变。`}
-        />
+        <div>
+          <InlineAlert
+            tone="error"
+            title={normalizedError.title}
+            description={`${normalizedError.description} 正文和不会被改动的历史版本没有改变。${
+              errorSupportId === null ? "" : ` 问题编号：${errorSupportId}（联系支持时提供）。`
+            }`}
+          />
+          {errorSupportId !== null && (
+            <div className="settings-actions">
+              <Button disabled={busy !== null} onClick={() => void prepare()}>
+                重新整理范围与费用
+              </Button>
+            </div>
+          )}
+        </div>
       )}
 
       {repairNotice !== null && <InlineAlert title="修复建议" description={repairNotice} />}

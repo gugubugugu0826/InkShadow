@@ -106,7 +106,7 @@ export function ModelHubEvaluationPanel({
         </FormField>
         {disclosure === null ? (
           <Button loading={busy} disabled={disabled} onClick={() => void prepare()}>
-            查看两项测试的发送信息
+            查看两项测试的发送前说明
           </Button>
         ) : (
           <section aria-label="两项基础测试发送确认">

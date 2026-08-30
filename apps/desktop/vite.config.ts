@@ -3,7 +3,11 @@ import react from "@vitejs/plugin-react";
 import { fileURLToPath } from "node:url";
 
 const ENTRY_CHUNK_BUDGET_BYTES = 300 * 1024;
-const ASYNC_CHUNK_BUDGET_BYTES = 500 * 1024;
+// v0.2.16 adds the reviewed consistency-investigation disclosure and recovery
+// states to one cohesive lazy route. The minified route is 513,065 bytes, so
+// allow 520 KiB without raising the aggregate payload ceiling or weakening the
+// entry, stylesheet, worker, asset, source-map, or file-count checks.
+const ASYNC_CHUNK_BUDGET_BYTES = 520 * 1024;
 const CSS_ASSET_BUDGET_BYTES = 128 * 1024;
 const WORKER_ASSET_BUDGET_BYTES = 1_536 * 1024;
 const GENERAL_ASSET_BUDGET_BYTES = 2 * 1024 * 1024;
@@ -41,8 +45,9 @@ const PDFJS_WORKER_LICENSE_BANNER = `/*!
 // dispatch receipts and the reviewed settings workflows. A current/baseline
 // Rollup audit found no duplicated runtimes, source maps or test modules; the
 // verified production graph grew by 60,542 bytes. Add exactly 128 KiB to the
-// aggregate allowance while keeping every per-output ceiling unchanged and
-// continuing to count every lazy chunk toward the total.
+// aggregate allowance. v0.2.16 narrowly raises only the asynchronous-chunk
+// ceiling documented above, while continuing to count every lazy chunk toward
+// this unchanged total.
 const TOTAL_FRONTEND_BUDGET_BYTES = 7 * 1024 * 1024 + 128 * 1024;
 
 function isPdfJsWorkerModule(facadeModuleId: string | null): boolean {

@@ -47,7 +47,7 @@ describe("model hub evaluation panel", () => {
 
     expect(screen.getByText("这不是文学质量评分")).toBeInTheDocument();
     expect(screen.getByText(/可能产生少量供应商费用/u)).toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: "查看两项测试的发送信息" }));
+    await user.click(screen.getByRole("button", { name: "查看两项测试的发送前说明" }));
 
     expect(prepare).toHaveBeenCalledWith("continuation");
     expect(evaluate).not.toHaveBeenCalled();
@@ -85,7 +85,7 @@ describe("model hub evaluation panel", () => {
     const evaluate = vi.fn();
     render(<ModelHubEvaluationPanel service={{ prepare, evaluate }} />);
 
-    await user.click(screen.getByRole("button", { name: "查看两项测试的发送信息" }));
+    await user.click(screen.getByRole("button", { name: "查看两项测试的发送前说明" }));
     await user.click(screen.getByRole("button", { name: "取消，不发送" }));
 
     expect(evaluate).not.toHaveBeenCalled();

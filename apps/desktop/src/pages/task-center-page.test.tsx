@@ -52,11 +52,51 @@ describe("TaskCenterPage", () => {
       expect(within(summary).getByText("0 条未读")).toBeInTheDocument();
     });
     expect(screen.getByRole("button", { name: "全部标为已读" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "清除已读通知" })).toBeEnabled();
+    await user.click(screen.getByRole("button", { name: "清除已读通知" }));
+    await waitFor(() => expect(screen.getByRole("tab", { name: "通知 0" })).toBeInTheDocument());
 
     const reopened = createDevelopmentRuntime(window.localStorage);
     const persisted = await reopened.taskCenter.load();
     expect(persisted.tasks[0]?.status).toBe("cancelled");
-    expect(persisted.notifications[0]?.status).toBe("read");
+    expect(persisted.notifications).toHaveLength(0);
+  });
+
+  it("keeps the clear-read action available when read notifications are outside the visible page", async () => {
+    const runtime = createDevelopmentRuntime(window.localStorage);
+    vi.spyOn(runtime.taskCenter, "load").mockResolvedValue({
+      tasks: [],
+      notifications: [],
+      hasReadNotifications: true,
+    });
+    const dismissAllReadNotifications = vi
+      .spyOn(runtime.taskCenter, "dismissAllReadNotifications")
+      .mockResolvedValue(1);
+    const user = userEvent.setup();
+    renderRoute(runtime);
+
+    await screen.findByRole("heading", { name: "任务与通知", level: 1 });
+    await user.click(screen.getByRole("tab", { name: "通知 0" }));
+    const clearRead = screen.getByRole("button", { name: "清除已读通知" });
+    expect(clearRead).toBeEnabled();
+    await user.click(clearRead);
+
+    await waitFor(() => expect(dismissAllReadNotifications).toHaveBeenCalledTimes(1));
+    expect(await screen.findByText("已清除 1 条已读通知")).toBeVisible();
+  });
+
+  it("does not count a recoverable delivery failure as an unread inbox item", async () => {
+    seedFailedDeliveryNotification();
+    const runtime = createDevelopmentRuntime(window.localStorage);
+    const user = userEvent.setup();
+    renderRoute(runtime);
+
+    await screen.findByRole("heading", { name: "任务与通知", level: 1 });
+    const summary = screen.getByLabelText("任务中心摘要");
+    expect(within(summary).getByText("0 条未读")).toBeInTheDocument();
+    await user.click(screen.getByRole("tab", { name: "通知 1" }));
+    expect(screen.getByText("0 条未读通知")).toBeVisible();
+    expect(screen.getByRole("button", { name: "全部标为已读" })).toBeDisabled();
   });
 
   it.each([
@@ -248,6 +288,33 @@ function seedTaskCenter(): void {
       schemaVersion: 1,
       tasks: [task.toSnapshot()],
       notifications: [visible.toSnapshot()],
+    }),
+  );
+}
+
+function seedFailedDeliveryNotification(): void {
+  const created = expectOk(
+    Notification.create({
+      id: uuid(3),
+      dedupeKey: "notification:task-center:failed-delivery",
+      messageKey: "task.failed",
+      level: "inbox",
+      severity: "error",
+      route: { entityType: "task", entityId: uuid(1) },
+      metadata: { taskType: "ai.generate", attempt: 1 },
+      requiresResolution: false,
+      expiresAt: null,
+      now: INITIAL_TIME,
+    }),
+  );
+  const queued = expectOk(created.queue("2026-07-27T00:00:00.500Z"));
+  const failedDelivery = expectOk(queued.failDelivery("2026-07-27T00:00:01.000Z"));
+  window.localStorage.setItem(
+    DEVELOPMENT_TASK_CENTER_KEY,
+    JSON.stringify({
+      schemaVersion: 1,
+      tasks: [],
+      notifications: [failedDelivery.toSnapshot()],
     }),
   );
 }

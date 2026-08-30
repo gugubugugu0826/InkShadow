@@ -1241,7 +1241,7 @@ describe("SettingsPage model routing", () => {
 
     expect(await screen.findByRole("option", { name: "deepseek-fast" })).toBeInTheDocument();
     expect(await within(credentialCard).findByText("已配置 ····3172")).toBeVisible();
-    expect(screen.getByRole("combobox", { name: /^已连接的供应商/u })).toHaveValue(
+    expect(screen.getByRole("combobox", { name: /^现有供应商连接/u })).toHaveValue(
       "deepseek-cold-page",
     );
   });
@@ -1403,7 +1403,7 @@ describe("SettingsPage model routing", () => {
     await waitFor(() => expect(generate).toHaveBeenCalledTimes(1));
 
     const provider = screen.getByRole("combobox", { name: "供应商" });
-    const storedConnection = screen.getByRole("combobox", { name: /^已连接的供应商/u });
+    const storedConnection = screen.getByRole("combobox", { name: /^现有供应商连接/u });
     const selectedModel = screen.getByRole("combobox", { name: "模型" });
     expect(provider).toBeDisabled();
     expect(storedConnection).toBeDisabled();
@@ -2145,7 +2145,7 @@ describe("SettingsPage model routing", () => {
     const providerSelect = screen.getByRole("combobox", { name: "供应商" });
     await waitFor(() => expect(providerSelect).toBeEnabled());
     await user.selectOptions(
-      screen.getByRole("combobox", { name: /^已连接的供应商/u }),
+      screen.getByRole("combobox", { name: /^现有供应商连接/u }),
       "custom-delete-owner",
     );
     await waitFor(() => expect(providerSelect).toHaveValue("custom_openai_compatible"));
@@ -2206,7 +2206,7 @@ describe("SettingsPage model routing", () => {
 
     await screen.findByRole("heading", { name: "墨影模型中心" });
     const storedConnections = await screen.findByRole("combobox", {
-      name: /^已连接的供应商/u,
+      name: /^现有供应商连接/u,
     });
     await waitFor(() => expect(storedConnections).toBeEnabled());
     await user.selectOptions(storedConnections, "same-provider-owner");
@@ -2290,7 +2290,7 @@ describe("SettingsPage model routing", () => {
 
     await screen.findByRole("heading", { name: "墨影模型中心" }, { timeout: 5_000 });
     const storedConnections = await screen.findByRole("combobox", {
-      name: /^已连接的供应商/u,
+      name: /^现有供应商连接/u,
     });
     await waitFor(() => expect(storedConnections).toBeEnabled());
     await user.selectOptions(storedConnections, "same-metadata-owner");
@@ -2349,7 +2349,7 @@ describe("SettingsPage model routing", () => {
     await screen.findByRole("heading", { name: "墨影模型中心" }, { timeout: 5_000 });
     const storedConnections = await screen.findByRole(
       "combobox",
-      { name: /^已连接的供应商/u },
+      { name: /^现有供应商连接/u },
       { timeout: 5_000 },
     );
     await waitFor(() => expect(storedConnections).toBeEnabled(), { timeout: 5_000 });
@@ -2397,10 +2397,10 @@ describe("SettingsPage model routing", () => {
 
     await screen.findByRole("heading", { name: "墨影模型中心" }, { timeout: 5_000 });
     await waitFor(() =>
-      expect(screen.getByRole("combobox", { name: /^已连接的供应商/u })).toBeEnabled(),
+      expect(screen.getByRole("combobox", { name: /^现有供应商连接/u })).toBeEnabled(),
     );
     await user.selectOptions(
-      screen.getByRole("combobox", { name: /^已连接的供应商/u }),
+      screen.getByRole("combobox", { name: /^现有供应商连接/u }),
       "new-id-delete-owner",
     );
     expect(await screen.findByRole("button", { name: "删除密钥" })).toBeVisible();

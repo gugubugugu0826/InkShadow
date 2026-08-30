@@ -4,28 +4,44 @@
 > 仓库可见性：Public  
 > 默认分支：`main`  
 > 适用环境：Windows PowerShell  
-> 更新日期：2026-08-29  
-> 当前发布目标：`0.2.15`；最新用户指令已授权在最终同源候选链和远端持续集成通过后发布未签名 GitHub 预发行  
-> 最新公开版本：`v0.2.14`；其标签、Release、安装包和全部附件不得移动、覆盖或静默替换
+> 更新日期：2026-08-30  
+> 当前发布目标：`0.2.16`；最新用户指令已授权在最终同源候选链和远端持续集成通过后发布未签名 GitHub 预发行  
+> 最新公开版本：`v0.2.15`；其标签、Release、安装包和全部附件不得移动、覆盖或静默替换
 
 本文是每次向 GitHub 上传源码或发布安装包时必须执行的检查清单。它只描述操作流程，
 不替代 [`execution/RELEASE_CHECKLIST.md`](execution/RELEASE_CHECKLIST.md) 中的产品发布门禁。
-`v0.2.3`–`v0.2.14` 的已发布或候选事实分别记录在对应专项文档与门禁文档；后续版本在实际候选生成前仍保持“未运行”，
+`v0.2.3`–`v0.2.15` 的已发布或候选事实分别记录在对应专项文档与门禁文档；后续版本在实际候选生成前仍保持“未运行”，
 不得沿用任何历史版本数据。
 
-## 0.2.15 预发行边界
+## 0.2.16 预发行边界
+
+0.2.16 只能从唯一干净提交生成安装程序、来源清单、校验文件、完整中文验证报告和正式中文发布说明。安装程序未签名时必须明确标记“未签名”，GitHub Release 必须设为预发行。完整本地候选链、远端持续集成、标签、Release 来源和所有附件必须指向同一提交；任何门禁失败都应停止在标签与 Release 之前。
+
+0.2.16 GitHub 公开附件名称固定为：
+
+- `InkShadow_0.2.16_x64-setup.exe`；
+- `inkshadow-release-manifest.json`；
+- `SHA256SUMS`；
+- `InkShadow_0.2.16_VALIDATION_REPORT_zh-CN.md`；
+- `InkShadow_0.2.16_RELEASE_NOTES_zh-CN.md`。
+
+Tauri 本地构建产物仍固定为 `墨影 InkShadow_0.2.16_x64-setup.exe`。上传前只允许把该文件按原字节复制为上述 ASCII 公开名称；复制前后大小和 SHA-256 必须完全一致，不得重新打包。GitHub 会规范化包含空格或非 ASCII 字符的附件名，公开 `SHA256SUMS` 必须使用最终公开名称。
+
+`SHA256SUMS` 只覆盖其余四个公开附件；它自身的大小和 SHA-256 另行记录。提交、大小、摘要和 Release 链接不得预填，只能在候选及发布事实产生后写入验证报告。安装包生成后必须直接读取 Windows ProductVersion、FileVersion 和 Authenticode 状态；配置文件版本不能替代实际制品检查。
+
+## 0.2.15 预发行边界（历史）
 
 0.2.15 只能从唯一干净提交生成安装程序、来源清单、校验文件、完整中文验证报告和正式中文发布说明。安装程序未签名时必须明确标记“未签名”，GitHub Release 必须设为预发行。完整本地候选链、远端持续集成、标签、Release 来源和所有附件必须指向同一提交；任何门禁失败都应停止在标签与 Release 之前。
 
-0.2.15 发布附件名称固定为：
+0.2.15 历史 GitHub 公开附件名称为：
 
-- `墨影 InkShadow_0.2.15_x64-setup.exe`；
+- `InkShadow_0.2.15_x64-setup.exe`；
 - `inkshadow-release-manifest.json`；
 - `SHA256SUMS`；
 - `InkShadow_0.2.15_VALIDATION_REPORT_zh-CN.md`；
 - `InkShadow_0.2.15_RELEASE_NOTES_zh-CN.md`。
 
-`SHA256SUMS` 只覆盖其余四个附件；它自身的大小和 SHA-256 另行记录。提交、大小、摘要和 Release 链接不得预填，只能在候选及发布事实产生后写入验证报告。安装包生成后必须直接读取 Windows ProductVersion、FileVersion 和 Authenticode 状态；配置文件版本不能替代实际制品检查。
+该版本的 Tauri 本地产物名为 `墨影 InkShadow_0.2.15_x64-setup.exe`，GitHub 公开附件已规范化为上述 ASCII 名称，公开 `SHA256SUMS` 也使用该名称。`SHA256SUMS` 只覆盖其余四个附件；它自身的大小和 SHA-256 另行记录。安装包生成后必须直接读取 Windows ProductVersion、FileVersion 和 Authenticode 状态；配置文件版本不能替代实际制品检查。
 
 ## 0.2.14 预发行边界（历史）
 
@@ -44,9 +60,9 @@
 `v0.2.9` 已从来源提交 `54d9647031bb97b4fc9f021d3b1acca7f6d25c47` 发布为未签名工程预发行，
 其标签、Release 和附件均为不可移动历史。
 
-## v0.2.14 及更早版本保留边界
+## v0.2.15 及更早版本保留边界
 
-已发布的 v0.2.14 标签、Release、安装包和附件，以及 0.2.13 与更早候选的安装包、来源清单、校验文件、验证报告和来源证据均保持不可变。尤其不得覆盖、移动或改作 0.2.15 附件，也不得替换任何既有公开附件。
+已发布的 v0.2.15 标签、Release、安装包和附件，以及 v0.2.14 与更早候选的安装包、来源清单、校验文件、验证报告和来源证据均保持不可变。尤其不得覆盖、移动或改作 0.2.16 附件，也不得替换任何既有公开附件。
 
 0.2.8 人工复测包及其来源清单继续保留在 `D:/InkShadow/installer/v0.2.8-manual-retest/`；本轮清理
 只处理可再生成资源，不删除任何既有候选或发布证据。
@@ -207,7 +223,7 @@ git diff --cached
 - `apps/desktop/src/infrastructure/runtime.ts` 中非 Tauri 环境的诊断 fallback
 - `apps/desktop/src/infrastructure/diagnostics.test.ts` 中对应的脱敏诊断断言
 
-版本号使用不带 `v` 的语义版本。本轮桌面发布目标为 `0.2.15`；根清单、桌面清单、Tauri、Cargo、锁定文件、诊断回退版本和对应测试必须一致。全部适用自动化、已授权人工验收和远端持续集成通过后，才可发布未签名预发行。最新公开版本 `v0.2.14` 的标签、Release 和附件保持不可变；其精确来源提交以冻结的来源清单和公开 Release 为准。历史公开工程预发行 `v0.2.12` 固定解析到来源提交
+版本号使用不带 `v` 的语义版本。本轮桌面发布目标为 `0.2.16`；根清单、桌面清单、Tauri、Cargo、锁定文件、诊断回退版本和对应测试必须一致。全部适用自动化、已授权人工验收和远端持续集成通过后，才可发布未签名预发行。最新公开版本 `v0.2.15` 的标签、Release 和附件保持不可变；其精确来源提交以冻结的来源清单和公开 Release 为准。历史公开工程预发行 `v0.2.12` 固定解析到来源提交
 `8d20dfbbdac1eaecdde046714ba257257cd68ace`。历史公开工程预发行 `v0.2.9` 固定解析到来源提交 `54d9647031bb97b4fc9f021d3b1acca7f6d25c47`，标签对象为
 `8f68902b0d1be8dff3cabdb529d3adc0c74b44a3`。已发布的 `v0.2.6` 标签仍固定解析到
 `b744d042eeafdd9db586388d71e701b1d937f366`，标签对象为
@@ -327,13 +343,13 @@ $nsisRoot = (Resolve-Path `
   -LiteralPath "apps/desktop/src-tauri/target/release/bundle/nsis").Path
 $installerPath = Join-Path `
   $nsisRoot `
-  "墨影 InkShadow_0.2.15_x64-setup.exe"
+  "墨影 InkShadow_0.2.16_x64-setup.exe"
 $installers = @(Get-ChildItem `
   -LiteralPath $nsisRoot `
   -File `
   -Filter "*-setup.exe")
 if ($installers.Count -ne 1 -or $installers[0].FullName -cne $installerPath) {
-  throw "NSIS 目录必须恰好包含墨影 InkShadow_0.2.15_x64-setup.exe"
+  throw "NSIS 目录必须恰好包含墨影 InkShadow_0.2.16_x64-setup.exe"
 }
 $installer = Get-Item -LiteralPath $installerPath
 
@@ -365,13 +381,14 @@ git rev-parse HEAD
 签名或重新打包会改变字节内容，必须重新计算大小和 SHA-256。
 建议把最终候选复制到 `archive/<日期>-<版本>/artifacts/` 或 `installer/<版本>/` 保存本地证据；
 `archive/` 与 `installer/` 都不进入 Git，
-而 GitHub Actions 中的当前安装包 Artifact 只保留 7 天，不能作为永久档案。本轮只接受精确文件名
-`墨影 InkShadow_0.2.15_x64-setup.exe`；不得为了便于命令行操作擅自改为英文名，也不得按修改时间选择
-“最新”安装包。候选目录必须恰好存在一个以 `-setup.exe` 结尾的普通文件，且名称与上述约定完全一致。
+而 GitHub Actions 中的当前安装包 Artifact 只保留 7 天，不能作为永久档案。本轮只接受 Tauri 原始候选名
+`墨影 InkShadow_0.2.16_x64-setup.exe`；不得改名后冒充新的构建，也不得按修改时间选择“最新”安装包。
+本地候选目录必须恰好存在一个以 `-setup.exe` 结尾的原始构建文件。公开附件暂存目录另行保存其字节完全相同的
+`InkShadow_0.2.16_x64-setup.exe`，两者的大小和 SHA-256 必须先行核对一致。
 
 这里要区分“仓库文件”和“发布附件”：本地 `installer/` 文件夹永远不提交到源码仓库。每个桌面版本的
 公开页通常提供安装程序、`inkshadow-release-manifest.json` 和 `SHA256SUMS`；当版本交付要求
-完整验证报告和正式发布说明作为附件时，两者也必须上传。本轮 0.2.15 的五个附件使用本指南“0.2.15 预发行边界”列出的固定名称。`SHA256SUMS` 固定为四行，只覆盖其余四个附件；它不能包含自身，否则会形成循环哈希。`SHA256SUMS` 自身的文件大小和 SHA-256 必须另行记录。
+完整验证报告和正式发布说明作为附件时，两者也必须上传。本轮 0.2.16 的五个附件使用本指南“0.2.16 预发行边界”列出的固定名称。`SHA256SUMS` 固定为四行，只覆盖其余四个附件；它不能包含自身，否则会形成循环哈希。`SHA256SUMS` 自身的文件大小和 SHA-256 必须另行记录。
 
 `pnpm release:candidate:unsigned` 只负责从唯一干净提交完成门禁、生成未签名安装程序，以及生成和核验
 `apps/desktop/dist-release/inkshadow-release-manifest.json`；它不会生成完整验证报告、正式发布说明、
@@ -379,9 +396,9 @@ git rev-parse HEAD
 
 最终五附件必须在取得 GitHub 草稿链接后人工组装：
 
-1. 将精确安装程序和来源清单复制到新的 `installer/v0.2.15` 暂存目录；
-2. 将草稿链接、候选提交、门禁结果、未执行项和剩余风险写入 `InkShadow_0.2.15_VALIDATION_REPORT_zh-CN.md`；
-3. 生成正式 `InkShadow_0.2.15_RELEASE_NOTES_zh-CN.md`，正文明确安装包未签名并说明这是预发行；
+1. 将精确的 Tauri 中文名安装程序按原字节复制为公开名 `InkShadow_0.2.16_x64-setup.exe`，与来源清单一并放入新的 `installer/v0.2.16` 暂存目录，并核对复制前后大小和 SHA-256 完全一致；
+2. 将草稿链接、候选提交、门禁结果、未执行项和剩余风险写入 `InkShadow_0.2.16_VALIDATION_REPORT_zh-CN.md`；
+3. 生成正式 `InkShadow_0.2.16_RELEASE_NOTES_zh-CN.md`，正文明确安装包未签名并说明这是预发行；
 4. 对安装程序、来源清单、完整验证报告和正式发布说明计算 SHA-256，生成恰好四行的 `SHA256SUMS`；
 5. 确认暂存目录恰好包含本指南规定的五个普通文件，没有旧安装包、临时文件或额外附件。
 
@@ -415,7 +432,7 @@ git push origin vX.Y.Z
 
 1. 打开仓库的 **Releases**；
 2. 选择 **Draft a new release**；
-3. 选择已经推送的 `v0.2.15` 标签，标题精确填写“墨影 InkShadow 0.2.15”；
+3. 选择已经推送的 `v0.2.16` 标签，标题精确填写“墨影 InkShadow 0.2.16”；
 4. 不上传任何附件，先保存草稿并记录草稿 URL；此时正文只使用明确的临时占位说明；
 5. 使用草稿 URL 和最终候选事实完成人工组装步骤，生成最终验证报告、正式发布说明和四行 `SHA256SUMS`；
 6. 用正式发布说明替换草稿正文；未签名状态写在正文中，并保持 **Set as a pre-release**；
@@ -429,15 +446,15 @@ git push origin vX.Y.Z
 
 ```powershell
 gh auth status
-gh release create v0.2.15 `
+gh release create v0.2.16 `
   --repo gugubugugu0826/InkShadow `
-  --title "墨影 InkShadow 0.2.15" `
+  --title "墨影 InkShadow 0.2.16" `
   --notes "发布资料正在最终核验；草稿不得对外发布。" `
   --draft `
   --prerelease `
   --verify-tag
 
-$draft = gh release view v0.2.15 `
+$draft = gh release view v0.2.16 `
   --repo gugubugugu0826/InkShadow `
   --json url,isDraft,isPrerelease,targetCommitish,assets |
   ConvertFrom-Json
@@ -448,36 +465,36 @@ $draft.url
 
 # 取得草稿 URL 后，完成最终验证报告、正式发布说明和四行 SHA256SUMS，
 # 并确认暂存目录恰好包含约定的五个文件。
-gh release upload v0.2.15 `
-  $installerPath `
+gh release upload v0.2.16 `
+  $publicInstallerPath `
   $releaseManifestPath `
   $validationReportPath `
   $releaseNotesPath `
   $checksumPath `
   --repo gugubugugu0826/InkShadow
 
-gh release edit v0.2.15 `
+gh release edit v0.2.16 `
   --repo gugubugugu0826/InkShadow `
-  --title "墨影 InkShadow 0.2.15" `
+  --title "墨影 InkShadow 0.2.16" `
   --notes-file $releaseNotesPath `
   --draft `
   --prerelease
 
-gh release view v0.2.15 `
+gh release view v0.2.16 `
   --repo gugubugugu0826/InkShadow `
   --json url,isDraft,isPrerelease,targetCommitish,assets
 
 # 只有草稿内恰好五个附件且名称、大小、摘要、来源提交全部复核通过后才公开
-gh release edit v0.2.15 `
+gh release edit v0.2.16 `
   --repo gugubugugu0826/InkShadow `
   --draft=false `
   --prerelease
 ```
 
-`$installerPath` 必须是上述候选目录内的精确绝对路径，不得用“最新文件”推断；
+`$publicInstallerPath` 必须是最终附件暂存目录中 ASCII 公开名安装程序的精确绝对路径，并已经与 Tauri 中文名原始候选完成字节数和 SHA-256 一致性核对，不得用“最新文件”推断；
 `$validationReportPath` 和 `$releaseNotesPath` 必须分别指向取得草稿 URL 后生成的最终验证报告与正式发布说明。
 正式发布说明既作为页面正文来源，也作为第五个约定附件上传。Release 标题始终精确为
-“墨影 InkShadow 0.2.15”；“未签名工程预览”等成熟度和签名说明只写入正文并通过预发行标志表达，
+“墨影 InkShadow 0.2.16”；“未签名工程预览”等成熟度和签名说明只写入正文并通过预发行标志表达，
 不得附加到标题。草稿核验失败时保持草稿并修复附件，不得公开残缺 Release。不要把访问令牌写入命令历史、仓库文件或发布说明。
 
 任何 `VITE_*` 变量都应按可能进入前端构建和 WebView 的公开信息处理，禁止在其中存放秘密。
@@ -574,7 +591,7 @@ GitHub 上的失败结果。
 - [ ] 标签指向正确且没有被重写
 - [ ] Release 文案没有夸大未完成能力
 - [ ] 未签名版本标为 Pre-release
-- [ ] GitHub 附件数量和名称符合 0.2.15 约定，且五项附件均来自同一发布提交
+- [ ] GitHub 附件数量和名称符合 0.2.16 约定，且五项附件均来自同一发布提交
 - [ ] 五个附件回下载后的大小和 SHA-256 均复核通过；四行 `SHA256SUMS` 覆盖其余四个附件，其自身摘要与 Release／最终报告中的独立记录一致；清单源码提交复核通过
 - [ ] Release 页面、直接下载链接和回滚说明可用
 

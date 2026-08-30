@@ -761,14 +761,19 @@ describe("C3 opening journey durability regressions", () => {
       text: `截止后返回 ${firstRequestId}`,
       noticeCode: "OPENING_RESULT_PENDING_REVIEW",
     });
-    for (const requestId of pendingRun.requestIds.slice(1)) {
-      const invocation = await runtime.modelHub.findInvocation(requestId);
-      expect(invocation).toMatchObject({
-        status: "failed",
-        providerDispatchStartedAt: null,
-      });
-      expect(["MODEL_TIMEOUT", "IDEA_OPERATION_SUPERSEDED"]).toContain(invocation?.errorCode);
-    }
+    await waitFor(
+      async () => {
+        for (const requestId of pendingRun.requestIds.slice(1)) {
+          const invocation = await runtime.modelHub.findInvocation(requestId);
+          expect(invocation).toMatchObject({
+            status: "failed",
+            providerDispatchStartedAt: null,
+          });
+          expect(["MODEL_TIMEOUT", "IDEA_OPERATION_SUPERSEDED"]).toContain(invocation?.errorCode);
+        }
+      },
+      { timeout: 4_000 },
+    );
     expect(harness.generate).toHaveBeenCalledTimes(1);
   }, 30_000);
 

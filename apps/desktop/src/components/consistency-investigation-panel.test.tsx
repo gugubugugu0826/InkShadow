@@ -1,6 +1,6 @@
 import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { ConsistencyInvestigationRuntimePort } from "../infrastructure/consistency-investigation-port";
 import type {
@@ -8,6 +8,10 @@ import type {
   ConsistencyInvestigationSnapshot,
 } from "../infrastructure/consistency-investigation-service";
 import { ConsistencyInvestigationError } from "../infrastructure/consistency-investigation-service";
+import {
+  readSafeOperationIncidents,
+  resetSafeOperationDiagnosticsForTests,
+} from "../infrastructure/safe-operation-diagnostics";
 import type { ConsistencyRepairCandidateDisclosure } from "../infrastructure/consistency-repair-candidate-service";
 import { ConsistencyInvestigationPanel } from "./consistency-investigation-panel";
 
@@ -16,6 +20,11 @@ const RUN_ID = "019f9f4a-b3c7-7350-9226-000000000002";
 const NOW = "2026-08-19T00:00:00.000Z";
 
 describe("ConsistencyInvestigationPanel", () => {
+  beforeEach(() => {
+    window.localStorage.clear();
+    resetSafeOperationDiagnosticsForTests();
+  });
+
   it("does not start a model action on entry and requires a separate disclosure confirmation", async () => {
     const user = userEvent.setup();
     const disclosure: ConsistencyInvestigationDisclosure = {
@@ -107,7 +116,12 @@ describe("ConsistencyInvestigationPanel", () => {
     await user.click(screen.getByRole("button", { name: "查看范围与费用" }));
     expect(prepare).toHaveBeenCalledTimes(1);
     expect(run).not.toHaveBeenCalled();
-    expect(await screen.findByRole("heading", { name: "发送确认摘要", level: 3 })).toBeVisible();
+    const disclosureHeading = await screen.findByRole("heading", {
+      name: "发送确认摘要",
+      level: 3,
+    });
+    expect(disclosureHeading).toBeVisible();
+    expect(disclosureHeading.closest("section")).toHaveFocus();
     expect(screen.getByText(/模型：我的长篇模型 · deepseek-v4-flash/u)).toBeVisible();
     expect(screen.getByText(/私密内容：不包含私密章节/u)).toBeVisible();
     expect(screen.getByText("最长等待")).not.toBeVisible();
@@ -203,7 +217,39 @@ describe("ConsistencyInvestigationPanel", () => {
     expect(
       screen.getByText(/无法确认本次会使用的精确故事资料，因此没有创建服务调用/u),
     ).toBeVisible();
+    expect(screen.getByText(/问题编号：墨影-.*联系支持时提供/u)).toBeVisible();
+    expect(screen.getByRole("button", { name: "重新整理范围与费用" })).toBeEnabled();
+    expect(readSafeOperationIncidents()[0]).toMatchObject({
+      operation: "consistency_investigation",
+      stage: "prepare_disclosure",
+      projectId: PROJECT_ID,
+      dispatched: false,
+      automaticRetryCount: 0,
+    });
     expect(screen.queryByText(/云端操作未完成|登录状态|同步授权/u)).not.toBeInTheDocument();
+  });
+
+  it("immediately announces range preparation before the local preparation finishes", async () => {
+    const user = userEvent.setup();
+    const pending = deferred<ConsistencyInvestigationDisclosure>();
+    const notUsed = vi.fn(() => Promise.reject(new Error("not used")));
+    const runtime: ConsistencyInvestigationRuntimePort = {
+      prepare: vi.fn(() => pending.promise),
+      run: notUsed,
+      cancel: notUsed,
+      get: notUsed,
+      list: vi.fn(() => Promise.resolve([])),
+      decideFinding: notUsed,
+      prepareRepairCandidate: notUsed,
+      runRepairCandidate: notUsed,
+      cancelRepairCandidate: notUsed,
+    };
+
+    render(<ConsistencyInvestigationPanel projectId={PROJECT_ID} runtime={runtime} />);
+    await user.click(screen.getByRole("button", { name: "查看范围与费用" }));
+
+    expect(screen.getByRole("status")).toHaveTextContent("正在整理调查范围和费用");
+    expect(screen.getByRole("button", { name: "正在处理" })).toBeDisabled();
   });
 
   it("cancels from the disclosure with zero model runs", async () => {
@@ -426,4 +472,15 @@ function completedSnapshot(): ConsistencyInvestigationSnapshot {
       },
     ],
   };
+}
+
+function deferred<T>(): {
+  readonly promise: Promise<T>;
+  readonly resolve: (value: T) => void;
+} {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((next) => {
+    resolve = next;
+  });
+  return { promise, resolve };
 }

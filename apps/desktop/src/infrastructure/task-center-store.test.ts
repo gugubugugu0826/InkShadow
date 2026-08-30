@@ -50,6 +50,33 @@ describe("BrowserDevelopmentTaskCenterStore", () => {
     expect(result.notifications.map(({ status }) => status)).toEqual(["read", "read"]);
   });
 
+  it("dismisses only read notifications while preserving their durable audit rows", async () => {
+    const task = makeTask();
+    const unread = makeVisibleNotification(2, "task.completed");
+    const read = expectOk(
+      makeVisibleNotification(3, "task.failed").markRead("2026-07-27T00:00:02.000Z"),
+    );
+    writeDatabase([task.toSnapshot()], [unread.toSnapshot(), read.toSnapshot()]);
+    const store = new BrowserDevelopmentTaskCenterStore(window.localStorage, {
+      now: () => ACTION_TIME,
+    });
+
+    await expect(store.dismissAllReadNotifications()).resolves.toBe(1);
+    await expect(store.load()).resolves.toMatchObject({
+      notifications: [{ id: uuid(2), status: "visible" }],
+    });
+
+    const persisted = JSON.parse(
+      window.localStorage.getItem(DEVELOPMENT_TASK_CENTER_KEY) ?? "{}",
+    ) as { readonly notifications?: readonly { readonly id: string; readonly status: string }[] };
+    expect(persisted.notifications).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ id: uuid(2), status: "visible" }),
+        expect.objectContaining({ id: uuid(3), status: "dismissed" }),
+      ]),
+    );
+  });
+
   it("runs an idempotent generation task through progress and cancellation acknowledgement", async () => {
     const store = new BrowserDevelopmentTaskCenterStore(window.localStorage, {
       now: () => ACTION_TIME,

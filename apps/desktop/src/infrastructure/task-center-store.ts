@@ -34,6 +34,7 @@ const ACTIVE_NOTIFICATION_STATUSES = [
 export interface TaskCenterSnapshot {
   readonly tasks: readonly TaskSnapshot[];
   readonly notifications: readonly NotificationSnapshot[];
+  readonly hasReadNotifications: boolean;
 }
 
 export interface CreateTaskSnapshotResult {
@@ -94,6 +95,8 @@ export interface TaskCenterStore {
   publishNotification(input: CreateNotificationInput): Promise<NotificationSnapshot>;
   markNotificationRead(notificationId: string): Promise<NotificationSnapshot>;
   markAllNotificationsRead(): Promise<number>;
+  /** Hides read inbox items while preserving their durable audit rows. */
+  dismissAllReadNotifications(): Promise<number>;
 }
 
 interface ClockLike {
@@ -204,7 +207,7 @@ export class TauriTaskCenterStore implements TaskCenterStore {
 
   public async load(): Promise<TaskCenterSnapshot> {
     await this.recoverExpiredTasks();
-    const [taskRows, notificationRows] = await Promise.all([
+    const [taskRows, notificationRows, readNotificationRows] = await Promise.all([
       this.executor.select<IdRow>(
         `SELECT id
          FROM background_tasks
@@ -220,6 +223,12 @@ export class TauriTaskCenterStore implements TaskCenterStore {
          LIMIT ?`,
         [NOTIFICATION_LIST_LIMIT],
       ),
+      this.executor.select<IdRow>(
+        `SELECT id
+         FROM notifications
+         WHERE status = 'read'
+         LIMIT 1`,
+      ),
     ]);
 
     const tasks = await Promise.all(taskRows.map(({ id }) => this.loadTask(id)));
@@ -230,6 +239,7 @@ export class TauriTaskCenterStore implements TaskCenterStore {
     return {
       tasks: tasks.map((task) => task.toSnapshot()),
       notifications: notifications.map((notification) => notification.toSnapshot()),
+      hasReadNotifications: readNotificationRows.length > 0,
     };
   }
 
@@ -443,20 +453,44 @@ export class TauriTaskCenterStore implements TaskCenterStore {
   }
 
   public async markAllNotificationsRead(): Promise<number> {
-    const rows = await this.executor.select<IdRow>(
-      `SELECT id
-       FROM notifications
-       WHERE status IN ('created', 'queued', 'visible')
-       ORDER BY updated_at ASC, id ASC
-       LIMIT ?`,
-      [NOTIFICATION_LIST_LIMIT],
-    );
     let markedRead = 0;
-    for (const { id } of rows) {
-      await this.markNotificationRead(id);
-      markedRead += 1;
+    for (;;) {
+      const rows = await this.executor.select<IdRow>(
+        `SELECT id
+         FROM notifications
+         WHERE status IN ('created', 'queued', 'visible')
+         ORDER BY updated_at ASC, id ASC
+         LIMIT ?`,
+        [NOTIFICATION_LIST_LIMIT],
+      );
+      if (rows.length === 0) break;
+      for (const { id } of rows) {
+        await this.markNotificationRead(id);
+        markedRead += 1;
+      }
     }
     return markedRead;
+  }
+
+  public async dismissAllReadNotifications(): Promise<number> {
+    let dismissed = 0;
+    for (;;) {
+      const rows = await this.executor.select<IdRow>(
+        `SELECT id
+         FROM notifications
+         WHERE status = 'read'
+         ORDER BY updated_at ASC, id ASC
+         LIMIT ?`,
+        [NOTIFICATION_LIST_LIMIT],
+      );
+      if (rows.length === 0) break;
+      for (const { id } of rows) {
+        const current = await this.loadNotification(id);
+        await this.saveNotificationTransition(current, current.dismiss(this.clock.now()));
+        dismissed += 1;
+      }
+    }
+    return dismissed;
   }
 
   private async loadTask(taskId: string): Promise<Task> {
@@ -543,6 +577,7 @@ export class BrowserDevelopmentTaskCenterStore implements TaskCenterStore {
           )
           .slice(0, NOTIFICATION_LIST_LIMIT)
           .map((notification) => notification.toSnapshot()),
+        hasReadNotifications: database.notifications.some(({ status }) => status === "read"),
       };
     });
   }
@@ -716,6 +751,19 @@ export class BrowserDevelopmentTaskCenterStore implements TaskCenterStore {
         return markRead(notification, this.clock).toSnapshot();
       });
       return markedRead;
+    });
+  }
+
+  public dismissAllReadNotifications(): Promise<number> {
+    return this.mutate((database) => {
+      let dismissed = 0;
+      database.notifications = database.notifications.map((snapshot) => {
+        const notification = rehydrateNotification(snapshot);
+        if (notification.status !== "read") return snapshot;
+        dismissed += 1;
+        return unwrap(notification.dismiss(this.clock.now())).toSnapshot();
+      });
+      return dismissed;
     });
   }
 

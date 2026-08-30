@@ -127,6 +127,7 @@ installer/
 !/docs/execution/2026-08-27-V0214-RELEASE-BLOCKERS.md
 !/docs/execution/2026-08-28-V0214-RELEASE-DECISION.md
 !/docs/execution/2026-08-29-V0215-RELEASE.md
+!/docs/execution/2026-08-30-V0216-RELEASE.md
 *.mdx
 *.doc
 *.docx

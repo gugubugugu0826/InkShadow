@@ -383,7 +383,7 @@ describe("simplified editor workspace", () => {
       name: "自定义改写选中的 3 个字符",
     });
     expect(instruction).toHaveValue("保持原意，让表达更自然。");
-    expect(screen.getByRole("button", { name: "查看自定义改写发送信息" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "查看自定义改写发送前说明" })).toBeEnabled();
 
     let scheduledFocus: FrameRequestCallback | undefined;
     const animationFrame = vi

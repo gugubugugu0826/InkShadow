@@ -1,4 +1,9 @@
-export type SafeOperationKind = "story_planning" | "opening_creation" | "continuation";
+export type SafeOperationKind =
+  | "story_planning"
+  | "opening_creation"
+  | "continuation"
+  | "chapter_privacy"
+  | "consistency_investigation";
 
 export type SafeOperationStage =
   | "read_local_state"
@@ -143,7 +148,9 @@ function parseIncident(value: unknown): SafeOperationIncident | null {
     !ISO_TIMESTAMP_PATTERN.test(value.occurredAt) ||
     (value.operation !== "story_planning" &&
       value.operation !== "opening_creation" &&
-      value.operation !== "continuation") ||
+      value.operation !== "continuation" &&
+      value.operation !== "chapter_privacy" &&
+      value.operation !== "consistency_investigation") ||
     !isSafeStage(value.stage) ||
     typeof value.normalizedErrorCode !== "string" ||
     !ERROR_CODE_PATTERN.test(value.normalizedErrorCode)
@@ -182,12 +189,17 @@ function safeCauseChain(
   let current: unknown = cause;
   while (current !== null && current !== undefined && chain.length < 5 && !seen.has(current)) {
     seen.add(current);
+    const errorCode = safeErrorCode(isRecord(current) ? current.code : null);
     chain.push(
       Object.freeze({
         errorType: safeErrorType(current instanceof Error ? current.name : null),
-        errorCode: safeErrorCode(isRecord(current) ? current.code : null),
+        errorCode,
       }),
     );
+    const databaseCode = safeDatabaseErrorCode(current);
+    if (databaseCode !== null && databaseCode !== errorCode && chain.length < 5) {
+      chain.push(Object.freeze({ errorType: "Error", errorCode: databaseCode }));
+    }
     current = isRecord(current) && "cause" in current ? current.cause : null;
   }
   return Object.freeze(
@@ -195,6 +207,14 @@ function safeCauseChain(
       ? [{ errorType: "Error", errorCode: "UNEXPECTED_OPERATION_FAILURE" }]
       : chain,
   );
+}
+
+function safeDatabaseErrorCode(value: unknown): string | null {
+  if (!isRecord(value) || !isRecord(value.details)) return null;
+  const databaseCode = value.details.databaseCode;
+  return typeof databaseCode === "string" && ERROR_CODE_PATTERN.test(databaseCode)
+    ? databaseCode
+    : null;
 }
 
 function safeErrorCode(value: unknown): string {

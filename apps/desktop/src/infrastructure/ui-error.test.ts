@@ -39,6 +39,25 @@ describe("normalizeUiError SQLite persistence failures", () => {
     });
   });
 
+  it("explains an active AI dispatch without falsely naming the blocked operation", () => {
+    const ordinary = projectOrdinaryUiError(
+      new AppError({
+        code: "SAVE_FAILED",
+        message: "private implementation detail",
+        retryable: true,
+        details: { databaseCode: "PROJECT_REMOTE_DISPATCH_ACTIVE" },
+      }),
+    );
+
+    expect(ordinary).toEqual({
+      title: "暂时无法完成这项操作",
+      description:
+        "本作品仍有一次 AI 处理正在发送或等待结束。请先停止该任务，或等它结束后重新读取当前页面，再重试刚才的操作。",
+    });
+    expect(JSON.stringify(ordinary)).not.toContain("PROJECT_REMOTE_DISPATCH_ACTIVE");
+    expect(JSON.stringify(ordinary)).not.toContain("私密");
+  });
+
   it("does not claim a disk-full write was persisted", () => {
     expect(
       normalizeUiError(
@@ -228,7 +247,7 @@ describe("normalizeUiError SQLite persistence failures", () => {
     ["EXTENSION_USAGE_UNAVAILABLE", ["没有返回可核对的用量", "正文没有被覆盖", "导出历史"]],
     [
       "CREATIVE_OPENING_TIMEOUT_SCOPE_MISMATCH",
-      ["超时编号", "没有结束其他仍在进行的请求", "重新读取进度并核对本次发送信息"],
+      ["超时编号", "没有结束其他仍在进行的请求", "重新读取进度并核对本次发送前说明"],
     ],
     ["UPDATE_MANIFEST_UNAVAILABLE", ["安全更新未完成", "仍可离线使用", "官方发行说明"]],
   ])("gives an actionable, redacted recovery path for %s", (code, expectedFragments) => {

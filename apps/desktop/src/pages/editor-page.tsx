@@ -16,6 +16,7 @@ import {
   planCandidateApplication,
   type CandidateApplicationStrategy,
   type CandidateTextDiff,
+  type ProjectDisplayIdentity,
 } from "@inkshadow/application";
 import {
   detectCandidateStableOverlap,
@@ -36,7 +37,7 @@ import type {
   UuidV7,
 } from "@inkshadow/domain";
 import type { AiCandidateListWithIsolation, AiCandidateIsolationIncident } from "@inkshadow/data";
-import { parseUuidV7 } from "@inkshadow/domain";
+import { AppError, parseUuidV7 } from "@inkshadow/domain";
 import { parseUuidV7 as parseStoryUuidV7, type Outline } from "@inkshadow/story-core";
 import type { SaveState } from "@inkshadow/contracts/states";
 import {
@@ -85,6 +86,7 @@ import { ModelCenterError } from "../infrastructure/model-center-store";
 import { recordSafeOperationIncident } from "../infrastructure/safe-operation-diagnostics";
 import {
   beginGenerationNavigationSession,
+  currentGenerationNavigationGuard,
   type GenerationNavigationSession,
 } from "../infrastructure/generation-navigation-lifecycle";
 import type { StoryContextCompilationReceipt } from "../infrastructure/story-context-runtime";
@@ -901,6 +903,8 @@ export function EditorPage() {
     generationOperationRevisionRef.current += 1;
   }
   const [project, setProject] = useState<Project | null>(null);
+  const [projectDisplayIdentity, setProjectDisplayIdentity] =
+    useState<ProjectDisplayIdentity | null>(null);
   const [chapter, setChapter] = useState<Chapter | null>(null);
   const [chapters, setChapters] = useState<readonly Chapter[]>([]);
   const [content, setContent] = useState("");
@@ -1065,6 +1069,10 @@ export function EditorPage() {
   });
   const [privacyChangeTarget, setPrivacyChangeTarget] = useState<ChapterPrivacyMode | null>(null);
   const [privacyChangeBusy, setPrivacyChangeBusy] = useState(false);
+  const [privacyChangeFailure, setPrivacyChangeFailure] = useState<Readonly<{
+    description: string;
+    supportId: string;
+  }> | null>(null);
   const chapterRef = useRef<Chapter | null>(null);
   const authorityWriteBlockedRef = useRef(false);
   const contentRef = useRef("");
@@ -1269,7 +1277,17 @@ export function EditorPage() {
   useEffect(() => {
     candidateGenerationFlightRef.current = "idle";
     void activeGenerationNavigationRef.current?.session.stopAndPreserve().catch(() => undefined);
+    const resetGenerationRevision = generationOperationRevisionRef.current;
+    const resetRouteKey = routeIdentityRef.current;
+    const resetWritingModeKey = writingModeIdentityRef.current;
     const clearStaleModeState = () => {
+      if (
+        generationOperationRevisionRef.current !== resetGenerationRevision ||
+        routeIdentityRef.current !== resetRouteKey ||
+        writingModeIdentityRef.current !== resetWritingModeKey
+      ) {
+        return;
+      }
       setGenerationPlan(null);
       setPreflightOpen(false);
       setContinuationDisclosure(null);
@@ -1288,6 +1306,14 @@ export function EditorPage() {
     const revision = generationOperationRevisionRef.current + 1;
     generationOperationRevisionRef.current = revision;
     return Object.freeze({ revision, routeKey: editorRouteKey });
+  }
+
+  function blockNewGenerationWhileFragmentNeedsDecision(): boolean {
+    const fragment = currentGenerationNavigationGuard()?.unsafeFragment;
+    if (fragment?.isPresent() !== true) return false;
+    setAssistantOpen(true);
+    setEditorNotice("请先复制或明确放弃尚未安全保存的片段，再开始新的生成；正文和版本仍未改变。");
+    return true;
   }
 
   function registerPlanGenerationNavigationGuard(
@@ -1568,6 +1594,7 @@ export function EditorPage() {
       chapterRef.current = null;
       directionCandidateRef.current = null;
       setProject(null);
+      setProjectDisplayIdentity(null);
       setChapter(null);
       setChapters([]);
       setRecoveryDraft(null);
@@ -1600,6 +1627,7 @@ export function EditorPage() {
     setVersionReadWarning(null);
     authorityWriteBlockedRef.current = false;
     setError(null);
+    setProjectDisplayIdentity(null);
     setContinuationPreference(loadEditorContinuationPreference(window.localStorage, projectId));
     setPageState("loading");
     setRecoveryDecisionOpen(false);
@@ -1638,6 +1666,7 @@ export function EditorPage() {
       draftResult,
       versionsResult,
       candidatesResult,
+      projectDisplayIdentityResult,
     ] = await Promise.all([
       settleEditorRead(() => runtime.repositories.projects.findById(projectId)),
       settleEditorRead(() => runtime.repositories.chapters.findById(chapterId)),
@@ -1645,6 +1674,9 @@ export function EditorPage() {
       settleEditorRead(() => runtime.repositories.recoveryDrafts.findByChapterId(chapterId)),
       settleEditorRead(() => runtime.useCases.listChapterVersions.execute(chapterId)),
       settleEditorRead(() => readEditorCandidates(runtime.repositories.aiCandidates, chapterId)),
+      settleEditorRead(() =>
+        runtime.repositories.projectDisplayIdentities.resolveByProjectId(projectId),
+      ),
     ]);
 
     if (!isCurrentLoad()) {
@@ -1841,6 +1873,9 @@ export function EditorPage() {
     }
     void Promise.all(candidatesToReject.map((item) => rejectDirectionCandidateSafely(item)));
     setProject(loadedProject);
+    setProjectDisplayIdentity(
+      projectDisplayIdentityResult.ok ? projectDisplayIdentityResult.value : null,
+    );
     setChapter(loadedChapter);
     setChapters(chaptersResult.value);
     chapterRef.current = loadedChapter;
@@ -3456,6 +3491,7 @@ export function EditorPage() {
     partialCandidateId: UuidV7 | null = null,
     directDirection: string | null = null,
   ): Promise<void> {
+    if (blockNewGenerationWhileFragmentNeedsDecision()) return;
     if (
       authorityWriteBlockedRef.current ||
       candidateGenerationFlightRef.current !== "idle" ||
@@ -3584,7 +3620,7 @@ export function EditorPage() {
     });
     const stageLabel =
       input.stage === "prepare_disclosure"
-        ? "准备发送信息"
+        ? "准备发送前说明"
         : input.stage === "pre_dispatch_check"
           ? "确认发送前的最后核对"
           : input.stage === "provider_dispatch"
@@ -3611,6 +3647,7 @@ export function EditorPage() {
   }
 
   async function prepareContinuationDirections(): Promise<void> {
+    if (blockNewGenerationWhileFragmentNeedsDecision()) return;
     const stableChapter = chapterRef.current;
     const authorityAtStart = writingExperience.preference;
     if (
@@ -3677,7 +3714,7 @@ export function EditorPage() {
           stage: "prepare_disclosure",
           cause,
           dispatched: false,
-          description: "本地资料或发送信息没有准备完成。你的自定义方向仍保留，可以重试。",
+          description: "本地资料或发送前说明没有准备完成。你的自定义方向仍保留，可以重试。",
         });
       }
     } finally {
@@ -3689,6 +3726,7 @@ export function EditorPage() {
   }
 
   async function confirmContinuationDirections(): Promise<void> {
+    if (blockNewGenerationWhileFragmentNeedsDecision()) return;
     const pending = preparedDirections;
     const stableChapter = chapterRef.current;
     if (
@@ -3832,7 +3870,7 @@ export function EditorPage() {
           dispatched: executionRequested ? "unknown" : false,
           description: executionRequested
             ? "方向生成没有完成。请先查看服务使用记录，再决定是否重试。"
-            : "正文、写作方式或发送信息在确认前发生变化，请重新查看后再试。",
+            : "正文、写作方式或发送前说明在确认前发生变化，请重新查看后再试。",
         });
       }
     } finally {
@@ -3864,6 +3902,7 @@ export function EditorPage() {
     instructionOverride: string | null = null,
     directAction: EditorGenerationAction = "selection_rewrite",
   ): Promise<void> {
+    if (blockNewGenerationWhileFragmentNeedsDecision()) return;
     const stableChapter = chapterRef.current;
     if (
       authorityWriteBlockedRef.current ||
@@ -3915,6 +3954,23 @@ export function EditorPage() {
     let selectionSettlementCause: unknown = null;
     let selectionSession: GenerationNavigationSession | null = null;
     let retainUnsafeSelectionPreview = false;
+    const releaseUnsafeSelectionFragment = (): void => {
+      if (
+        selectionSession !== null &&
+        activeGenerationNavigationRef.current?.session === selectionSession
+      ) {
+        selectionSession.release();
+        activeGenerationNavigationRef.current = null;
+      }
+      if (isCurrentGenerationOperation(operation)) setGenerationPreview("");
+    };
+    const copyUnsafeSelectionFragment = async (): Promise<void> => {
+      await window.navigator.clipboard.writeText(receivedVisibleText);
+      releaseUnsafeSelectionFragment();
+      if (isCurrentGenerationOperation(operation)) {
+        setEditorNotice("这段未保存内容已复制到剪贴板；正文和版本没有变化。");
+      }
+    };
     try {
       const selectedText = stableChapter.content.slice(selection.start, selection.end);
       const selectedHash = await runtime.hasher.sha256(selectedText);
@@ -3937,7 +3993,7 @@ export function EditorPage() {
         });
         if (!isCurrentGenerationOperation(operation)) return;
         setSelectionRewriteDisclosure(activeDisclosure);
-        setEditorNotice("发送信息已准备好；确认前不会调用 AI。请核对后再继续。");
+        setEditorNotice("发送前说明已准备好；确认前不会调用 AI。请核对后再继续。");
         return;
       }
       const authorityBeforeDispatch = await runtime.writingExperience.getOrInitialize();
@@ -3947,7 +4003,7 @@ export function EditorPage() {
         authorityBeforeDispatch.revision !== authorityAtStart.revision
       ) {
         setSelectionRewriteDisclosure(null);
-        setEditorNotice("写作方式已经变化；本次没有调用 AI，请重新查看发送信息。");
+        setEditorNotice("写作方式已经变化；本次没有调用 AI，请重新查看发送前说明。");
         return;
       }
       const selectionNavigationId = runtime.ids.next();
@@ -3960,6 +4016,14 @@ export function EditorPage() {
           if (selectionRequestId !== null) {
             await runtime.modelGateway.cancelGeneration(selectionRequestId).catch(() => false);
           }
+        },
+        unsafeFragment: {
+          isPresent: () =>
+            !candidatePersisted &&
+            selectionSettlementCause !== null &&
+            receivedVisibleText.trim().length > 0,
+          copyAndRelease: copyUnsafeSelectionFragment,
+          discardAndRelease: releaseUnsafeSelectionFragment,
         },
       });
       activeGenerationNavigationRef.current = {
@@ -4204,6 +4268,7 @@ export function EditorPage() {
     plan: PreparedGenerationPlan,
     existingOperation?: Readonly<{ revision: number; routeKey: string }>,
   ): Promise<void> {
+    if (blockNewGenerationWhileFragmentNeedsDecision()) return;
     const operation = existingOperation ?? beginGenerationOperation();
     if (
       !plan.preflight.canStart ||
@@ -4325,6 +4390,7 @@ export function EditorPage() {
   }
 
   async function confirmGeneration(): Promise<void> {
+    if (blockNewGenerationWhileFragmentNeedsDecision()) return;
     if (generationPlan === null || candidateGenerationFlightRef.current !== "awaiting_decision") {
       return;
     }
@@ -5231,6 +5297,34 @@ export function EditorPage() {
     }
   }
 
+  function openChapterPrivacyDialog(target: ChapterPrivacyMode): void {
+    setError(null);
+    setPrivacyChangeFailure(null);
+    setPrivacyChangeTarget(target);
+  }
+
+  function recordChapterPrivacyFailure(stableChapter: Chapter, cause: unknown): void {
+    const incident = recordSafeOperationIncident({
+      operation: "chapter_privacy",
+      stage: "persist_result",
+      cause,
+      projectId: stableChapter.projectId,
+      chapterId: stableChapter.id,
+      dispatched: false,
+      occurredAt: runtime.clock.now(),
+    });
+    const ordinaryError = projectOrdinaryUiError(cause);
+    const privacyDescription =
+      cause instanceof AppError && cause.details.databaseCode === "PROJECT_REMOTE_DISPATCH_ACTIVE"
+        ? "本作品仍有一次 AI 处理正在发送或等待结束。请先停止该任务，或等它结束后重新读取章节，再重试隐私设置。"
+        : ordinaryError.description;
+    setPrivacyChangeFailure({
+      description: privacyDescription,
+      supportId: incident.supportId,
+    });
+    setError(cause);
+  }
+
   async function confirmChapterPrivacyChange(): Promise<void> {
     const stableChapter = chapterRef.current;
     if (
@@ -5244,6 +5338,7 @@ export function EditorPage() {
     }
 
     setPrivacyChangeBusy(true);
+    setPrivacyChangeFailure(null);
     setError(null);
     try {
       const result = await runtime.useCases.setChapterPrivacy.execute({
@@ -5252,7 +5347,7 @@ export function EditorPage() {
         expectedPrivacyRevision: stableChapter.privacyRevision,
       });
       if (!result.ok) {
-        setError(result.error);
+        recordChapterPrivacyFailure(stableChapter, result.error);
         return;
       }
 
@@ -5262,6 +5357,7 @@ export function EditorPage() {
         current.map((item) => (item.id === result.value.chapter.id ? result.value.chapter : item)),
       );
       setPrivacyChangeTarget(null);
+      setPrivacyChangeFailure(null);
       setGenerationError(null);
       if (result.value.chapter.isLocalOnly) {
         const historicalCloudMessage =
@@ -5277,7 +5373,7 @@ export function EditorPage() {
         );
       }
     } catch (cause: unknown) {
-      setError(cause);
+      recordChapterPrivacyFailure(stableChapter, cause);
     } finally {
       setPrivacyChangeBusy(false);
     }
@@ -5334,8 +5430,12 @@ export function EditorPage() {
   const candidateVersionLabel = `${candidateSuggestionLabel}版本`;
   const candidateActionGap = !directMode && candidatePresentation === "ai" ? " " : "";
   const candidateIncomplete = candidate?.toSnapshot().incomplete ?? false;
+  const unsafeGenerationFragmentPending =
+    generationPreview.trim().length > 0 &&
+    currentGenerationNavigationGuard()?.unsafeFragment?.isPresent() === true;
   const canGenerateCandidate =
     !readonly &&
+    !unsafeGenerationFragmentPending &&
     (candidate === null ||
       candidate.status === "accepted" ||
       candidate.status === "rejected" ||
@@ -5672,7 +5772,7 @@ export function EditorPage() {
                     variant="ghost"
                     disabled={privacyChangeBusy}
                     onClick={() =>
-                      setPrivacyChangeTarget(chapter.isLocalOnly ? "standard" : "local_only")
+                      openChapterPrivacyDialog(chapter.isLocalOnly ? "standard" : "local_only")
                     }
                   >
                     {chapter.isLocalOnly ? "管理隐私" : "设为私密"}
@@ -5731,6 +5831,14 @@ export function EditorPage() {
             </Button>
           </div>
         </header>
+
+        {projectDisplayIdentity?.displayKind === "builtin_example" && (
+          <InlineAlert
+            tone="info"
+            title="这是示例作品，可随时删除"
+            description="你可以在这里体验编辑、版本和 AI 建议流程。需要开始自己的创作时，请从创作首页新建作品。"
+          />
+        )}
 
         {!online && (
           <InlineAlert
@@ -6194,7 +6302,7 @@ export function EditorPage() {
                       <Button
                         variant="secondary"
                         disabled={privacyChangeBusy}
-                        onClick={() => setPrivacyChangeTarget("standard")}
+                        onClick={() => openChapterPrivacyDialog("standard")}
                       >
                         恢复普通章节
                       </Button>
@@ -6253,7 +6361,7 @@ export function EditorPage() {
                     <Button
                       variant="ai-primary"
                       loading={candidateBusy}
-                      disabled={!editorClean}
+                      disabled={!editorClean || unsafeGenerationFragmentPending}
                       onClick={() =>
                         void (lastGenerationAction === "selection_rewrite" ||
                         lastGenerationAction === "polish" ||
@@ -6288,7 +6396,7 @@ export function EditorPage() {
                     {privateGenerationBlocked && (
                       <Button
                         variant="secondary"
-                        onClick={() => setPrivacyChangeTarget("standard")}
+                        onClick={() => openChapterPrivacyDialog("standard")}
                       >
                         改用普通模式
                       </Button>
@@ -6903,7 +7011,7 @@ export function EditorPage() {
                           }
                           onClick={() => void rewriteSelectedText()}
                         >
-                          查看自定义改写发送信息
+                          查看自定义改写发送前说明
                         </Button>
                       </section>
                     )}
@@ -7251,7 +7359,9 @@ export function EditorPage() {
               </Button>
               <Button
                 loading={versionRestoreBusy}
-                disabled={!editorClean || readonly}
+                disabled={
+                  !editorClean || readonly || versionToRestore.toSnapshot().chapterId !== chapter.id
+                }
                 onClick={() => void restoreSelectedVersion()}
               >
                 确认恢复版本 {String(versionToRestore.toSnapshot().sequence)}
@@ -7261,9 +7371,17 @@ export function EditorPage() {
         >
           <div className="version-restore-comparison">
             <InlineAlert
-              tone="warning"
-              title="这是追加式恢复"
-              description="恢复不会回写旧记录。若章节在确认前发生变化，版本冲突保护会阻止提交。"
+              tone={versionToRestore.toSnapshot().chapterId === chapter.id ? "warning" : "error"}
+              title={
+                versionToRestore.toSnapshot().chapterId === chapter.id
+                  ? `目标章节：《${chapter.title}》`
+                  : "目标章节与当前章节不一致"
+              }
+              description={
+                versionToRestore.toSnapshot().chapterId === chapter.id
+                  ? "请确认这是你准备恢复的章节。恢复只会追加新版本，不会回写旧记录；若章节在确认前发生变化，版本冲突保护会阻止提交。"
+                  : "为保护正文，当前无法确认恢复。请关闭窗口，从目标章节的版本历史重新选择。"
+              }
             />
             <dl className="generation-receipt">
               <div>
@@ -7311,6 +7429,7 @@ export function EditorPage() {
           onOpenChange={(open) => {
             if (!open && !privacyChangeBusy) {
               setPrivacyChangeTarget(null);
+              setPrivacyChangeFailure(null);
             }
           }}
           title={
@@ -7326,7 +7445,10 @@ export function EditorPage() {
               <Button
                 variant="secondary"
                 disabled={privacyChangeBusy}
-                onClick={() => setPrivacyChangeTarget(null)}
+                onClick={() => {
+                  setPrivacyChangeTarget(null);
+                  setPrivacyChangeFailure(null);
+                }}
               >
                 取消
               </Button>
@@ -7335,24 +7457,53 @@ export function EditorPage() {
                 disabled={project?.status !== "active"}
                 onClick={() => void confirmChapterPrivacyChange()}
               >
-                {privacyChangeTarget === "local_only" ? "确认仅限本地" : "确认改为普通章节"}
+                {privacyChangeFailure !== null
+                  ? privacyChangeTarget === "local_only"
+                    ? "重新尝试设为私密"
+                    : "重新尝试改为普通章节"
+                  : privacyChangeTarget === "local_only"
+                    ? "确认仅限本地"
+                    : "确认改为普通章节"}
               </Button>
             </>
           }
         >
-          {privacyChangeTarget === "local_only" ? (
-            <InlineAlert
-              tone="warning"
-              title="无法撤回已经完成的外部传输"
-              description="墨影会从现在起阻止新的云端发送，并清理尚未发出的同步任务；如果本章过去已经传到供应商或确认写入远端，当前版本无法替你从对方系统中删除。"
-            />
-          ) : (
-            <InlineAlert
-              tone="warning"
-              title="以后可能离开本机"
-              description="改为普通章节不会立刻发送正文，但后续使用联网 AI、同步或勾选包含私密内容导出时，完成任务所需的内容可能离开本机。"
-            />
-          )}
+          <>
+            {privacyChangeTarget === "local_only" ? (
+              <InlineAlert
+                tone="warning"
+                title="无法撤回已经完成的外部传输"
+                description="墨影会从现在起阻止新的云端发送，并清理尚未发出的同步任务；如果本章过去已经传到供应商或确认写入远端，当前版本无法替你从对方系统中删除。"
+              />
+            ) : (
+              <InlineAlert
+                tone="warning"
+                title="以后可能离开本机"
+                description="改为普通章节不会立刻发送正文，但后续使用联网 AI、同步或勾选包含私密内容导出时，完成任务所需的内容可能离开本机。"
+              />
+            )}
+            {privacyChangeFailure !== null && (
+              <InlineAlert
+                tone="error"
+                title="隐私设置没有保存"
+                description={
+                  <>
+                    <p>{privacyChangeFailure.description}</p>
+                    <p>正文和已有版本没有改变。</p>
+                    <p>问题编号（联系支持时提供）：{privacyChangeFailure.supportId}</p>
+                  </>
+                }
+                action={{
+                  label: "重新读取章节",
+                  onClick: () => {
+                    setPrivacyChangeTarget(null);
+                    setPrivacyChangeFailure(null);
+                    void load();
+                  },
+                }}
+              />
+            )}
+          </>
         </Dialog>
       )}
 
@@ -8007,9 +8158,9 @@ export function EditorPage() {
                 )}
                 <section
                   className="generation-preflight__confirmation-memory"
-                  aria-label="完整发送信息"
+                  aria-label="完整发送前说明"
                 >
-                  <h3>完整发送信息</h3>
+                  <h3>完整发送前说明</h3>
                   <p>{continuationDisclosure.privacy}</p>
                   <p>发送内容：{continuationDisclosure.sends.join("；")}。</p>
                   <p>
@@ -8153,49 +8304,51 @@ export function EditorPage() {
             )}
 
             <ul className="generation-preflight__checks">
-              {generationPlan.preflight.checks.map((check) => (
-                <li key={check.code}>
-                  <div>
-                    <Badge
-                      tone={
-                        check.severity === "blocking"
-                          ? "danger"
-                          : check.severity === "fix_recommended"
-                            ? "warning"
-                            : "neutral"
-                      }
-                    >
-                      {preflightSeverityLabel(check.severity)}
-                    </Badge>
-                    <strong>{preflightCheckLabel(check.code)}</strong>
-                  </div>
-                  {check.action === "SAVE_CHAPTER" ? (
-                    <Button variant="secondary" onClick={() => void manualSave()}>
-                      保存章节
-                    </Button>
-                  ) : check.action === "OPEN_MODEL_CENTER" ||
-                    check.action === "UPDATE_PRICING" ||
-                    check.action === "RETRY_CONNECTION" ? (
-                    <Link
-                      className="back-link"
-                      to={preflightModelHubLink(
-                        check.action === "UPDATE_PRICING"
-                          ? "model-pricing"
-                          : check.action === "RETRY_CONNECTION"
-                            ? "provider-connection"
-                            : "model-selection",
-                      )}
-                      onClick={() => persistEditorView(selectionRef.current)}
-                    >
-                      设置 AI 服务
-                    </Link>
-                  ) : check.action === "REDUCE_CONTEXT" ? (
-                    <Button variant="secondary" onClick={cancelPreflightAndFocusEditor}>
-                      返回正文精简内容
-                    </Button>
-                  ) : null}
-                </li>
-              ))}
+              {generationPlan.preflight.checks
+                .filter(({ code }) => code !== "PREFLIGHT_WARNING_PRICING_UNKNOWN")
+                .map((check) => (
+                  <li key={check.code}>
+                    <div>
+                      <Badge
+                        tone={
+                          check.severity === "blocking"
+                            ? "danger"
+                            : check.severity === "fix_recommended"
+                              ? "warning"
+                              : "neutral"
+                        }
+                      >
+                        {preflightSeverityLabel(check.severity)}
+                      </Badge>
+                      <strong>{preflightCheckLabel(check.code)}</strong>
+                    </div>
+                    {check.action === "SAVE_CHAPTER" ? (
+                      <Button variant="secondary" onClick={() => void manualSave()}>
+                        保存章节
+                      </Button>
+                    ) : check.action === "OPEN_MODEL_CENTER" ||
+                      check.action === "UPDATE_PRICING" ||
+                      check.action === "RETRY_CONNECTION" ? (
+                      <Link
+                        className="back-link"
+                        to={preflightModelHubLink(
+                          check.action === "UPDATE_PRICING"
+                            ? "model-pricing"
+                            : check.action === "RETRY_CONNECTION"
+                              ? "provider-connection"
+                              : "model-selection",
+                        )}
+                        onClick={() => persistEditorView(selectionRef.current)}
+                      >
+                        设置 AI 服务
+                      </Link>
+                    ) : check.action === "REDUCE_CONTEXT" ? (
+                      <Button variant="secondary" onClick={cancelPreflightAndFocusEditor}>
+                        返回正文精简内容
+                      </Button>
+                    ) : null}
+                  </li>
+                ))}
             </ul>
 
             {generationPlan.preflight.costStatus === "pricing_unavailable" && (
@@ -8205,6 +8358,13 @@ export function EditorPage() {
                   <strong>暂时无法计算</strong>
                 </div>
                 <p>服务商没有提供可计算的单价，实际费用请以服务商账单为准。</p>
+                <Link
+                  className="back-link"
+                  to={preflightModelHubLink("model-pricing")}
+                  onClick={() => persistEditorView(selectionRef.current)}
+                >
+                  填写费用信息
+                </Link>
               </section>
             )}
 
@@ -8611,7 +8771,7 @@ function preflightCheckLabel(code: string): string {
     CONTEXT_WINDOW_NEAR_LIMIT: "本次所需内容接近可处理长度上限",
     BUDGET_WARNING: "预计费用接近或超过预算提醒阈值",
     BUDGET_EXCEEDED: "预计费用超过硬预算",
-    PREFLIGHT_WARNING_PRICING_UNKNOWN: "该模型尚未填写价格，暂时无法估算费用",
+    PREFLIGHT_WARNING_PRICING_UNKNOWN: "费用信息尚未完善",
     PREFLIGHT_WARNING_CONTEXT_UNKNOWN: "未获取精确的资料处理上限，将使用保守长度整理参考内容",
     PREFLIGHT_WARNING_TOKEN_ESTIMATE_APPROXIMATE:
       "发送给 AI 的文字量为本机估算（不是金额），已预留安全余量",

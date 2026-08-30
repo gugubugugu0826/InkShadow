@@ -232,7 +232,13 @@ function GenerationExitDialog({
 }) {
   const { toast } = useToast();
   const [busy, setBusy] = useState(false);
+  const [unsafeFragmentReadyFor, setUnsafeFragmentReadyFor] = useState<string | null>(null);
   const closing = destination === "关闭";
+  const unsafeFragment =
+    guard.unsafeFragment !== undefined &&
+    (unsafeFragmentReadyFor === guard.id || guard.unsafeFragment.isPresent())
+      ? guard.unsafeFragment
+      : null;
   const stop = (): void => {
     if (busy) return;
     setBusy(true);
@@ -240,9 +246,30 @@ function GenerationExitDialog({
       .stopAndPreserve()
       .then(onStopped)
       .catch(() => {
+        if (guard.unsafeFragment?.isPresent() === true) {
+          setUnsafeFragmentReadyFor(guard.id);
+          return;
+        }
         toast({
           title: `尚不能安全${destination}`,
           description: `本次生成没有完成安全结算。${closing ? "应用" : "页面"}仍保持打开，请稍后重试或先保存可见内容。`,
+          tone: "error",
+          duration: null,
+        });
+        onFailure?.();
+      })
+      .finally(() => setBusy(false));
+  };
+  const resolveUnsafeFragment = (operation: () => void | Promise<void>): void => {
+    if (busy) return;
+    setBusy(true);
+    void Promise.resolve()
+      .then(operation)
+      .then(onStopped)
+      .catch(() => {
+        toast({
+          title: `尚不能安全${destination}`,
+          description: "片段处理没有完成，页面仍保持打开；请重试复制，或明确放弃这段未保存内容。",
           tone: "error",
           duration: null,
         });
@@ -257,24 +284,58 @@ function GenerationExitDialog({
       onOpenChange={(open) => {
         if (!open) onStay();
       }}
-      title={`停止本次生成并${destination}？`}
-      description={`${closing ? "关闭应用" : "离开"}将停止本次${guard.actionLabel}。你也可以留在${closing ? "应用中" : "当前页面"}继续等待。`}
+      title={
+        unsafeFragment === null
+          ? `停止本次生成并${destination}？`
+          : `处理未保存片段并${destination}？`
+      }
+      description={
+        unsafeFragment === null
+          ? `${closing ? "关闭应用" : "离开"}将停止本次${guard.actionLabel}。你也可以留在${closing ? "应用中" : "当前页面"}继续等待。`
+          : `本次${guard.actionLabel}已经结束，但收到的片段未能安全保存。复制或明确放弃后即可${destination}；正文和版本没有变化。`
+      }
       footer={
         <>
           <Button variant="secondary" disabled={busy} onClick={onStay}>
             留在{closing ? "应用" : "当前页面"}
           </Button>
-          <Button loading={busy} onClick={stop}>
-            停止生成并{destination}
-          </Button>
+          {unsafeFragment === null ? (
+            <Button loading={busy} onClick={stop}>
+              停止生成并{destination}
+            </Button>
+          ) : (
+            <>
+              <Button
+                variant="secondary"
+                disabled={busy}
+                onClick={() => resolveUnsafeFragment(unsafeFragment.copyAndRelease)}
+              >
+                复制片段并{destination}
+              </Button>
+              <Button
+                loading={busy}
+                onClick={() => resolveUnsafeFragment(unsafeFragment.discardAndRelease)}
+              >
+                放弃片段并{destination}
+              </Button>
+            </>
+          )}
         </>
       }
     >
-      <InlineAlert
-        tone="warning"
-        title="请求已经开始，停止不代表从未发送"
-        description="墨影会先结算本次请求；已收到的内容会保持为隔离的未完成建议，正文不会改变，也不会自动重发。"
-      />
+      {unsafeFragment === null ? (
+        <InlineAlert
+          tone="warning"
+          title="请求已经开始，停止不代表从未发送"
+          description="墨影会先结算本次请求；已收到的内容会保持为隔离的未完成建议，正文不会改变，也不会自动重发。"
+        />
+      ) : (
+        <InlineAlert
+          tone="warning"
+          title="片段尚未写入本机"
+          description="复制会把片段放入剪贴板；放弃只会清除这段未保存内容。两种选择都不会改动正文、版本或已有建议。"
+        />
+      )}
     </Dialog>
   );
 }

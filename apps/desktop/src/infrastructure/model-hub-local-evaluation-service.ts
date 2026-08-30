@@ -170,7 +170,7 @@ export class ModelHubLocalEvaluationService {
     ) {
       throw new ModelHubLocalEvaluationError(
         "MODEL_EVALUATION_INCONSISTENT_ROUTE",
-        "两次评测使用了不同模型，结果不会写入目录；请重新查看发送信息。",
+        "两次评测使用了不同模型，结果不会写入目录；请重新查看发送前说明。",
         true,
       );
     }

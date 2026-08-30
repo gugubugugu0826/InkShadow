@@ -282,6 +282,68 @@ describe("Novel Skill desktop runtime", () => {
     });
   });
 
+  it("defaults an incidental scene-writing description to continuation unless an applicable task is explicit", async () => {
+    const persistence = new MemoryNovelSkillPersistence();
+    const runtime = new TauriNovelSkillRuntime(persistence, {
+      now: () => NOW,
+    });
+    await runtime.initialize();
+
+    const draft = runtime.organizeCustomSkillDraft(
+      "名称：克制场景。规则：场景推进时保持短句；用人物动作承接情绪。不要补写未经确认的经历。",
+    );
+    expect(draft).toMatchObject({
+      displayName: "克制场景",
+      taskTypes: ["continuation"],
+      rules: ["场景推进时保持短句", "用人物动作承接情绪"],
+    });
+
+    const created = await runtime.createCustomSkill(PROJECT_ID, draft);
+    const custom = created.methods.find(({ displayName }) => displayName === "克制场景");
+    if (custom === undefined) throw new Error("Missing natural-language custom writing skill.");
+    await runtime.setMethodEnabled(PROJECT_ID, custom.skillId, true);
+    const prepared = await runtime.prepareInvocation({
+      projectId: PROJECT_ID,
+      taskType: "continuation",
+      invocationMode: "draft",
+      availableContextLayers: ["current_task", "scene_goal"],
+    });
+
+    expect(prepared.methods.find(({ displayName }) => displayName === "克制场景")).toMatchObject({
+      included: true,
+      selectionReason: "selected",
+      ownerScope: "user",
+    });
+    expect(prepared.promptSection).toContain("场景推进时保持短句");
+  });
+
+  it("does not treat explicitly excluded tasks as applicable tasks", async () => {
+    const runtime = new TauriNovelSkillRuntime(new MemoryNovelSkillPersistence(), {
+      now: () => NOW,
+    });
+    await runtime.initialize();
+
+    expect(
+      runtime.organizeCustomSkillDraft(
+        "名称：场景拆解助手。不适用于续写，只用于场景规划。规则：先列出场景目标。",
+      ),
+    ).toMatchObject({ taskTypes: ["scene_breakdown"] });
+    expect(() =>
+      runtime.organizeCustomSkillDraft("名称：待补充范围。不要用于续写。规则：保留作者原意。"),
+    ).toThrow(/只有不适用任务/u);
+  });
+
+  it("does not mistake an ordinary unsupported-writing rule for a task exclusion", async () => {
+    const runtime = new TauriNovelSkillRuntime(new MemoryNovelSkillPersistence(), {
+      now: () => NOW,
+    });
+    await runtime.initialize();
+
+    expect(
+      runtime.organizeCustomSkillDraft("名称：克制对白。规则：不支持凭空增加人物；保持短句。"),
+    ).toMatchObject({ taskTypes: ["continuation"] });
+  });
+
   it("rejects imported rules that could alter system, privacy or sending boundaries", async () => {
     const persistence = new MemoryNovelSkillPersistence();
     const runtime = new TauriNovelSkillRuntime(persistence, { now: () => NOW });

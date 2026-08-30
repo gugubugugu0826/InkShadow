@@ -68,7 +68,7 @@ const expectedUnsignedReleaseCandidateSteps = [
   },
 ];
 
-test("0.2.15 authoritative application versions stay aligned", async () => {
+test("0.2.16 authoritative application versions stay aligned", async () => {
   const [rootSource, desktopSource, tauriSource, cargoManifest, cargoLock, runtime] =
     await Promise.all([
       readFile(path.join(workspaceRoot, "package.json"), "utf8"),
@@ -84,16 +84,16 @@ test("0.2.15 authoritative application versions stay aligned", async () => {
   const rootManifest = JSON.parse(rootSource);
   const desktopManifest = JSON.parse(desktopSource);
   const tauriConfiguration = JSON.parse(tauriSource);
-  const expectedVersion = "0.2.15";
+  const expectedVersion = "0.2.16";
   assert.equal(rootManifest.version, expectedVersion);
   assert.equal(desktopManifest.version, expectedVersion);
   assert.equal(tauriConfiguration.version, expectedVersion);
   assert.equal(/^\s*version\s*=\s*"([^"]+)"\s*$/mu.exec(cargoManifest)?.[1], expectedVersion);
   assert.match(
     cargoLock,
-    /\[\[package\]\]\r?\nname = "inkshadow-desktop"\r?\nversion = "0\.2\.15"/u,
+    /\[\[package\]\]\r?\nname = "inkshadow-desktop"\r?\nversion = "0\.2\.16"/u,
   );
-  assert.match(runtime, /appVersion:\s*"0\.2\.15"/u);
+  assert.match(runtime, /appVersion:\s*"0\.2\.16"/u);
   assert.equal(
     rootManifest.scripts["release:verify:installer-version"],
     "node scripts/check-windows-installer-version.mjs",
@@ -101,7 +101,7 @@ test("0.2.15 authoritative application versions stay aligned", async () => {
   assert.deepEqual(UNSIGNED_RELEASE_CANDIDATE_STEPS, expectedUnsignedReleaseCandidateSteps);
 });
 
-test("Windows installer contract accepts only the 0.2.15 branded AMD64 unsigned package", () => {
+test("Windows installer contract accepts only the 0.2.16 branded AMD64 unsigned package", () => {
   assert.doesNotThrow(() =>
     validateTauriConfiguration({
       productName: EXPECTED_PRODUCT_NAME,
@@ -124,8 +124,8 @@ test("Windows installer contract accepts only the 0.2.15 branded AMD64 unsigned 
     validMetadata,
   );
   assert.throws(() => decodeWindowsInstallerMetadata("īӰ InkShadow"), /canonical Base64/u);
-  assert.equal(normalizeWindowsVersion("0.2.15.0"), EXPECTED_RELEASE_VERSION);
-  assert.equal(normalizeWindowsVersion("0.2.15"), EXPECTED_RELEASE_VERSION);
+  assert.equal(normalizeWindowsVersion("0.2.16.0"), EXPECTED_RELEASE_VERSION);
+  assert.equal(normalizeWindowsVersion("0.2.16"), EXPECTED_RELEASE_VERSION);
 });
 
 test("Windows installer inspection does not inherit an incompatible PowerShell module path", () => {
@@ -137,7 +137,7 @@ test("Windows installer inspection does not inherit an incompatible PowerShell m
       INKSHADOW_INSTALLER_PATH: "stale-installer",
       INKSHADOW_APPLICATION_PATH: "stale-application",
     },
-    "C:\\release\\墨影 InkShadow_0.2.15_x64-setup.exe",
+    "C:\\release\\墨影 InkShadow_0.2.16_x64-setup.exe",
     "C:\\release\\inkshadow-desktop.exe",
   );
 
@@ -148,14 +148,14 @@ test("Windows installer inspection does not inherit an incompatible PowerShell m
   assert.equal(environment.Path, "C:\\Windows\\System32");
   assert.equal(
     environment.INKSHADOW_INSTALLER_PATH,
-    "C:\\release\\墨影 InkShadow_0.2.15_x64-setup.exe",
+    "C:\\release\\墨影 InkShadow_0.2.16_x64-setup.exe",
   );
   assert.equal(environment.INKSHADOW_APPLICATION_PATH, "C:\\release\\inkshadow-desktop.exe");
 });
 
 test("Windows installer contract rejects wrong identity, version, architecture and signature", () => {
   assert.throws(
-    () => validateTauriConfiguration({ productName: "InkShadow", version: "0.2.15" }),
+    () => validateTauriConfiguration({ productName: "InkShadow", version: "0.2.16" }),
     /product name/u,
   );
   assert.throws(
@@ -165,8 +165,8 @@ test("Windows installer contract rejects wrong identity, version, architecture a
   const validMetadata = {
     ProductName: EXPECTED_PRODUCT_NAME,
     FileDescription: EXPECTED_FILE_DESCRIPTION,
-    ProductVersion: "0.2.15.0",
-    FileVersion: "0.2.15.0",
+    ProductVersion: "0.2.16.0",
+    FileVersion: "0.2.16.0",
     ApplicationMachine: EXPECTED_PE_MACHINE,
     SignatureStatus: "NotSigned",
   };
@@ -184,7 +184,7 @@ test("Windows installer contract rejects wrong identity, version, architecture a
       `${field} must be rejected`,
     );
   }
-  assert.equal(normalizeWindowsVersion("0.2.15.1"), null);
+  assert.equal(normalizeWindowsVersion("0.2.16.1"), null);
   assert.equal(normalizeWindowsVersion("not-a-version"), null);
 });
 
@@ -790,15 +790,26 @@ test("artifact fingerprint excludes only the root release manifest", async () =>
   }
 });
 
-test("Vite and release attestation share one aggregate frontend budget", async () => {
+test("Vite and release attestation share the audited async and aggregate budgets", async () => {
   const [viteConfiguration, releaseChecker] = await Promise.all([
     readFile(path.join(workspaceRoot, "apps", "desktop", "vite.config.ts"), "utf8"),
     readFile(path.join(workspaceRoot, "scripts", "check-desktop-release.mjs"), "utf8"),
   ]);
+  const viteAsyncBudget = viteConfiguration.match(/ASYNC_CHUNK_BUDGET_BYTES\s*=\s*([^;]+);/u)?.[1];
+  const attestationAsyncBudget = releaseChecker.match(/asyncChunk:\s*([^,\n]+),/u)?.[1];
   const viteBudget = viteConfiguration.match(/TOTAL_FRONTEND_BUDGET_BYTES\s*=\s*([^;]+);/u)?.[1];
   const attestationBudget = releaseChecker.match(/totalFrontend:\s*([^,\n]+),/u)?.[1];
+  assert.ok(viteAsyncBudget, "Vite async chunk budget is missing");
+  assert.ok(attestationAsyncBudget, "release attestation async chunk budget is missing");
   assert.ok(viteBudget, "Vite aggregate frontend budget is missing");
   assert.ok(attestationBudget, "release attestation aggregate frontend budget is missing");
+  assert.equal(viteAsyncBudget.replaceAll(/\s+/gu, ""), "520*1024");
+  assert.equal(
+    attestationAsyncBudget.replaceAll(/\s+/gu, ""),
+    viteAsyncBudget.replaceAll(/\s+/gu, ""),
+    "the build and release attestation must reject the same oversized async chunk",
+  );
+  assert.equal(viteBudget.replaceAll(/\s+/gu, ""), "7*1024*1024+128*1024");
   assert.equal(
     attestationBudget.replaceAll(/\s+/gu, ""),
     viteBudget.replaceAll(/\s+/gu, ""),

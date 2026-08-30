@@ -34,7 +34,7 @@ for (const colorScheme of ["light", "dark"] as const) {
       await expect(page.getByRole("heading", { name: "模型中心 · 连接与模型" })).toBeVisible();
       await selectConnection(page, LONG_MODEL_HUB_CONNECTION_ID);
       await expect(
-        page.getByRole("combobox", { name: /^已连接的供应商/u }).locator("option:checked"),
+        page.getByRole("combobox", { name: /^现有供应商连接/u }).locator("option:checked"),
       ).toContainText(LONG_MODEL_HUB_PROVIDER_NAME);
       await openExpertSettings(page);
       await expect(page.getByLabel("服务根地址", { exact: true })).toHaveValue(
@@ -122,7 +122,7 @@ test("keeps long Model Hub data usable at DPR2 and equivalent 200%", async ({
 });
 
 async function selectConnection(page: Page, id: string): Promise<void> {
-  const select = page.getByRole("combobox", { name: /^已连接的供应商/u });
+  const select = page.getByRole("combobox", { name: /^现有供应商连接/u });
   await expect(select).toBeEnabled();
   await select.selectOption(id);
   await expect(select).toHaveValue(id);

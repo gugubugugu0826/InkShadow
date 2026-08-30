@@ -5383,7 +5383,7 @@ export function SettingsPage() {
                             )}
                           </FormField>
                           {manageableHubConnections.length > 0 && (
-                            <FormField label="已连接的供应商">
+                            <FormField label="现有供应商连接">
                               {(fieldProps) => (
                                 <Select
                                   {...fieldProps}

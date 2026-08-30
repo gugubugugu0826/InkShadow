@@ -952,7 +952,7 @@ export function IdeaJourneyPage() {
     if (!currentRun?.requestIds.includes(requestId)) {
       throw new UiActionError(
         "OPENING_JOURNEY_SCOPE_MISMATCH",
-        "本次发送信息与当前构思不一致；请求已经确认发出，返回结果需要人工核对。",
+        "本次发送前说明与当前构思不一致；请求已经确认发出，返回结果需要人工核对。",
       );
     }
     // The batch enters the Provider-waiting stage as soon as its first durable
@@ -8117,7 +8117,7 @@ function openingJourneyStageLabel(stage: OpeningJourneyRunStage): string {
     journey_saved: "灵感已保存",
     workspace_provisioning: "正在准备可恢复作品",
     preflight: "正在检查所选模型、服务和发送内容",
-    awaiting_confirmation: "等待你确认发送信息",
+    awaiting_confirmation: "等待你确认发送前说明",
     confirmed: "已确认，正在保存本次生成信息",
     invocation_reserving: "正在保存本次生成信息",
     provider_waiting: "已向所选服务发送，正在等待结果",

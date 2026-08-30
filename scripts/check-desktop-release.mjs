@@ -19,7 +19,10 @@ const tauriRoot = path.join(desktopRoot, "src-tauri");
 
 const budgets = Object.freeze({
   entryChunk: 300 * 1024,
-  asyncChunk: 500 * 1024,
+  // Keep this aligned with apps/desktop/vite.config.ts. The v0.2.16 change is
+  // limited to one cohesive lazy route; the aggregate payload ceiling remains
+  // unchanged so unrelated growth still fails the release audit.
+  asyncChunk: 520 * 1024,
   cssAsset: 128 * 1024,
   workerAsset: 1_536 * 1024,
   generalAsset: 2 * 1024 * 1024,

@@ -378,7 +378,7 @@ export async function executeCreativeOpeningProviderAction(
         async (settlement) => {
           settlement.assertPending();
           if (reservedInvocation?.id !== request.requestId) {
-            throw new Error("这个开头位置与已保存的发送信息不一致。");
+            throw new Error("这个开头位置与已保存的发送前说明不一致。");
           }
           try {
             const result = await generateCreativeOpeningInternal(

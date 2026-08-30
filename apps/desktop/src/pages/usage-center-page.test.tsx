@@ -27,7 +27,7 @@ describe("UsageCenterPage", () => {
       await screen.findByRole("heading", { name: "模型使用与费用", level: 1 }),
     ).toBeInTheDocument();
     expect(screen.getAllByText("¥0.12").length).toBeGreaterThan(0);
-    expect(screen.getByText("1 次暂时无法估算 · 已知金额均为估算")).toBeInTheDocument();
+    expect(screen.getByText("其中 1 次费用暂无法估算；其余已知金额均为估算")).toBeInTheDocument();
     expect(screen.getByText("文字量未记录（不是金额）")).toBeInTheDocument();
     expect(screen.getByText("AI 服务记录有 1 次失败或结果不明确")).toBeVisible();
     expect(screen.getByText("第一章 雨停以前")).toBeVisible();
@@ -214,6 +214,8 @@ describe("UsageCenterPage", () => {
     expect(within(details).getByRole("row", { name: /发送前安全终止/u })).toHaveTextContent(
       "发送 0 次 · 自动重试 0 次",
     );
+    expect(screen.getByText("服务商未提供这 5 次调用的费用信息，请以服务商账单为准")).toBeVisible();
+    expect(document.body).not.toHaveTextContent("其余已知金额均为估算");
   });
 
   it("raises unfinished and unknown-cost calls above the neutral summaries", async () => {

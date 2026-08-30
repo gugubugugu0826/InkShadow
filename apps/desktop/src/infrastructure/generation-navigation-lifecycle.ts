@@ -2,6 +2,13 @@ export interface ActiveGenerationNavigationGuard {
   readonly id: string;
   readonly actionLabel: string;
   readonly stopAndPreserve: () => Promise<void>;
+  readonly unsafeFragment?: ActiveGenerationUnsafeFragment;
+}
+
+export interface ActiveGenerationUnsafeFragment {
+  readonly isPresent: () => boolean;
+  readonly copyAndRelease: () => Promise<void>;
+  readonly discardAndRelease: () => void;
 }
 
 export interface GenerationNavigationSession {
@@ -63,6 +70,7 @@ export function beginGenerationNavigationSession(input: {
   readonly actionLabel: string;
   readonly stop: () => Promise<unknown>;
   readonly timeoutMs: number;
+  readonly unsafeFragment?: ActiveGenerationUnsafeFragment;
 }): GenerationNavigationSession {
   let requested = false;
   let resolve!: (cause: unknown) => void;
@@ -99,6 +107,7 @@ export function beginGenerationNavigationSession(input: {
     id: input.id,
     actionLabel: input.actionLabel,
     stopAndPreserve,
+    ...(input.unsafeFragment === undefined ? {} : { unsafeFragment: input.unsafeFragment }),
   });
   return Object.freeze({
     stopRequested: () => requested,

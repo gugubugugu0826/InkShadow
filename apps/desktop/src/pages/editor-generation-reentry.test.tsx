@@ -515,14 +515,91 @@ describe("editor generation reentry", () => {
     fireEvent.click(within(warning).getByRole("button", { name: "停止生成并离开" }));
     await waitFor(() => expect(cancelGeneration).toHaveBeenCalledOnce());
     expect(router.state.location.pathname).toBe(`/projects/${project.id}/chapters/${chapter.id}`);
-    await waitFor(() =>
-      expect(screen.queryByRole("dialog", { name: "停止本次生成并离开？" })).toBeNull(),
-    );
-    expect(await screen.findByText("尚未落盘的局部改写片段")).toBeVisible();
-
-    fireEvent.click(screen.getByRole("button", { name: "放弃片段并允许离开" }));
-    fireEvent.click(screen.getByRole("link", { name: "作品库" }));
+    const unsafeWarning = await screen.findByRole("dialog", {
+      name: "处理未保存片段并离开？",
+    });
+    fireEvent.click(within(unsafeWarning).getByRole("button", { name: "放弃片段并离开" }));
     await waitFor(() => expect(router.state.location.pathname).toBe("/projects"));
+    expect(generate).toHaveBeenCalledOnce();
+  });
+
+  it("lets the author explicitly discard a selection fragment and return after local persistence fails", async () => {
+    window.localStorage.clear();
+    const runtime = createDevelopmentRuntime(window.localStorage);
+    const preference = await runtime.writingExperience.getOrInitialize();
+    await runtime.writingExperience.switchMode("professional", preference.revision);
+    await seedRemoteContinuationRoute(runtime);
+    await runtime.modelHub.saveTaskRoute({
+      task: "rewrite",
+      primaryCatalogEntryId: "continuation-reentry-catalog",
+      privacyPolicy: "cloud_allowed",
+      failurePolicy: "stop",
+      routeOrigin: "user",
+      expectedRevision: null,
+    });
+    const generate = vi.fn<NativeModelGatewayClient["generate"]>((request) => {
+      request.onDelta?.("本机保存失败后的扩写片段");
+      return Promise.resolve({
+        text: "本机保存失败后的扩写片段",
+        usage: { inputTokens: 20, outputTokens: 12, cachedInputTokens: null },
+      });
+    });
+    const cancelGeneration = vi.fn(() => Promise.resolve(false));
+    Object.assign(runtime, {
+      mode: "tauri" as const,
+      modelGateway: {
+        available: true,
+        listModels: () => Promise.resolve({ provider: "open_ai_compatible" as const, models: [] }),
+        checkConnection: () => Promise.reject(new Error("not used")),
+        embed: () => Promise.reject(new Error("not used")),
+        generate,
+        cancelGeneration,
+      } satisfies NativeModelGatewayClient,
+    });
+    const { chapter, project } = await seedChapter(runtime);
+    vi.spyOn(runtime.contextTraceOutputs, "commit").mockRejectedValueOnce(
+      new Error("simulated post-provider local commit failure"),
+    );
+    const beforeVersions = await runtime.useCases.listChapterVersions.execute(chapter.id);
+    if (!beforeVersions.ok) throw beforeVersions.error;
+    const router = renderEditorWithNavigationBoundary(runtime, project, chapter);
+    const editor = await screen.findByRole<HTMLTextAreaElement>("textbox", {
+      name: "章节正文",
+    });
+    editor.focus();
+    editor.setSelectionRange(0, 2);
+    fireEvent.select(editor);
+    fireEvent.click(screen.getByRole("button", { name: "扩写" }));
+    expect(await screen.findByText("确认本次扩写")).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "确认并生成扩写结果" }));
+
+    expect(await screen.findByText(/发生了未预期的本地错误/u)).toBeVisible();
+    expect(screen.getByText("本机保存失败后的扩写片段")).toBeVisible();
+    expect(generate).toHaveBeenCalledOnce();
+    expect(cancelGeneration).not.toHaveBeenCalled();
+
+    const retry = screen.getByRole("button", { name: "重试扩写" });
+    expect(retry).toBeDisabled();
+    fireEvent.click(retry);
+    await act(() => Promise.resolve());
+    expect(generate).toHaveBeenCalledOnce();
+    expect(screen.getByText("本机保存失败后的扩写片段")).toBeVisible();
+
+    fireEvent.click(screen.getByRole("link", { name: "返回章节" }));
+    const warning = await screen.findByRole("dialog", { name: "处理未保存片段并离开？" });
+    fireEvent.click(within(warning).getByRole("button", { name: "放弃片段并离开" }));
+    await waitFor(() => expect(router.state.location.pathname).toBe(`/projects/${project.id}`));
+
+    const reloaded = await runtime.repositories.chapters.findById(chapter.id);
+    if (!reloaded.ok) throw reloaded.error;
+    expect(reloaded.value?.content).toBe(chapter.content);
+    expect(reloaded.value?.currentVersionId).toBe(chapter.currentVersionId);
+    const afterVersions = await runtime.useCases.listChapterVersions.execute(chapter.id);
+    if (!afterVersions.ok) throw afterVersions.error;
+    expect(afterVersions.value).toHaveLength(beforeVersions.value.length);
+    const candidates = await runtime.repositories.aiCandidates.listByChapterId(chapter.id);
+    if (!candidates.ok) throw candidates.error;
+    expect(candidates.value).toHaveLength(0);
     expect(generate).toHaveBeenCalledOnce();
   });
 });

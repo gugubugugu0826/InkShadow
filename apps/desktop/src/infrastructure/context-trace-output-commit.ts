@@ -114,6 +114,7 @@ interface CandidateRow {
   readonly payloadKind: string;
   readonly anchorStartUtf16: number | null;
   readonly anchorEndUtf16: number | null;
+  readonly selectionAction: string | null;
 }
 
 interface ExecutionTaskGuardRow {
@@ -466,7 +467,8 @@ function selectCandidateRows(
        application_mode AS applicationMode,
        payload_kind AS payloadKind,
        anchor_start_utf16 AS anchorStartUtf16,
-       anchor_end_utf16 AS anchorEndUtf16
+       anchor_end_utf16 AS anchorEndUtf16,
+       selection_action AS selectionAction
      FROM ai_candidates
      WHERE id = ?
      LIMIT 2`,
@@ -498,8 +500,9 @@ function insertCandidate(
        application_mode,
        payload_kind,
        anchor_start_utf16,
-       anchor_end_utf16
-     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       anchor_end_utf16,
+       selection_action
+     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       snapshot.id,
       snapshot.projectId,
@@ -520,6 +523,7 @@ function insertCandidate(
       snapshot.applicationIntent?.payload ?? "full_document",
       snapshot.applicationIntent?.startUtf16 ?? null,
       snapshot.applicationIntent?.endUtf16 ?? null,
+      candidateSelectionAction(snapshot),
     ],
   );
 }
@@ -544,7 +548,8 @@ function candidateRowMatches(row: CandidateRow, snapshot: AiCandidateSnapshot): 
     row.applicationMode === (snapshot.applicationIntent?.application ?? "replace_document") &&
     row.payloadKind === (snapshot.applicationIntent?.payload ?? "full_document") &&
     row.anchorStartUtf16 === (snapshot.applicationIntent?.startUtf16 ?? null) &&
-    row.anchorEndUtf16 === (snapshot.applicationIntent?.endUtf16 ?? null)
+    row.anchorEndUtf16 === (snapshot.applicationIntent?.endUtf16 ?? null) &&
+    candidateRowSelectionAction(row) === candidateSelectionAction(snapshot)
   );
 }
 
@@ -572,8 +577,24 @@ function candidateSnapshotsEqual(left: AiCandidateSnapshot, right: AiCandidateSn
       (right.applicationIntent?.payload ?? "full_document") &&
     (left.applicationIntent?.startUtf16 ?? null) ===
       (right.applicationIntent?.startUtf16 ?? null) &&
-    (left.applicationIntent?.endUtf16 ?? null) === (right.applicationIntent?.endUtf16 ?? null)
+    (left.applicationIntent?.endUtf16 ?? null) === (right.applicationIntent?.endUtf16 ?? null) &&
+    candidateSelectionAction(left) === candidateSelectionAction(right)
   );
+}
+
+function candidateSelectionAction(snapshot: AiCandidateSnapshot): string | null {
+  const intent = snapshot.applicationIntent;
+  return intent?.task === "selection_rewrite"
+    ? (intent.selectionAction ?? "selection_rewrite")
+    : null;
+}
+
+function candidateRowSelectionAction(
+  row: Pick<CandidateRow, "taskIntent" | "selectionAction">,
+): string | null {
+  return row.taskIntent === "selection_rewrite" && row.selectionAction === null
+    ? "selection_rewrite"
+    : row.selectionAction;
 }
 
 async function expireDevelopmentCandidate(

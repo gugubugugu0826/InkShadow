@@ -342,7 +342,7 @@ export class ModelHubStoryPlanningService {
         return Object.freeze({
           status: "skipped",
           code: cause.code,
-          message: "作品隐私范围已变化，本次没有发送规划资料；请重新查看发送信息。",
+          message: "作品隐私范围已变化，本次没有发送规划资料；请重新查看发送前说明。",
         });
       }
       if (cause instanceof ModelHubExecutionError && !cause.dispatched) {
@@ -1023,7 +1023,7 @@ function planningSkippedMessage(code: string): string {
   if (code === "STORY_PLANNING_DISCLOSURE_CHANGED" || code === "MODEL_HUB_PLAN_CHANGED") {
     return "模型、发送范围、费用或规划资料已经改变；本次没有调用 AI，请重新查看并确认。";
   }
-  return "AI 服务的连接、能力或任务分工已变化；本次没有调用 AI，请在设置中检查后重新查看发送信息。";
+  return "AI 服务的连接、能力或任务分工已变化；本次没有调用 AI，请在设置中检查后重新查看发送前说明。";
 }
 
 function buildPlanningMessages(

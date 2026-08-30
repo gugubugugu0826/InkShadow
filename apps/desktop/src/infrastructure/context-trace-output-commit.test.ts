@@ -29,6 +29,7 @@ const EXACT_PROVENANCE_MIGRATION = readMigration("0047_context_compilation_exact
 const CANDIDATE_INTENT_MIGRATION = readMigration("0048_candidate_application_intents.sql");
 const CANDIDATE_REVISION_MIGRATION = readMigration("0050_candidate_revision_authority.sql");
 const CANDIDATE_PURPOSE_MIGRATION = readMigration("0072_ai_candidate_purpose.sql");
+const CANDIDATE_SELECTION_ACTION_MIGRATION = readMigration("0080_candidate_selection_action.sql");
 const NOW = iso("2026-08-08T00:00:00.000Z");
 const PROJECT_ID = uuid(1);
 const SECOND_PROJECT_ID = uuid(2);
@@ -47,6 +48,95 @@ afterEach(async () => {
 });
 
 describe("atomic context trace output commit", () => {
+  it.each(["selection_rewrite", "polish", "expand", "shorten"] as const)(
+    "commits the exact %s selection action through the current SQLite contract",
+    async (selectionAction) => {
+      const executor = await sqliteExecutor();
+      const unitOfWork = new SqliteContextTraceOutputCommitUnitOfWork(executor);
+      const candidate = readySelectionCandidate(selectionAction);
+      const input = { traceId: TRACE_ID, candidate, linkedAt: NOW } as const;
+
+      await expect(unitOfWork.commit(input)).resolves.toBe("created");
+      await expect(unitOfWork.commit(input)).resolves.toBe("already_committed");
+      await expect(
+        executor.select<{ readonly selectionAction: string | null }>(
+          `SELECT selection_action AS selectionAction
+           FROM ai_candidates
+           WHERE id = ?`,
+          [CANDIDATE_ID],
+        ),
+      ).resolves.toEqual([{ selectionAction }]);
+      await expect(countRows(executor, "ai_candidates")).resolves.toBe(1);
+      await expect(countRows(executor, "context_compilation_output_candidate_links")).resolves.toBe(
+        1,
+      );
+    },
+  );
+
+  it("treats a pre-0080 selection Candidate with a null action as the historical rewrite fallback", async () => {
+    const executor = await sqliteExecutor({ deferSelectionActionMigration: true });
+    const unitOfWork = new SqliteContextTraceOutputCommitUnitOfWork(executor);
+    const candidate = readySelectionCandidate("selection_rewrite");
+    const snapshot = candidate.toSnapshot();
+    const intent = snapshot.applicationIntent;
+    if (intent?.task !== "selection_rewrite") {
+      throw new Error("Expected an exact selection rewrite Candidate fixture.");
+    }
+    await executor.execute(
+      `INSERT INTO ai_candidates (
+         id, project_id, chapter_id, source, purpose, base_version_id,
+         content, content_checksum, status, revision, incomplete,
+         created_at, updated_at, decided_at, task_intent, application_mode,
+         payload_kind, anchor_start_utf16, anchor_end_utf16
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        snapshot.id,
+        snapshot.projectId,
+        snapshot.chapterId,
+        snapshot.source,
+        snapshot.purpose ?? "prose",
+        snapshot.baseVersionId,
+        snapshot.content,
+        snapshot.contentChecksum,
+        snapshot.status,
+        snapshot.revision ?? 1,
+        snapshot.incomplete ? 1 : 0,
+        snapshot.createdAt,
+        snapshot.updatedAt,
+        snapshot.decidedAt,
+        intent.task,
+        intent.application,
+        intent.payload,
+        intent.startUtf16,
+        intent.endUtf16,
+      ],
+    );
+    await executor.execute(
+      `INSERT INTO context_compilation_output_candidate_links (
+         trace_id, ai_candidate_id, linked_at
+       ) VALUES (?, ?, ?)`,
+      [TRACE_ID, CANDIDATE_ID, NOW],
+    );
+
+    executor.database.exec(CANDIDATE_SELECTION_ACTION_MIGRATION);
+
+    await expect(
+      executor.select<{ readonly selectionAction: string | null }>(
+        `SELECT selection_action AS selectionAction
+         FROM ai_candidates
+         WHERE id = ?`,
+        [CANDIDATE_ID],
+      ),
+    ).resolves.toEqual([{ selectionAction: null }]);
+    await expect(unitOfWork.commit({ traceId: TRACE_ID, candidate, linkedAt: NOW })).resolves.toBe(
+      "already_committed",
+    );
+    await expect(countRows(executor, "ai_candidates")).resolves.toBe(1);
+    await expect(countRows(executor, "context_compilation_output_candidate_links")).resolves.toBe(
+      1,
+    );
+  });
+
   it("commits a ready Candidate and its exact trace association in one SQLite transaction", async () => {
     const executor = await sqliteExecutor();
     const unitOfWork = new SqliteContextTraceOutputCommitUnitOfWork(executor);
@@ -236,7 +326,9 @@ class FailOutputAssociationExecutor implements SqlExecutor {
   }
 }
 
-async function sqliteExecutor(): Promise<NodeSqliteExecutor> {
+async function sqliteExecutor(
+  options: Readonly<{ deferSelectionActionMigration?: boolean }> = {},
+): Promise<NodeSqliteExecutor> {
   const executor = new NodeSqliteExecutor(
     `${CORE_MIGRATION}\n${TRACE_MIGRATION}\n
      CREATE TABLE ai_generation_runs (
@@ -249,7 +341,8 @@ async function sqliteExecutor(): Promise<NodeSqliteExecutor> {
      ${EXACT_PROVENANCE_MIGRATION}
      ${CANDIDATE_INTENT_MIGRATION}
      ${CANDIDATE_REVISION_MIGRATION}
-     ${CANDIDATE_PURPOSE_MIGRATION}`,
+     ${CANDIDATE_PURPOSE_MIGRATION}
+     ${options.deferSelectionActionMigration === true ? "" : CANDIDATE_SELECTION_ACTION_MIGRATION}`,
   );
   executors.push(executor);
   for (const [id, name] of [
@@ -340,6 +433,31 @@ function readyCandidate(
   if (!ready.ok) {
     throw ready.error;
   }
+  return ready.value;
+}
+
+function readySelectionCandidate(
+  selectionAction: "selection_rewrite" | "polish" | "expand" | "shorten",
+): AiCandidate {
+  const streaming = AiCandidate.createStreaming({
+    id: CANDIDATE_ID,
+    projectId: PROJECT_ID,
+    chapterId: CHAPTER_ID,
+    source: "polish",
+    baseVersionId: VERSION_ID,
+    now: NOW,
+    applicationIntent: {
+      task: "selection_rewrite",
+      application: "replace_selection",
+      payload: "fragment",
+      startUtf16: 1,
+      endUtf16: 4,
+      selectionAction,
+    },
+  });
+  if (!streaming.ok) throw streaming.error;
+  const ready = streaming.value.markReady("选区结果保持隔离。", checksum("b".repeat(64)), NOW);
+  if (!ready.ok) throw ready.error;
   return ready.value;
 }
 

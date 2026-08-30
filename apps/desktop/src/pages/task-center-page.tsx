@@ -45,6 +45,7 @@ const REFRESH_INTERVAL_MS = 5_000;
 const EMPTY_SNAPSHOT: TaskCenterSnapshot = {
   tasks: [],
   notifications: [],
+  hasReadNotifications: false,
 };
 
 const TASK_STATUS_LABELS: Record<TaskStatus, string> = {
@@ -263,6 +264,23 @@ export function TaskCenterPage() {
     }
   }
 
+  async function dismissAllRead(): Promise<void> {
+    setBusyId("dismiss-read-notifications");
+    try {
+      const count = await runtime.taskCenter.dismissAllReadNotifications();
+      await load(true);
+      toast({
+        title: count === 0 ? "没有可清除的已读通知" : `已清除 ${String(count)} 条已读通知`,
+        description: "通知仅从当前列表隐藏，关联任务和本地审计记录仍然保留。",
+        tone: "success",
+      });
+    } catch (reason: unknown) {
+      setError(reason);
+    } finally {
+      setBusyId(null);
+    }
+  }
+
   return (
     <div className="desktop-page task-center-page">
       <header className="page-heading">
@@ -339,6 +357,15 @@ export function TaskCenterPage() {
                 onClick={() => void markAllRead()}
               >
                 全部标为已读
+              </Button>
+              <Button
+                size="sm"
+                variant="ghost"
+                disabled={!snapshot.hasReadNotifications}
+                loading={busyId === "dismiss-read-notifications"}
+                onClick={() => void dismissAllRead()}
+              >
+                清除已读通知
               </Button>
             </div>
             <NotificationList
@@ -707,8 +734,7 @@ function isUnread(notification: NotificationSnapshot): boolean {
   return (
     notification.status === "created" ||
     notification.status === "queued" ||
-    notification.status === "visible" ||
-    notification.status === "failed_delivery"
+    notification.status === "visible"
   );
 }
 

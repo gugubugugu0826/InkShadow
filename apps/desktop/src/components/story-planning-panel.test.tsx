@@ -70,7 +70,7 @@ describe("StoryPlanningPanel", () => {
     renderPanel(service);
     await waitFor(() => expect(service.listCandidates).toHaveBeenCalled());
 
-    await user.click(screen.getByRole("button", { name: "查看本次发送内容" }));
+    await user.click(screen.getByRole("button", { name: "查看发送前说明" }));
     await user.click(screen.getByRole("button", { name: "取消，不发送" }));
 
     expect(generate).not.toHaveBeenCalled();
@@ -99,7 +99,7 @@ describe("StoryPlanningPanel", () => {
     );
     await waitFor(() => expect(service.listCandidates).toHaveBeenCalled());
 
-    await user.click(screen.getByRole("button", { name: "查看本次发送内容" }));
+    await user.click(screen.getByRole("button", { name: "查看发送前说明" }));
 
     expect(screen.getByText("发送确认摘要")).toBeVisible();
     expect(screen.getByText(/我的写作服务 · planning-model/u)).toBeVisible();
@@ -127,10 +127,10 @@ describe("StoryPlanningPanel", () => {
     renderPanel(service);
     await waitFor(() => expect(service.listCandidates).toHaveBeenCalled());
 
-    await user.click(screen.getByRole("button", { name: "查看本次发送内容" }));
+    await user.click(screen.getByRole("button", { name: "查看发送前说明" }));
 
-    expect(await screen.findByText("故事方向发送信息尚未准备好")).toBeVisible();
-    expect(screen.getByText(/准备发送信息时发现所选模型尚未通过规划格式检查/u)).toBeVisible();
+    expect(await screen.findByText("故事方向发送前说明尚未准备好")).toBeVisible();
+    expect(screen.getByText(/整理发送前说明时发现所选模型尚未通过规划格式检查/u)).toBeVisible();
     expect(screen.getByText(/本次没有向模型服务发送内容/u)).toBeVisible();
     expect(screen.getByText(/问题编号：墨影-.*联系支持时提供/u)).toBeVisible();
     expect(screen.queryByText("AI 剧情规划未完成")).not.toBeInTheDocument();
@@ -471,7 +471,7 @@ function planningService(
 }
 
 async function confirmStoryPlanning(user: ReturnType<typeof userEvent.setup>): Promise<void> {
-  await user.click(screen.getByRole("button", { name: "查看本次发送内容" }));
+  await user.click(screen.getByRole("button", { name: "查看发送前说明" }));
   expect(screen.getByText(/我的写作服务 · planning-model/u)).toBeInTheDocument();
   await user.click(screen.getByText("查看详细信息"));
   expect(screen.getByText(/自动重试 0 次/u)).toBeInTheDocument();

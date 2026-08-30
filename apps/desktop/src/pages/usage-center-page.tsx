@@ -371,7 +371,10 @@ function UsageSummaryCards({ summary }: { readonly summary: UsageAggregate }) {
         title={formatCostTotals(summary.costTotals, summary.invocationCount)}
         description={
           summary.costUnknownCount > 0
-            ? `${String(summary.costUnknownCount)} 次暂时无法估算 · 已知金额均为估算`
+            ? summary.costUnknownCount === summary.invocationCount &&
+              summary.costTotals.length === 0
+              ? `服务商未提供这 ${String(summary.costUnknownCount)} 次调用的费用信息，请以服务商账单为准`
+              : `其中 ${String(summary.costUnknownCount)} 次费用暂无法估算；其余已知金额均为估算`
             : "已知金额均为估算，不是供应商账单"
         }
       />

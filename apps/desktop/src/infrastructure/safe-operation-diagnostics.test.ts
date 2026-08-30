@@ -18,9 +18,11 @@ describe("safe operation diagnostics", () => {
   });
 
   it("persists only a support number, safe identifiers, stage and error-code chain", () => {
-    const secret = "test-not-a-real-secret 正文原文 C:/Users/writer/secret.txt";
-    const root = Object.assign(new Error(secret), { code: "MODEL_HUB_ROUTE_NOT_CONFIGURED" });
-    const outer = Object.assign(new TypeError(`wrapped ${secret}`), {
+    const sensitiveExcerpt = "test-not-a-real-secret 正文原文 C:/Users/writer/secret.txt";
+    const root = Object.assign(new Error(sensitiveExcerpt), {
+      code: "MODEL_HUB_ROUTE_NOT_CONFIGURED",
+    });
+    const outer = Object.assign(new TypeError(`wrapped ${sensitiveExcerpt}`), {
       code: "STORY_PLANNING_PREPARATION_FAILED",
       cause: root,
     });
@@ -30,7 +32,7 @@ describe("safe operation diagnostics", () => {
       stage: "prepare_disclosure",
       cause: outer,
       projectId: PROJECT_ID,
-      requestId: `request-${secret}`,
+      requestId: `request-${sensitiveExcerpt}`,
       dispatched: false,
       occurredAt: "2026-08-23T05:06:07.008Z",
     });
@@ -50,7 +52,7 @@ describe("safe operation diagnostics", () => {
     });
     expect(readSafeOperationIncidents()[0]?.supportId).toBe(incident.supportId);
     const persisted = JSON.stringify(window.localStorage);
-    expect(persisted).not.toContain(secret);
+    expect(persisted).not.toContain(sensitiveExcerpt);
     expect(persisted).not.toContain("正文原文");
     expect(persisted).not.toContain("C:/Users");
   });
@@ -74,5 +76,35 @@ describe("safe operation diagnostics", () => {
       stage: "pre_dispatch_check",
       dispatched: false,
     });
+  });
+
+  it("cold-reads a chapter privacy persistence failure without storing正文 or an error message", () => {
+    const privateChapterExcerpt = "私密正文不应进入诊断";
+    const recorded = recordSafeOperationIncident({
+      operation: "chapter_privacy",
+      stage: "persist_result",
+      cause: Object.assign(new Error(privateChapterExcerpt), {
+        code: "SAVE_FAILED",
+        cause: Object.assign(new Error("active request"), {
+          code: "PROJECT_REMOTE_DISPATCH_ACTIVE",
+        }),
+      }),
+      projectId: PROJECT_ID,
+      chapterId: "019f9f4a-b3c7-7350-9226-000000000002",
+      dispatched: false,
+      occurredAt: "2026-08-30T01:02:03.004Z",
+    });
+
+    forgetSafeOperationDiagnosticsMemoryForTests();
+
+    expect(readSafeOperationIncidents()[0]).toEqual(recorded);
+    expect(readSafeOperationIncidents()[0]).toMatchObject({
+      operation: "chapter_privacy",
+      stage: "persist_result",
+      normalizedErrorCode: "SAVE_FAILED",
+      dispatched: false,
+      automaticRetryCount: 0,
+    });
+    expect(JSON.stringify(window.localStorage)).not.toContain(privateChapterExcerpt);
   });
 });

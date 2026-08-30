@@ -170,10 +170,12 @@ describe("context history panel", () => {
     expect(screen.getByText("已精确关联 AI 建议版本")).toBeTruthy();
     expect(screen.getByText("这条记录与 AI 建议版本精确关联")).toBeTruthy();
     expect(screen.getByText("场景推进")).toBeTruthy();
-    expect(screen.getAllByText(/版本 1.0.0/u)).toHaveLength(2);
+    expect(screen.getAllByText(/版本 1.0.0/u)).toHaveLength(1);
+    expect(screen.queryByText("悬疑与推理")).toBeNull();
     expect(screen.getAllByText(/发送给 AI 的文字量（不是金额）/u).length).toBeGreaterThan(0);
     await user.click(screen.getByText(/查看本次未采用的写作技能及原因/u));
     expect(screen.getByText("悬疑与推理")).toBeTruthy();
+    expect(screen.getAllByText(/版本 1.0.0/u)).toHaveLength(2);
     expect(screen.getByText(/没有启用/u)).toBeTruthy();
     expect(screen.queryByText("core.scene_craft")).toBeNull();
     expect(screen.queryByText("a".repeat(64))).toBeNull();

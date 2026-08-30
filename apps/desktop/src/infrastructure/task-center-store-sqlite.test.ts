@@ -16,7 +16,100 @@ const NEWER_AT = "2026-08-08T00:00:10.000Z";
 const NOW = "2026-08-08T00:00:32.000Z";
 const RETRY_AT = "2026-08-08T00:00:31.000Z";
 
-describe("TauriTaskCenterStore due task query", () => {
+describe("TauriTaskCenterStore", () => {
+  it("dismisses read notifications from the inbox without deleting their SQLite audit rows", async () => {
+    const executor = new NodeSqliteExecutor(migration);
+    const store = new TauriTaskCenterStore(executor, { now: () => NOW });
+
+    try {
+      const first = await store.publishNotification(notificationInput(301, "task.completed"));
+      const second = await store.publishNotification(notificationInput(302, "task.failed"));
+      await store.markNotificationRead(second.id);
+
+      await expect(store.dismissAllReadNotifications()).resolves.toBe(1);
+      await expect(store.load()).resolves.toMatchObject({
+        notifications: [{ id: first.id, status: "visible" }],
+      });
+      await expect(
+        executor.select<{ readonly id: string; readonly status: string }>(
+          "SELECT id, status FROM notifications ORDER BY id ASC",
+        ),
+      ).resolves.toEqual([
+        { id: first.id, status: "visible" },
+        { id: second.id, status: "dismissed" },
+      ]);
+    } finally {
+      await executor.close();
+    }
+  });
+
+  it("dismisses every read notification even when the durable inbox exceeds the visible limit", async () => {
+    const executor = new NodeSqliteExecutor(migration);
+    const store = new TauriTaskCenterStore(executor, { now: () => NOW });
+
+    try {
+      for (let index = 0; index < 201; index += 1) {
+        const notification = await store.publishNotification(
+          notificationInput(400 + index, "task.completed"),
+        );
+        await store.markNotificationRead(notification.id);
+      }
+
+      await expect(store.dismissAllReadNotifications()).resolves.toBe(201);
+      await expect(
+        executor.select<{ readonly status: string; readonly count: number }>(
+          "SELECT status, COUNT(*) AS count FROM notifications GROUP BY status",
+        ),
+      ).resolves.toEqual([{ status: "dismissed", count: 201 }]);
+    } finally {
+      await executor.close();
+    }
+  });
+
+  it("marks every unread notification in one action when the durable inbox exceeds the visible limit", async () => {
+    const executor = new NodeSqliteExecutor(migration);
+    const store = new TauriTaskCenterStore(executor, { now: () => NOW });
+
+    try {
+      for (let index = 0; index < 201; index += 1) {
+        await store.publishNotification(notificationInput(1_000 + index, "task.completed"));
+      }
+
+      await expect(store.markAllNotificationsRead()).resolves.toBe(201);
+      await expect(
+        executor.select<{ readonly status: string; readonly count: number }>(
+          "SELECT status, COUNT(*) AS count FROM notifications GROUP BY status",
+        ),
+      ).resolves.toEqual([{ status: "read", count: 201 }]);
+    } finally {
+      await executor.close();
+    }
+  });
+
+  it("reports an older read notification when the newest visible page contains only unread items", async () => {
+    const executor = new NodeSqliteExecutor(migration);
+    const store = new TauriTaskCenterStore(executor, { now: () => NOW });
+
+    try {
+      const olderRead = await store.publishNotification(notificationInput(700, "task.completed"));
+      await store.markNotificationRead(olderRead.id);
+      for (let index = 0; index < 200; index += 1) {
+        await store.publishNotification(notificationInput(701 + index, "task.completed"));
+      }
+
+      const snapshot = await store.load();
+      expect(snapshot.notifications).toHaveLength(200);
+      expect(snapshot.notifications.every(({ status }) => status === "visible")).toBe(true);
+      expect(snapshot.notifications.some(({ id }) => id === olderRead.id)).toBe(false);
+      expect(snapshot.hasReadNotifications).toBe(true);
+
+      await expect(store.dismissAllReadNotifications()).resolves.toBe(1);
+      await expect(store.load()).resolves.toMatchObject({ hasReadNotifications: false });
+    } finally {
+      await executor.close();
+    }
+  });
+
   it("finds an old due worker task independently from the newest-first UI limit", async () => {
     const executor = new NodeSqliteExecutor(migration);
     const store = new TauriTaskCenterStore(executor, { now: () => NOW });
@@ -113,6 +206,21 @@ describe("TauriTaskCenterStore due task query", () => {
     }
   });
 });
+
+function notificationInput(sequence: number, messageKey: string) {
+  return {
+    id: uuid(sequence),
+    dedupeKey: `notification:sqlite:${String(sequence).padStart(4, "0")}`,
+    messageKey,
+    level: "inbox",
+    severity: messageKey === "task.failed" ? ("error" as const) : ("success" as const),
+    route: { entityType: "task", entityId: uuid(sequence + 100) },
+    metadata: { taskType: "ai.generate", attempt: 1 },
+    requiresResolution: false,
+    expiresAt: null,
+    now: CREATED_AT,
+  } as const;
+}
 
 function acceptedTask(sequence: number, versionSequence: number, now: string) {
   return {
