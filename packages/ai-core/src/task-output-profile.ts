@@ -9,7 +9,8 @@ export const CONTINUATION_DESTINATION_IDS = [
 ] as const;
 export type ContinuationDestinationId = (typeof CONTINUATION_DESTINATION_IDS)[number];
 
-export type TaskThinkingPolicy = "disabled_for_visible_prose" | "provider_default";
+export type TaskThinkingPolicy =
+  "disabled_for_visible_prose" | "disabled_for_structured_output" | "provider_default";
 export type TaskTruncationPolicy = "preserve_partial_candidate";
 export type TaskContinuationPolicy = "resume_without_repetition";
 
@@ -19,6 +20,9 @@ export const TASK_OUTPUT_PROFILE_TASKS = [
   "continuation",
   "rewrite",
   "polish",
+  "expand",
+  "shorten",
+  "import_rewrite",
   "chapter_summary",
   "story_fact_extraction",
   "what_if",
@@ -33,7 +37,7 @@ export interface TaskOutputProfileDefinition {
   readonly outputKind: "visible_prose" | "plain_summary" | "structured_data" | "review_findings";
   readonly thinkingPolicy: TaskThinkingPolicy;
   readonly truncationPolicy: "preserve_partial_candidate" | "fail_without_promotion";
-  /** Only continuation is fully routed through this contract in the current build. */
+  /** Whether the production task uses the shared visible-prose prompt and output boundary. */
   readonly implementationStatus: "wired" | "registry_only";
 }
 
@@ -48,12 +52,14 @@ export const TASK_OUTPUT_PROFILE_REGISTRY: Readonly<
         "continuation",
         "rewrite",
         "polish",
-        "what_if",
+        "expand",
+        "shorten",
+        "import_rewrite",
       ].includes(task);
       const outputKind: TaskOutputProfileDefinition["outputKind"] =
         task === "chapter_summary"
           ? "plain_summary"
-          : task === "story_fact_extraction"
+          : task === "story_fact_extraction" || task === "what_if"
             ? "structured_data"
             : task === "validation" || task === "multi_agent"
               ? "review_findings"
@@ -63,10 +69,14 @@ export const TASK_OUTPUT_PROFILE_REGISTRY: Readonly<
         Object.freeze({
           task,
           outputKind,
-          thinkingPolicy: visibleProse ? "disabled_for_visible_prose" : "provider_default",
+          thinkingPolicy: visibleProse
+            ? "disabled_for_visible_prose"
+            : task === "what_if"
+              ? "disabled_for_structured_output"
+              : "provider_default",
           truncationPolicy:
             task === "continuation" ? "preserve_partial_candidate" : "fail_without_promotion",
-          implementationStatus: task === "continuation" ? "wired" : "registry_only",
+          implementationStatus: visibleProse ? "wired" : "registry_only",
         }),
       ];
     }),
@@ -76,6 +86,8 @@ export const TASK_OUTPUT_PROFILE_REGISTRY: Readonly<
 export interface ContinuationOutputContract {
   readonly taskType: "continuation";
   readonly profile: ContinuationOutputProfileId;
+  /** Exact author-specified advanced target; null means the ordinary size preset was used. */
+  readonly advancedTargetVisibleCharacters: number | null;
   readonly destination: ContinuationDestinationId;
   readonly customDestinationInstruction: string | null;
   readonly targetUnit: "visible_characters";
@@ -129,8 +141,10 @@ export const CONTINUATION_OUTPUT_PROFILE_PRESETS: Readonly<
   }),
 });
 
-const MINIMUM_CUSTOM_VISIBLE_CHARACTERS = 200;
-const MAXIMUM_CUSTOM_VISIBLE_CHARACTERS = 12_000;
+export const MINIMUM_ADVANCED_TARGET_VISIBLE_CHARACTERS = 200;
+export const MAXIMUM_ADVANCED_TARGET_VISIBLE_CHARACTERS = 12_000;
+export const MINIMUM_ADVANCED_RESULT_VISIBLE_CHARACTERS = 160;
+export const MAXIMUM_ADVANCED_RESULT_VISIBLE_CHARACTERS = 14_400;
 const OUTPUT_TOKEN_ROUNDING = 256;
 
 /**
@@ -145,8 +159,11 @@ export function resolveContinuationOutputContract(
   if (!(CONTINUATION_OUTPUT_PROFILE_IDS as readonly string[]).includes(profile)) {
     throw new RangeError("Unknown continuation output profile.");
   }
+  const hasAdvancedTarget =
+    input.customTargetVisibleCharacters !== undefined &&
+    input.customTargetVisibleCharacters !== null;
   const range =
-    profile === "custom"
+    profile === "custom" || hasAdvancedTarget
       ? customRange(input.customTargetVisibleCharacters)
       : CONTINUATION_OUTPUT_PROFILE_PRESETS[profile];
   const destination = input.destination ?? "complete_scene";
@@ -171,6 +188,7 @@ export function resolveContinuationOutputContract(
   return Object.freeze({
     taskType: "continuation",
     profile,
+    advancedTargetVisibleCharacters: hasAdvancedTarget ? range.targetVisibleCharacters : null,
     destination,
     customDestinationInstruction,
     targetUnit: "visible_characters",
@@ -279,18 +297,18 @@ function customRange(targetValue: number | null | undefined): Readonly<{
 }> {
   const targetVisibleCharacters = boundedInteger(
     targetValue,
-    MINIMUM_CUSTOM_VISIBLE_CHARACTERS,
-    MAXIMUM_CUSTOM_VISIBLE_CHARACTERS,
+    MINIMUM_ADVANCED_TARGET_VISIBLE_CHARACTERS,
+    MAXIMUM_ADVANCED_TARGET_VISIBLE_CHARACTERS,
   );
   return Object.freeze({
     minimumVisibleCharacters: Math.max(
-      MINIMUM_CUSTOM_VISIBLE_CHARACTERS,
-      Math.floor(targetVisibleCharacters * 0.85),
+      MINIMUM_ADVANCED_RESULT_VISIBLE_CHARACTERS,
+      Math.floor(targetVisibleCharacters * 0.8),
     ),
     targetVisibleCharacters,
     maximumVisibleCharacters: Math.min(
-      MAXIMUM_CUSTOM_VISIBLE_CHARACTERS,
-      Math.ceil(targetVisibleCharacters * 1.15),
+      MAXIMUM_ADVANCED_RESULT_VISIBLE_CHARACTERS,
+      Math.ceil(targetVisibleCharacters * 1.2),
     ),
   });
 }

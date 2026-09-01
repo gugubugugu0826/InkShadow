@@ -3829,33 +3829,35 @@ mod tests {
                 status: "active".to_owned(),
             }],
         );
-        assert_eq!(
-            state
+        for operation_kind in ["generation", "embedding", "rerank"] {
+            assert_eq!(
+                state
+                    .acquire_project_remote_dispatch_lease(
+                        &private_receipt,
+                        false,
+                        operation_kind,
+                        &format!("remote-private-{operation_kind}"),
+                    )
+                    .await
+                    .expect_err("remote dispatch must reject private chapter context"),
+                ProjectRemoteDispatchLeaseError::PrivateChapterLocalOnly
+            );
+            let local_lease = state
                 .acquire_project_remote_dispatch_lease(
                     &private_receipt,
-                    false,
-                    "generation",
-                    "remote-private",
+                    true,
+                    operation_kind,
+                    &format!("local-private-{operation_kind}"),
                 )
                 .await
-                .expect_err("remote dispatch must reject private chapter context"),
-            ProjectRemoteDispatchLeaseError::PrivateChapterLocalOnly
-        );
-        let local_lease = state
-            .acquire_project_remote_dispatch_lease(
-                &private_receipt,
-                true,
-                "generation",
-                "local-private",
-            )
-            .await
-            .expect(
-                "verified loopback dispatch retains a lifecycle lease and may use private text",
-            );
-        state
-            .release_project_remote_dispatch_lease(&local_lease)
-            .await
-            .expect("release local project-context lease");
+                .expect(
+                    "verified loopback dispatch retains a lifecycle lease and may use private text",
+                );
+            state
+                .release_project_remote_dispatch_lease(&local_lease)
+                .await
+                .expect("release local project-context lease");
+        }
 
         let archived_receipt = dispatch_receipt(ARCHIVED_PROJECT_ID, vec![]);
         assert_eq!(

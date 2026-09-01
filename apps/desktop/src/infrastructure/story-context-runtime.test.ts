@@ -5,6 +5,7 @@ import { BrowserDevelopmentStoryFactStore } from "./story-fact-store";
 import {
   compileStoryContextForGeneration,
   formatStoryContextPrompt,
+  recompileStoryContextWithAdditionalCandidates,
 } from "./story-context-runtime";
 import type { StoryContextRuntimeError } from "./story-context-runtime";
 
@@ -140,6 +141,133 @@ describe("story context runtime", () => {
       contentHash: "c".repeat(64),
     });
     expect(chapter?.content).toContain("🙂abcdef");
+  });
+
+  it("keeps a bounded latest chapter tail when it competes with optional old material", async () => {
+    const facts = new BrowserDevelopmentStoryFactStore(new MemoryStorage());
+    const latestMarker = "最新正文：林遥终于看见钟摆倒转。";
+    const receipt = await compileStoryContextForGeneration(facts, {
+      projectId: PROJECT_ID,
+      currentTask: draft("continue", "续写。", "generation_task"),
+      currentChapter: {
+        chapterId: CHAPTER_ID,
+        versionId: VERSION_ID,
+        contentHash: "f".repeat(64),
+        title: "长章",
+        content: `${"无关旧正文。".repeat(2_000)}${latestMarker}`,
+      },
+      semanticCandidates: [draft("old-summary", "无关旧摘要。".repeat(700), "memory")],
+      maximumContextTokens: 1_000,
+    });
+
+    const chapter = receipt.compiled.entries.find(({ id }) => id.startsWith("current-chapter:"));
+    expect(chapter).toMatchObject({
+      included: true,
+      required: true,
+      discardedReason: null,
+    });
+    expect(chapter?.content).toContain(latestMarker);
+    expect(chapter?.content).not.toContain("无关旧正文。".repeat(500));
+    expect(receipt.compiled.trace.usedTokens).toBeLessThanOrEqual(1_000);
+  });
+
+  it("does not let an optional writing preference consume the required latest chapter budget", async () => {
+    const facts = new BrowserDevelopmentStoryFactStore(new MemoryStorage());
+    const latestMarker = "最新正文：钟摆倒转后，周望听见楼梯上传来脚步。";
+    const receipt = await compileStoryContextForGeneration(facts, {
+      projectId: PROJECT_ID,
+      currentTask: draft("continue", "续写。", "generation_task"),
+      supplementalCandidates: [
+        {
+          ...draft("large-preference", "多写环境细节。".repeat(240), "user_input"),
+          layer: "rerank_supplement",
+        },
+      ],
+      currentChapter: {
+        chapterId: CHAPTER_ID,
+        versionId: VERSION_ID,
+        contentHash: "9".repeat(64),
+        title: "钟楼",
+        content: `${"较早正文。".repeat(300)}${latestMarker}`,
+      },
+      maximumContextTokens: 300,
+    });
+
+    const chapter = receipt.compiled.entries.find(({ id }) => id.startsWith("current-chapter:"));
+    expect(chapter).toMatchObject({ included: true, required: true, discardedReason: null });
+    expect(chapter?.content).toContain(latestMarker);
+    expect(receipt.compiled.entries.find(({ id }) => id === "large-preference")).toMatchObject({
+      layer: "rerank_supplement",
+      included: false,
+      required: false,
+      discardedReason: "token_budget_exhausted",
+    });
+  });
+
+  it("keeps the latest chapter and prior budget decisions when optional Skill rules arrive late", async () => {
+    const facts = new BrowserDevelopmentStoryFactStore(new MemoryStorage());
+    const latestMarker = "最新正文：周望推开塔门，发现钟摆仍在倒转。";
+    const base = await compileStoryContextForGeneration(facts, {
+      projectId: PROJECT_ID,
+      currentTask: draft("continue", "续写。", "generation_task"),
+      currentChapter: {
+        chapterId: CHAPTER_ID,
+        versionId: VERSION_ID,
+        contentHash: "8".repeat(64),
+        title: "钟楼",
+        content: `${"较早正文。".repeat(300)}${latestMarker}`,
+      },
+      semanticCandidates: [draft("old-material", "旧资料。".repeat(240), "memory")],
+      maximumContextTokens: 300,
+    });
+    const oldMaterialBefore = base.compiled.entries.find(({ id }) => id === "old-material");
+    expect(oldMaterialBefore).toMatchObject({
+      included: false,
+      discardedReason: "token_budget_exhausted",
+    });
+
+    const augmented = recompileStoryContextWithAdditionalCandidates(
+      base,
+      [
+        {
+          id: "late-skill-rule",
+          layer: "rerank_supplement",
+          content: "增加更多环境细节。".repeat(240),
+          selectionReason: "An enabled writing method supplied this optional rule.",
+          evidence: [
+            {
+              sourceType: "other",
+              sourceId: "novel-skill:test",
+              sourceVersionId: "1.0.0",
+              locator: "instruction:test.rule",
+              contentHash: null,
+              excerpt: null,
+            },
+          ],
+          priority: 500,
+        },
+      ],
+      300,
+    );
+
+    expect(augmented.compiled.trace.maximumContextTokens).toBe(300);
+    const currentChapterEntry = augmented.compiled.entries.find(({ id }) =>
+      id.startsWith("current-chapter:"),
+    );
+    expect(currentChapterEntry).toMatchObject({
+      included: true,
+      required: true,
+    });
+    expect(currentChapterEntry?.content).toContain(latestMarker);
+    expect(augmented.compiled.entries.find(({ id }) => id === "old-material")).toMatchObject({
+      included: oldMaterialBefore?.included,
+      discardedReason: oldMaterialBefore?.discardedReason,
+    });
+    expect(augmented.compiled.entries.find(({ id }) => id === "late-skill-rule")).toMatchObject({
+      included: false,
+      required: false,
+      discardedReason: "token_budget_exhausted",
+    });
   });
 
   it("keeps user-visible task supplements independently traceable", async () => {

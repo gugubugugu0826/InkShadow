@@ -26,6 +26,7 @@ import {
   type ChapterSummaryModelPort,
 } from "./chapter-summary-service";
 import { ProjectContextPrivacyAuthority } from "./project-context-privacy-authority";
+import { DEVELOPMENT_DATABASE_KEY } from "./development-atomic-journal";
 
 const ids = {
   project: uuid(1),
@@ -63,6 +64,77 @@ describe("ChapterSummaryService", () => {
     expect(harness.model.callCount).toBe(0);
     const facts = await harness.store.listByProjectId(storyUuid(ids.project));
     expect(facts.ok && facts.value).toEqual([]);
+  });
+
+  it("explicitly rebuilds the current summary locally and records automatic supersession", async () => {
+    const harness = await createHarness("林舟抵达雾港。雨停后，他回到灯塔。");
+
+    const first = await harness.service.rebuildCurrentLocalSummary({
+      projectId: ids.project,
+      chapterId: ids.chapter,
+    });
+    expect(first).toMatchObject({
+      status: "generated",
+      code: "CHAPTER_SUMMARY_LOCAL_REBUILT",
+      authorityMode: "plain_non_authoritative",
+      invocation: {
+        providerKind: "本地确定性整理",
+        modelId: "首尾句抽取摘要第一版",
+        invocationId: ids.version1,
+      },
+    });
+    expect(first.fact?.toSnapshot().contentText).toBe("林舟抵达雾港。 雨停后，他回到灯塔。");
+    expect(harness.model.callCount).toBe(0);
+
+    const second = await harness.service.rebuildCurrentLocalSummary({
+      projectId: ids.project,
+      chapterId: ids.chapter,
+    });
+    expect(second).toMatchObject({
+      status: "generated",
+      replacedFactIds: [first.fact?.id],
+    });
+    const afterReplacement = await harness.store.listByProjectId(storyUuid(ids.project));
+    if (!afterReplacement.ok) throw afterReplacement.error;
+    const storedSecond = afterReplacement.value.find((fact) => fact.id === second.fact?.id);
+    expect(storedSecond?.toSnapshot().structuredValue).toMatchObject({
+      supersedesFactIds: [first.fact?.id],
+    });
+
+    await harness.service.clearChapterSummary({
+      projectId: ids.project,
+      chapterId: ids.chapter,
+    });
+    const afterClear = await harness.store.listByProjectId(storyUuid(ids.project));
+    if (!afterClear.ok) throw afterClear.error;
+    const authorClearedSecond = afterClear.value.find((fact) => fact.id === second.fact?.id);
+    expect(authorClearedSecond?.toSnapshot().structuredValue).toMatchObject({
+      supersedesFactIds: [first.fact?.id],
+    });
+
+    await expect(
+      harness.service.rebuildCurrentLocalSummary({
+        projectId: ids.project,
+        chapterId: ids.chapter,
+      }),
+    ).resolves.toMatchObject({ status: "generated" });
+    expect(harness.model.callCount).toBe(0);
+  });
+
+  it("rebuilds a local-only chapter without any provider call", async () => {
+    const harness = await createHarness("私密章节只在本机整理。结尾仍然留在本机。", "local_only");
+    await expect(
+      harness.service.rebuildCurrentLocalSummary({
+        projectId: ids.project,
+        chapterId: ids.chapter,
+      }),
+    ).resolves.toMatchObject({
+      status: "generated",
+      code: "CHAPTER_SUMMARY_LOCAL_REBUILT",
+      invocation: { providerKind: "本地确定性整理" },
+    });
+    expect(harness.model.callCount).toBe(0);
+    expect(harness.model.providerCalls).toBe(0);
   });
 
   it("generates one reversible system fact from the exact immutable version", async () => {
@@ -313,12 +385,20 @@ function summarizeLegacyProviderPipeline(
   ).summarizeOnce(input);
 }
 
-async function createHarness(content: string) {
+async function createHarness(content: string, privacyMode: "standard" | "local_only" = "standard") {
   const versions = new Map<string, ChapterVersion>();
   const chapters = new Map<string, Chapter>();
   versions.set(ids.version1, await makeVersion(ids.chapter, ids.version1, content));
-  chapters.set(ids.chapter, makeChapter(ids.version1, content));
-  const store = new BrowserDevelopmentStoryFactStore(new MemoryStorage());
+  chapters.set(ids.chapter, makeChapter(ids.version1, content, 1, privacyMode));
+  const storage = new MemoryStorage();
+  storage.setItem(
+    DEVELOPMENT_DATABASE_KEY,
+    JSON.stringify({
+      chapters: [...chapters.values()].map((chapter) => chapter.toSnapshot()),
+      versions: [...versions.values()].map((version) => version.toSnapshot()),
+    }),
+  );
+  const store = new BrowserDevelopmentStoryFactStore(storage);
   const storyIds = new CryptoUuidV7Generator();
   const factService = new StoryFactApplicationService({
     facts: store,
@@ -429,7 +509,12 @@ async function makeVersion(
   return created.value;
 }
 
-function makeChapter(versionId: string, content: string, revision = 1): Chapter {
+function makeChapter(
+  versionId: string,
+  content: string,
+  revision = 1,
+  privacyMode: "standard" | "local_only" = "standard",
+): Chapter {
   const created = Chapter.rehydrate({
     id: domainUuid(ids.chapter),
     projectId: domainUuid(ids.project),
@@ -438,6 +523,8 @@ function makeChapter(versionId: string, content: string, revision = 1): Chapter 
     status: "active",
     revision,
     currentVersionId: domainUuid(versionId),
+    privacyMode,
+    privacyRevision: 1,
     createdAt: timestamp("2026-08-01T00:00:00.000Z"),
     updatedAt: timestamp(revision === 1 ? "2026-08-01T00:00:00.000Z" : "2026-08-01T00:01:00.000Z"),
     trashedAt: null,

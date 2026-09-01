@@ -16,6 +16,7 @@ import type {
   ChapterSummaryDashboard,
   ChapterSummaryService,
 } from "../infrastructure/chapter-summary-service";
+import { CHAPTER_SUMMARY_LOCAL_PROVIDER } from "../infrastructure/chapter-summary-service";
 import type {
   ContinuousStoryStateDashboard,
   ContinuousStoryStateExtractionService,
@@ -32,7 +33,10 @@ import { projectOrdinaryUiError } from "../infrastructure/ui-error";
 
 export type ChapterSummaryPanelService = Pick<
   ChapterSummaryService,
-  "inspectProject" | "setAutomaticOnManualSaveEnabled" | "clearChapterSummary"
+  | "inspectProject"
+  | "setAutomaticOnManualSaveEnabled"
+  | "clearChapterSummary"
+  | "rebuildCurrentLocalSummary"
 >;
 
 export type HistoricalChapterBackfillPanelService = Pick<
@@ -124,6 +128,31 @@ export function ChapterSummaryPanel({
       setNotice({
         tone: "error",
         title: "无法撤销章节摘要",
+        description: projectOrdinaryUiError(cause).description,
+      });
+    } finally {
+      setBusyChapterId(null);
+    }
+  }
+
+  async function rebuild(chapterId: string): Promise<void> {
+    setBusyChapterId(chapterId);
+    try {
+      const result = await service.rebuildCurrentLocalSummary({ projectId, chapterId });
+      setNotice({
+        tone:
+          result.status === "generated" || result.status === "already_current" ? "info" : "warning",
+        title:
+          result.status === "generated" || result.status === "already_current"
+            ? "章节摘要已更新"
+            : "章节摘要未更新",
+        description: result.message,
+      });
+      await load();
+    } catch (cause: unknown) {
+      setNotice({
+        tone: "error",
+        title: "无法重建章节摘要",
         description: projectOrdinaryUiError(cause).description,
       });
     } finally {
@@ -241,9 +270,9 @@ export function ChapterSummaryPanel({
       </div>
 
       <InlineAlert
-        tone="warning"
-        title="逐章云端重建暂不可用"
-        description="一次重建会发送完整已保存章节并可能产生一次费用。当前页面还不能在发送前持久展示精确模型服务、精确模型并把不确定结果锁定为不可重发，因此按钮保持停用；正文和已有摘要不受影响。"
+        tone="info"
+        title="逐章重建只在本机进行"
+        description="重建会从当前不可变保存版本确定性抽取首尾完整句，不发送正文、不调用外部模型，也不会修改正文、正式设定或历史版本。"
       />
 
       <details className="chapter-backfill" data-testid="historical-backfill-advanced">
@@ -378,19 +407,20 @@ export function ChapterSummaryPanel({
                 )}
                 {entry.modelId !== null && (
                   <p className="candidate-panel__hint">
-                    模型：{providerDisplayName(entry.providerKind)} · {entry.modelId} ·
-                    本次模型结果已记录，可在模型使用与费用中核对
+                    {entry.providerKind === CHAPTER_SUMMARY_LOCAL_PROVIDER
+                      ? `本地整理：${entry.modelId} · 没有调用外部模型`
+                      : `模型：${providerDisplayName(entry.providerKind)} · ${entry.modelId} · 本次模型结果已记录，可在模型使用与费用中核对`}
                   </p>
                 )}
               </CardContent>
               <CardFooter>
                 <Button
                   size="sm"
-                  disabled
+                  disabled={readOnly || busyChapterId !== null}
                   loading={busyChapterId === entry.chapterId}
-                  title="独立云派生授权与不确定结果防重机制完成后开放"
+                  onClick={() => void rebuild(entry.chapterId)}
                 >
-                  重建摘要（暂不可用）
+                  重建摘要
                 </Button>
                 {entry.factId !== null && (
                   <Button
@@ -414,9 +444,9 @@ export function ChapterSummaryPanel({
 function summaryStateLabel(state: ChapterSummaryDashboard["entries"][number]["state"]): string {
   switch (state) {
     case "current":
-      return "当前版本";
+      return "已更新";
     case "stale":
-      return "旧版本，已停用";
+      return "摘要待更新";
     case "invalid":
       return "无法核验";
     case "missing":
@@ -465,5 +495,5 @@ function continuousTaskLabel(task: string): string {
     ? "人物提取"
     : task === "world_extraction"
       ? "世界设定提取"
-      : task;
+      : "其他设定整理";
 }

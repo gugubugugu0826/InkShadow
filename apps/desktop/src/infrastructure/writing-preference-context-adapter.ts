@@ -1,17 +1,17 @@
-import type { ContextCandidateDraft } from "@inkshadow/ai-core";
+import type { ContextCandidate } from "@inkshadow/ai-core";
 
 import type { WritingPreference } from "./writing-feedback-store";
 
 const MAXIMUM_PREFERENCES = 24;
 
 /**
- * Adds only visible, enabled preferences to the generation task layer. The
- * text is clearly delimited as user-authored data and is never interpreted as
- * a hidden system policy.
+ * Adds only visible, enabled preferences as optional supplemental context.
+ * They remain below the saved chapter and governed story sources, and their
+ * own evidence keeps the final trace auditable.
  */
 export function selectWritingPreferenceContextCandidates(
   preferences: readonly WritingPreference[],
-): readonly ContextCandidateDraft[] {
+): readonly ContextCandidate[] {
   return Object.freeze(
     preferences
       .filter((preference) => preference.deletedAt === null && preference.enabled)
@@ -22,16 +22,13 @@ export function selectWritingPreferenceContextCandidates(
       .slice(0, MAXIMUM_PREFERENCES)
       .map((preference, index) => ({
         id: `writing-preference:${preference.id}`,
-        layer: "current_task" as const,
-        content: ["【用户可见的写作偏好】", preference.preferenceText, "【写作偏好结束】"].join(
-          "\n",
-        ),
+        layer: "rerank_supplement" as const,
+        content: preference.preferenceText,
         selectionReason:
           preference.source === "manual"
             ? "用户手动保存并启用的写作偏好。"
             : `用户重复选择同类反馈后形成的可编辑偏好（${String(preference.evidenceCount)} 次）。`,
-        priority: 780 - index,
-        required: false,
+        priority: -200 - index,
         evidence: Object.freeze([
           {
             sourceType: "user_input" as const,

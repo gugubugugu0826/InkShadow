@@ -824,9 +824,20 @@ function matchesRebuildableReplacement(
   }
   const record = value as Readonly<Record<string, unknown>>;
   return (
-    Object.keys(record).length === 3 &&
+    hasRebuildableStoredShape(record) &&
     record.schemaVersion === REBUILDABLE_SYSTEM_FACT_SCHEMA_VERSION &&
     record.replacementKey === replacementKey &&
     Object.prototype.hasOwnProperty.call(record, "payload")
+  );
+}
+
+function hasRebuildableStoredShape(record: Readonly<Record<string, unknown>>): boolean {
+  const keys = Object.keys(record);
+  return (
+    keys.length === 3 ||
+    (keys.length === 4 &&
+      Array.isArray(record.supersedesFactIds) &&
+      record.supersedesFactIds.length > 0 &&
+      record.supersedesFactIds.every((id) => typeof id === "string"))
   );
 }

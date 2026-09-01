@@ -1,4 +1,6 @@
 import {
+  MAXIMUM_ADVANCED_RESULT_VISIBLE_CHARACTERS,
+  MAXIMUM_ADVANCED_TARGET_VISIBLE_CHARACTERS,
   canTransitionGenerationState,
   isModelRouteRole,
   type BudgetEnforcement,
@@ -38,6 +40,7 @@ export interface SaveGenerationBudgetPolicyInput {
 }
 
 export interface PersistedGenerationPreflight {
+  readonly requestFingerprint?: string | null;
   readonly checkedAt: string;
   readonly canStart: boolean;
   readonly requiresConfirmation: boolean;
@@ -1194,6 +1197,7 @@ function evolveGenerationRun(
 function serializePreflight(preflight: GenerationPreflightSnapshot): PersistedGenerationPreflight {
   const estimate = preflight.estimate;
   return Object.freeze({
+    requestFingerprint: preflight.requestFingerprint ?? null,
     checkedAt: validateTimestamp(preflight.checkedAt),
     canStart: preflight.canStart,
     requiresConfirmation: preflight.requiresConfirmation,
@@ -1466,6 +1470,8 @@ function validatePersistedPreflight(
     throw governanceError("AI_GENERATION_STORE_CORRUPT", "Stored generation preflight is invalid.");
   }
   const costStatus = (preflight as Partial<PersistedGenerationPreflight>).costStatus ?? "estimated";
+  const requestFingerprint =
+    (preflight as Partial<PersistedGenerationPreflight>).requestFingerprint ?? null;
   const generationBudget = preflight.generationBudget ?? null;
   const contextSelectionSummary = preflight.contextSelectionSummary ?? null;
   if (
@@ -1488,6 +1494,9 @@ function validatePersistedPreflight(
     throw governanceError("AI_GENERATION_STORE_CORRUPT", "Stored generation preflight is invalid.");
   }
   validateTimestamp(preflight.checkedAt);
+  if (requestFingerprint !== null && !/^[a-f0-9]{64}$/u.test(requestFingerprint)) {
+    throw governanceError("AI_GENERATION_STORE_CORRUPT", "Stored request fingerprint is invalid.");
+  }
   validatePersistedGenerationBudget(generationBudget);
   validatePersistedContextSelectionSummary(contextSelectionSummary);
   if (!(["estimated", "pricing_unavailable"] as readonly string[]).includes(costStatus)) {
@@ -1508,6 +1517,7 @@ function validatePersistedPreflight(
   }
   return Object.freeze({
     ...preflight,
+    requestFingerprint,
     costStatus,
     generationBudget,
     contextSelectionSummary,
@@ -1522,11 +1532,17 @@ function validatePersistedGenerationBudget(
     !isObject(budget) ||
     typeof budget.outputProfile !== "string" ||
     !/^[a-z_]{2,32}$/u.test(budget.outputProfile) ||
+    (budget.advancedTargetVisibleCharacters !== undefined &&
+      budget.advancedTargetVisibleCharacters !== null &&
+      !safeCount(
+        budget.advancedTargetVisibleCharacters,
+        MAXIMUM_ADVANCED_TARGET_VISIBLE_CHARACTERS,
+      )) ||
     typeof budget.contextProfile !== "string" ||
     !/^[a-z_]{2,32}$/u.test(budget.contextProfile) ||
-    !safeCount(budget.targetVisibleCharacters, 12_000) ||
-    !safeCount(budget.minimumVisibleCharacters, 12_000) ||
-    !safeCount(budget.maximumVisibleCharacters, 12_000) ||
+    !safeCount(budget.targetVisibleCharacters, MAXIMUM_ADVANCED_TARGET_VISIBLE_CHARACTERS) ||
+    !safeCount(budget.minimumVisibleCharacters, MAXIMUM_ADVANCED_TARGET_VISIBLE_CHARACTERS) ||
+    !safeCount(budget.maximumVisibleCharacters, MAXIMUM_ADVANCED_RESULT_VISIBLE_CHARACTERS) ||
     !safeCount(budget.requestedMaximumOutputTokens, 1_000_000) ||
     (budget.providerOutputLimit !== null && !safeCount(budget.providerOutputLimit, 1_000_000)) ||
     !safeCount(budget.effectiveInputBudget, 1_000_000) ||
@@ -1586,6 +1602,7 @@ function sameGenerationRequest(left: GenerationRun, right: GenerationRun): boole
     left.baseVersionId === right.baseVersionId &&
     left.providerId === right.providerId &&
     left.modelId === right.modelId &&
+    (left.preflight.requestFingerprint ?? null) === (right.preflight.requestFingerprint ?? null) &&
     left.route.role === right.route.role &&
     left.route.reason === right.route.reason &&
     left.route.fallbackProviderId === right.route.fallbackProviderId &&

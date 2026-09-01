@@ -9,7 +9,7 @@ describe("desktop bundle policy", () => {
     expect(configSource).toMatch(/generateBundle:\s*\{\s*order:\s*"post"/u);
   });
 
-  it("keeps the narrowly raised async chunk limit aligned with the release audit", () => {
+  it("keeps the reviewed chunk and aggregate limits aligned with the release audit", () => {
     const configSource = readFileSync(resolve(process.cwd(), "vite.config.ts"), "utf8");
     const releaseAuditSource = readFileSync(
       resolve(process.cwd(), "../../scripts/check-desktop-release.mjs"),
@@ -18,7 +18,7 @@ describe("desktop bundle policy", () => {
 
     expect(configSource).toMatch(/ASYNC_CHUNK_BUDGET_BYTES = 520 \* 1024/u);
     expect(releaseAuditSource).toMatch(/asyncChunk: 520 \* 1024/u);
-    expect(configSource).toMatch(/TOTAL_FRONTEND_BUDGET_BYTES = 7 \* 1024 \* 1024 \+ 128 \* 1024/u);
-    expect(releaseAuditSource).toMatch(/totalFrontend: 7 \* 1024 \* 1024 \+ 128 \* 1024/u);
+    expect(configSource).toMatch(/TOTAL_FRONTEND_BUDGET_BYTES = 7 \* 1024 \* 1024 \+ 160 \* 1024/u);
+    expect(releaseAuditSource).toMatch(/totalFrontend: 7 \* 1024 \* 1024 \+ 160 \* 1024/u);
   });
 });

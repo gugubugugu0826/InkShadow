@@ -444,9 +444,10 @@ describe("DesktopShell", () => {
     });
     await waitFor(() =>
       expect(status).toHaveAccessibleName(
-        expect.stringMatching(/输出长度.*超过模型窗口.*缩短输出或上下文/u),
+        expect.stringMatching(/输出长度.*超过模型可处理范围.*缩短输出.*减少本次参考资料/u),
       ),
     );
+    expect(status).not.toHaveAccessibleName(expect.stringMatching(/模型窗口|上下文/u));
 
     recordSafeGenerationPreflightFailureDiagnostic(runtime, {
       taskType: "continuation",
@@ -458,9 +459,10 @@ describe("DesktopShell", () => {
     await waitFor(() => expect(status).toHaveAttribute("href", `/projects/${projectId}/context`));
     expect(status).toHaveAccessibleName(
       expect.stringMatching(
-        /上下文未能安全整理.*本次参考.*正文、不会被改动的历史版本和隔离建议均未改变/u,
+        /本次参考资料未能安全整理.*本次参考.*正文、不会被改动的历史版本和隔离建议均未改变/u,
       ),
     );
+    expect(status).not.toHaveAccessibleName(expect.stringMatching(/上下文预算/u));
 
     recordSafeGenerationPreflightDiagnostic(runtime, {
       taskType: "continuation",

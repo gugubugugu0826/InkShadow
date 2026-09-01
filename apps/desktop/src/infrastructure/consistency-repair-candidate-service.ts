@@ -804,6 +804,14 @@ function buildRepairEvidenceBundle(
       selectionReason: "作者选择了这条调查结论中的当前章节作为唯一修复目标。",
       evidence: [
         {
+          sourceType: "generation_task",
+          sourceId: `consistency-repair:${finding.id}`,
+          sourceVersionId: target.version.id,
+          locator: "selected_repair_target",
+          contentHash: null,
+          excerpt: null,
+        },
+        {
           sourceType: "chapter",
           sourceId: target.chapter.id,
           sourceVersionId: target.version.id,

@@ -131,14 +131,15 @@ function generationPreflightRepair(
   if (code === "MODEL_CONTEXT_WINDOW_EXHAUSTED" || code === "MODEL_HUB_CONTEXT_LIMIT_EXCEEDED") {
     return Object.freeze({
       href: "/settings#model-center",
-      guidance: "请在当前续写设置中缩短输出或上下文，或在模型中心选择更长上下文的模型",
-      linkAction: "打开模型中心检查模型窗口",
+      guidance:
+        "请在当前续写设置中缩短输出或减少本次参考资料，或在模型中心选择可处理更多资料的模型",
+      linkAction: "打开模型中心检查可处理资料上限",
     });
   }
   if (code === "STORY_CONTEXT_COMPILATION_FAILED" && projectId !== null) {
     return Object.freeze({
       href: `/projects/${projectId}/context`,
-      guidance: "请打开“本次参考”检查当前作品的正式设定和上下文预算",
+      guidance: "请打开“本次参考”检查当前作品的正式设定和可参考文字量",
       linkAction: "打开本次参考",
     });
   }
@@ -147,6 +148,16 @@ function generationPreflightRepair(
     guidance: "请在模型中心的“连接与模型”中修复后重试",
     linkAction: "打开模型中心",
   });
+}
+
+function ordinaryGenerationPreflightBlockerLabel(code: string): string {
+  if (code === "MODEL_CONTEXT_WINDOW_EXHAUSTED" || code === "MODEL_HUB_CONTEXT_LIMIT_EXCEEDED") {
+    return "输出长度超过模型可处理范围";
+  }
+  if (code === "STORY_CONTEXT_COMPILATION_FAILED") {
+    return "本次参考资料未能安全整理";
+  }
+  return modelHubReadinessBlockerLabel(code);
 }
 
 export function DesktopShell({ children }: DesktopShellProps) {
@@ -331,7 +342,7 @@ export function DesktopShell({ children }: DesktopShellProps) {
   const aiStatusDescription =
     scopedBlockerCode === null
       ? sharedAiDescription
-      : `${scopedTaskLabel}受影响：${modelHubReadinessBlockerLabel(scopedBlockerCode)}。${scopedRepair.guidance}；正文、不会被改动的历史版本和隔离建议均未改变。`;
+      : `${scopedTaskLabel}受影响：${ordinaryGenerationPreflightBlockerLabel(scopedBlockerCode)}。${scopedRepair.guidance}；正文、不会被改动的历史版本和隔离建议均未改变。`;
   const aiStatusTone = scopedBlockerCode === null ? aiReadiness.tone : "warning";
   const currentAppearanceLabel = resolvedSurface === "dark" ? "深色" : "浅色";
   const nextAppearanceLabel = resolvedSurface === "dark" ? "浅色" : "深色";

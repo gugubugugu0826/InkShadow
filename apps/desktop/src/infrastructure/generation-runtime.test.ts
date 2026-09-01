@@ -46,6 +46,35 @@ describe("governed generation runtime", () => {
     window.localStorage.clear();
   });
 
+  it.each([
+    ["short", "完成一个局部动作、发现或对话节点后停下"],
+    ["standard", "完成当前场景的主要推进，并在能自然接续的位置留下自然衔接点"],
+    ["long", "完成一场完整事件或情绪变化；可以跨场景，但必须在阶段性结果形成后收束"],
+  ] as const)(
+    "keeps the %s natural stop when an advanced target changes only the visible range",
+    async (profile, expectedStop) => {
+      const { runtime, chapterId } = await createNativeRuntime();
+      const plan = await prepareGenerationPlan(runtime, chapterId, {
+        chapterSaved: true,
+        networkAvailable: true,
+        outputProfile: profile,
+        customTargetVisibleCharacters: 3_300,
+      });
+
+      expect(plan.outputContract).toMatchObject({
+        profile,
+        advancedTargetVisibleCharacters: 3_300,
+        minimumVisibleCharacters: 2_640,
+        targetVisibleCharacters: 3_300,
+        maximumVisibleCharacters: 3_960,
+      });
+      expect(plan.messages[0]?.content).toContain(expectedStop);
+      expect(plan.messages.map(({ content }) => content).join("\n")).toContain(
+        "目标约为 3300 字；允许在 2640–3960 字之间自然浮动",
+      );
+    },
+  );
+
   it("includes confirmed ProjectSeed guidance in the real continuation context", async () => {
     const { runtime, chapterId } = await createNativeRuntime();
     const rerank = vi.spyOn(runtime.rerank, "tryRerank");
@@ -180,6 +209,97 @@ describe("governed generation runtime", () => {
     const prompt = plan.messages.map(({ content }) => content).join("\n");
     expect(prompt.split("禁止项：不新增超自然力量")).toHaveLength(2);
     expect(prompt.split("其他创作约束：每章保持单一视角")).toHaveLength(2);
+  });
+
+  it("sends one shared author rule once after merging requirement, setting, preference, and Skill provenance", async () => {
+    const sharedRule = "对白每句不超过十五字。";
+    const visibleOutput =
+      "雨声压住了楼梯上的脚步。周望握紧灯柄，贴着门缝听了片刻，才低声问赵伯是谁在外面。赵伯没有回答，只把那张旧照片推到烛光下。照片背面的墨迹仍旧潮湿，像是刚有人写下钟楼的名字。";
+    const generate = vi.fn<NativeModelGatewayClient["generate"]>(() =>
+      Promise.resolve(generationResult(visibleOutput, 160, 90)),
+    );
+    const created = await createNativeRuntime(generate);
+    const chapter = await created.runtime.repositories.chapters.findById(created.chapterId);
+    if (!chapter.ok || chapter.value === null) {
+      throw new Error("Expected the generated test chapter.");
+    }
+    const projectId = chapter.value.projectId;
+    const fact = await created.runtime.story.factService.createFormalUserFact({
+      projectId,
+      factType: "writing_constraint",
+      contentText: sharedRule,
+      actorId: created.runtime.story.actorId,
+      humanConfirmed: true,
+      lock: true,
+    });
+    if (!fact.ok) throw fact.error;
+    await created.runtime.story.writingFeedback.addManualPreference(projectId, sharedRule);
+
+    const persistence = new GenerationNovelSkillPersistence();
+    const novelSkills = new TauriNovelSkillRuntime(persistence, created.runtime.clock);
+    await novelSkills.initialize();
+    const state = await novelSkills.createCustomSkill(projectId, {
+      displayName: "短句对白",
+      summary: "控制对白长度。",
+      taskTypes: ["continuation"],
+      rules: [sharedRule],
+      prohibitions: [],
+      precedence: 500,
+      projectScope: "current_project",
+    });
+    const customSkill = state.methods.find(({ displayName }) => displayName === "短句对白");
+    if (customSkill === undefined) throw new Error("Expected the custom writing skill.");
+    await novelSkills.setMethodEnabled(projectId, customSkill.skillId, true);
+
+    const runtime: DesktopRuntime = { ...created.runtime, novelSkills };
+    const plan = await prepareGenerationPlan(runtime, created.chapterId, {
+      chapterSaved: true,
+      networkAvailable: true,
+      destination: "custom_instruction",
+      customDestinationInstruction: sharedRule,
+    });
+    expect(plan.novelSkillPreparation.status).toBe("prepared_applied");
+    expect(
+      plan.novelSkillPreparation.methods.find(({ displayName }) => displayName === "短句对白"),
+    ).toMatchObject({ included: true, selectionReason: "selected" });
+    const payload = plan.messages.map(({ content }) => content).join("\n");
+    expect(plan.contextCompilation?.compiled.trace.maximumContextTokens).toBe(
+      plan.contextBudget.effectiveInputBudget,
+    );
+    expect(payload.split(sharedRule)).toHaveLength(2);
+    const includedMatches =
+      plan.contextCompilation?.compiled.entries.filter(
+        ({ included, content }) => included && content.includes(sharedRule),
+      ) ?? [];
+    expect(includedMatches).toHaveLength(1);
+    expect(includedMatches[0]?.evidence.map(({ sourceType }) => sourceType).sort()).toEqual([
+      "other",
+      "story_rule",
+      "user_input",
+      "user_input",
+    ]);
+    expect(includedMatches[0]?.evidence).toHaveLength(4);
+    expect(
+      includedMatches[0]?.evidence.some(
+        ({ sourceId, sourceType }) =>
+          sourceType === "other" && sourceId === `novel-skill:${customSkill.skillId}`,
+      ),
+    ).toBe(true);
+
+    const outcome = await executeGenerationPlan(runtime, plan);
+    expect(outcome.ok).toBe(true);
+    expect(generate).toHaveBeenCalledOnce();
+    const gatewayPayload = generate.mock.calls[0]?.[0].messages
+      .map(({ content }) => content)
+      .join("\n");
+    expect(gatewayPayload?.split(sharedRule)).toHaveLength(2);
+    expect(persistence.commits).toHaveLength(1);
+    expect(
+      persistence.commits[0]?.compiled.items.find(({ skillId }) => skillId === customSkill.skillId),
+    ).toMatchObject({ included: true, selectionReason: "selected" });
+    expect(persistence.commits[0]?.compiled.selectionHash).toBe(
+      plan.novelSkillPreparation.compiled?.selectionHash,
+    );
   });
 
   it("keeps an empty chapter on the opening route through messages, retrieval, Skill, trace, task and invocation", async () => {
@@ -750,6 +870,125 @@ describe("governed generation runtime", () => {
     });
   });
 
+  it("carries an enabled custom writing skill through request, trace, receipt, and reopen while excluding an inapplicable one", async () => {
+    const visibleOutput =
+      "雨声压低了屋檐下的脚步。林澈推开半扇门，只问：“谁来过？”守夜人攥紧灯绳，朝北巷偏了偏头。";
+    const generate = vi.fn<NativeModelGatewayClient["generate"]>((request) => {
+      const payload = request.messages.map(({ content }) => content).join("\n");
+      expect(payload).toContain("对白每句不超过十五字");
+      expect(payload).not.toContain("先列出三个场景目标");
+      return Promise.resolve(generationResult(visibleOutput, 120, 36));
+    });
+    const created = await createRemoteRuntime({ generate, seedModelHubRoute: false });
+    const chapter = await created.runtime.repositories.chapters.findById(created.chapterId);
+    if (!chapter.ok || chapter.value === null) {
+      throw new Error("Expected a chapter before creating custom writing skills.");
+    }
+    const persistence = new GenerationNovelSkillPersistence();
+    const novelSkills = new TauriNovelSkillRuntime(persistence, created.runtime.clock);
+    await novelSkills.initialize();
+
+    const applicableDraft = novelSkills.organizeCustomSkillDraft(
+      "名称：克制对白。用于续写。规则：对白每句不超过十五字；用动作承接情绪。不要解释角色没有说出口的想法。",
+    );
+    const applicableState = await novelSkills.createCustomSkill(
+      chapter.value.projectId,
+      applicableDraft,
+    );
+    const applicable = applicableState.methods.find(
+      ({ displayName }) => displayName === "克制对白",
+    );
+    if (applicable === undefined) throw new Error("Expected the applicable custom writing skill.");
+    await novelSkills.setMethodEnabled(chapter.value.projectId, applicable.skillId, true);
+
+    const inapplicableDraft = novelSkills.organizeCustomSkillDraft(
+      "名称：场景拆解助手。只用于场景规划。规则：先列出三个场景目标。",
+    );
+    const inapplicableState = await novelSkills.createCustomSkill(
+      chapter.value.projectId,
+      inapplicableDraft,
+    );
+    const inapplicable = inapplicableState.methods.find(
+      ({ displayName }) => displayName === "场景拆解助手",
+    );
+    if (inapplicable === undefined) {
+      throw new Error("Expected the inapplicable custom writing skill.");
+    }
+    await novelSkills.setMethodEnabled(chapter.value.projectId, inapplicable.skillId, true);
+
+    const runtime: DesktopRuntime = { ...created.runtime, novelSkills };
+    await seedModelHubContinuationRoute(runtime);
+    const plan = await prepareGenerationPlan(runtime, created.chapterId, {
+      chapterSaved: true,
+      networkAvailable: true,
+    });
+    expect(plan.modelTask).toBe("continuation");
+    expect(plan.novelSkillPreparation.status).toBe("prepared_applied");
+    const applicablePreparation = plan.novelSkillPreparation.methods.find(
+      ({ displayName }) => displayName === "克制对白",
+    );
+    expect(applicablePreparation).toMatchObject({
+      included: true,
+      ownerScope: "user",
+      selectionReason: "selected",
+    });
+    expect(
+      plan.novelSkillPreparation.methods.find(({ displayName }) => displayName === "场景拆解助手"),
+    ).toMatchObject({ included: false, ownerScope: "user" });
+    const preparedPayload = plan.messages.map(({ content }) => content).join("\n");
+    expect(preparedPayload).toContain("对白每句不超过十五字");
+    expect(preparedPayload).not.toContain("先列出三个场景目标");
+
+    const executed = await executeGenerationPlan(runtime, plan);
+    if (!executed.ok || executed.value.candidate === null || plan.contextTraceId === null) {
+      throw new Error("Expected one isolated Candidate with a traceable custom writing skill.");
+    }
+    expect(generate).toHaveBeenCalledTimes(1);
+    expect(executed.value.candidate.content).toContain(visibleOutput);
+
+    const trace = await runtime.contextTraces.findById(plan.contextTraceId);
+    const modelInvocationId = trace?.execution?.modelInvocationId;
+    if (modelInvocationId === null || modelInvocationId === undefined) {
+      throw new Error("Expected the context trace to retain the model invocation.");
+    }
+    await expect(runtime.modelHub.findInvocation(modelInvocationId)).resolves.toMatchObject({
+      task: "continuation",
+    });
+    const persistedInvocation = await runtime.novelSkills.findInvocationByContextTrace(
+      plan.contextTraceId,
+    );
+    if (persistedInvocation.status !== "found") {
+      throw new Error("Expected the Skill invocation receipt to be persisted.");
+    }
+    expect(persistedInvocation.invocation.taskType).toBe("continuation");
+    expect(
+      persistedInvocation.invocation.methods.find(
+        ({ displayName, ownerScope }) => displayName === "克制对白" && ownerScope === "user",
+      ),
+    ).toMatchObject({
+      displayName: "克制对白",
+      included: true,
+      ownerScope: "user",
+    });
+
+    const reopenedSkills = new TauriNovelSkillRuntime(persistence, runtime.clock);
+    await reopenedSkills.initialize();
+    expect(
+      (await reopenedSkills.listProjectState(chapter.value.projectId)).methods.find(
+        ({ skillId }) => skillId === applicable.skillId,
+      ),
+    ).toMatchObject({ enabled: true, ownerScope: "user" });
+    const reopenedInvocation = await reopenedSkills.findInvocationByContextTrace(
+      plan.contextTraceId,
+    );
+    if (reopenedInvocation.status !== "found") {
+      throw new Error("Expected the Skill invocation receipt after reopen.");
+    }
+    expect(
+      reopenedInvocation.invocation.methods.find(({ displayName }) => displayName === "克制对白"),
+    ).toMatchObject({ displayName: "克制对白", included: true });
+  });
+
   it("keeps a bounded Skill-assisted response isolated through reject, reopen, and disable", async () => {
     const boundedOutput =
       "雨线斜落在檐角，林澈把湿透的纸页压在灯下。巷口传来一声短促铜铃，他没有追出去，只把门闩轻轻扣紧。" +
@@ -1043,6 +1282,93 @@ describe("governed generation runtime", () => {
     await expect(runtime.generationGovernance.findRunById(plan.runId)).resolves.toMatchObject({
       state: "failed_final",
       candidateId: candidates.value[0]?.id,
+      failureCode: "MODEL_CONNECTION_FAILED",
+    });
+  });
+
+  it.each([
+    ["元叙述", "分析：这一段应该先制造悬念。", "MODEL_VISIBLE_PROSE_OUTPUT_META"],
+    ["代码围栏", "```text\n雨声落在檐下。\n```", "MODEL_VISIBLE_PROSE_OUTPUT_CODE_FENCE"],
+    ["结构化载荷", '{"正文":"雨声落在檐下。"}', "MODEL_VISIBLE_PROSE_OUTPUT_STRUCTURED"],
+    [
+      "内部推理标记",
+      "<think>先分析人物动机</think>雨声落在檐下。",
+      "MODEL_VISIBLE_PROSE_OUTPUT_INTERNAL_TAG",
+    ],
+  ] as const)(
+    "rejects %s without preserving it as an acceptable incomplete candidate",
+    async (_label, invalidOutput, expectedCode) => {
+      const generate = vi.fn<NativeModelGatewayClient["generate"]>(() =>
+        Promise.resolve(generationResult(invalidOutput, 120, 24)),
+      );
+      const { runtime, chapterId } = await createNativeRuntime(generate);
+      const plan = await prepareGenerationPlan(runtime, chapterId, {
+        chapterSaved: true,
+        networkAvailable: true,
+      });
+
+      const result = await executeGenerationPlan(runtime, plan);
+
+      expect(result).toMatchObject({ ok: false, error: { code: expectedCode } });
+      const candidates = await runtime.repositories.aiCandidates.listByChapterId(chapterId);
+      expect(candidates.ok && candidates.value).toEqual([]);
+      await expect(runtime.generationGovernance.findRunById(plan.runId)).resolves.toMatchObject({
+        state: "failed_final",
+        candidateId: null,
+        failureCode: expectedCode,
+      });
+    },
+  );
+
+  it("rejects an overlong complete result without preserving a shortened or acceptable candidate", async () => {
+    let generatedText = "";
+    const generate = vi.fn<NativeModelGatewayClient["generate"]>(() =>
+      Promise.resolve(generationResult(generatedText, 120, 24)),
+    );
+    const { runtime, chapterId } = await createNativeRuntime(generate);
+    const plan = await prepareGenerationPlan(runtime, chapterId, {
+      chapterSaved: true,
+      networkAvailable: true,
+      outputProfile: "long",
+    });
+    generatedText = "雨".repeat(plan.outputContract.maximumVisibleCharacters + 1);
+
+    const result = await executeGenerationPlan(runtime, plan);
+
+    expect(result).toMatchObject({
+      ok: false,
+      error: { code: "MODEL_VISIBLE_PROSE_OUTPUT_TOO_LONG" },
+    });
+    const candidates = await runtime.repositories.aiCandidates.listByChapterId(chapterId);
+    expect(candidates.ok && candidates.value).toEqual([]);
+    await expect(runtime.generationGovernance.findRunById(plan.runId)).resolves.toMatchObject({
+      state: "failed_final",
+      candidateId: null,
+      failureCode: "MODEL_VISIBLE_PROSE_OUTPUT_TOO_LONG",
+    });
+  });
+
+  it("does not preserve invalid streamed text after a provider disconnect", async () => {
+    const generate = vi.fn<NativeModelGatewayClient["generate"]>((request) => {
+      request.onDelta?.("分析：这是供应商断开前返回的内部说明。");
+      return Promise.reject(
+        new ModelCenterError("MODEL_CONNECTION_FAILED", "simulated provider disconnect", true),
+      );
+    });
+    const { runtime, chapterId } = await createNativeRuntime(generate);
+    const plan = await prepareGenerationPlan(runtime, chapterId, {
+      chapterSaved: true,
+      networkAvailable: true,
+    });
+
+    const result = await executeGenerationPlan(runtime, plan);
+
+    expect(result).toMatchObject({ ok: false, error: { code: "MODEL_CONNECTION_FAILED" } });
+    const candidates = await runtime.repositories.aiCandidates.listByChapterId(chapterId);
+    expect(candidates.ok && candidates.value).toEqual([]);
+    await expect(runtime.generationGovernance.findRunById(plan.runId)).resolves.toMatchObject({
+      state: "failed_final",
+      candidateId: null,
       failureCode: "MODEL_CONNECTION_FAILED",
     });
   });
@@ -1667,6 +1993,7 @@ describe("governed generation runtime", () => {
     await seedModelHubContinuationRoute(created.runtime, {
       primaryInputTokenLimit: 3_400,
       includeFallback: true,
+      fallbackOutputTokenLimit: 1_800,
     });
 
     const plan = await prepareGenerationPlan(created.runtime, created.chapterId, {
@@ -1680,6 +2007,19 @@ describe("governed generation runtime", () => {
       modelId: "fallback-writer-model",
       routeReason: "model_hub_fallback",
       routeRequiresConfirmation: true,
+      maximumOutputTokens: 1_800,
+      outputContract: {
+        providerOutputLimit: 1_800,
+        requestedMaxOutputTokens: 1_800,
+        providerLimitClamped: true,
+      },
+      preflight: {
+        maximumOutputTokens: 1_800,
+        generationBudget: {
+          requestedMaximumOutputTokens: 1_800,
+          providerOutputLimit: 1_800,
+        },
+      },
     });
     expect(readSafeInvocationRouteDiagnostic(created.runtime)).toMatchObject({
       resolvedConnectionId: "reasoning-retry-fallback-model-hub",
@@ -1831,6 +2171,136 @@ describe("governed generation runtime", () => {
     expect(createRun).not.toHaveBeenCalled();
   });
 
+  it("keeps current prose and a locked fact, then adopts the enabled skill before old preferences under a tight budget", async () => {
+    const generated =
+      "雨声贴着钟楼外墙落下。周望推开铁门，看见倒转的钟摆正把影子扫向台阶。他握紧灯柄，沿新出现的泥印追向塔顶。";
+    const generate = vi.fn<NativeModelGatewayClient["generate"]>(() =>
+      Promise.resolve(generationResult(generated, 700, 60)),
+    );
+    const created = await createRemoteRuntime({
+      generate,
+      seedModelHubRoute: false,
+      content: "钟楼里的旧钟忽然倒着走。".repeat(60),
+    });
+    const chapter = await created.runtime.repositories.chapters.findById(created.chapterId);
+    if (!chapter.ok || chapter.value === null) throw new Error("Expected the test chapter.");
+    const locked = await created.runtime.story.factService.createFormalUserFact({
+      projectId: chapter.value.projectId,
+      factType: "writing_constraint",
+      contentText: "周望不能离开钟楼。",
+      actorId: created.runtime.story.actorId,
+      humanConfirmed: true,
+      lock: true,
+    });
+    if (!locked.ok) throw locked.error;
+    for (let index = 0; index < 24; index += 1) {
+      await created.runtime.story.writingFeedback.addManualPreference(
+        chapter.value.projectId,
+        `旧偏好 ${String(index + 1)}：多写无关环境铺陈以延长段落。`,
+      );
+    }
+    const experimental = await attachEnabledNovelSkills(created.runtime, created.chapterId);
+    const runtime = experimental.runtime;
+    await seedModelHubContinuationRoute(runtime);
+
+    const plan = await prepareGenerationPlan(runtime, created.chapterId, {
+      chapterSaved: true,
+      networkAvailable: true,
+      contextBudgetProfile: "custom",
+      customContextBudget: 1_024,
+    });
+
+    expect(plan.novelSkillPreparation.status).toBe("prepared_applied");
+    expect(
+      plan.novelSkillPreparation.methods.find(({ displayName }) => displayName === "场景推进"),
+    ).toMatchObject({ included: true, selectionReason: "selected" });
+    const entries = plan.contextCompilation?.compiled.entries ?? [];
+    expect(entries.find(({ id }) => id.startsWith("current-chapter:"))).toMatchObject({
+      included: true,
+      required: true,
+    });
+    expect(
+      entries.find(
+        ({ content, layer }) =>
+          layer === "locked_hard_rules" && content.includes("周望不能离开钟楼。"),
+      ),
+    ).toMatchObject({ included: true, required: true });
+    expect(
+      entries.some(
+        ({ included, layer, evidence }) =>
+          included &&
+          layer === "rerank_supplement" &&
+          evidence.some(({ sourceId }) => sourceId === "novel-skill:core.scene_craft"),
+      ),
+    ).toBe(true);
+    expect(
+      entries.some(({ included, id }) => !included && id.startsWith("writing-preference:")),
+    ).toBe(true);
+    expect(plan.messages.map(({ content }) => content).join("\n")).toContain(
+      "场景结束时至少改变信息、关系、位置、资源或人物决定中的一项",
+    );
+
+    const result = await executeGenerationPlan(runtime, plan);
+    expect(result.ok).toBe(true);
+    expect(generate).toHaveBeenCalledOnce();
+    expect(experimental.persistence.commits).toHaveLength(1);
+  });
+
+  it("records an enabled skill as not adopted when higher-authority prose and locked rules leave no complete skill budget", async () => {
+    const generate = vi.fn<NativeModelGatewayClient["generate"]>(() =>
+      Promise.resolve(
+        generationResult("周望把最后一枚铜钉压进门框，钟摆的倒影随即停在他的脚边。", 900, 40),
+      ),
+    );
+    const created = await createRemoteRuntime({
+      generate,
+      seedModelHubRoute: false,
+      content: "钟楼里的旧钟仍在倒着走。".repeat(60),
+    });
+    const chapter = await created.runtime.repositories.chapters.findById(created.chapterId);
+    if (!chapter.ok || chapter.value === null) throw new Error("Expected the test chapter.");
+    const locked = await created.runtime.story.factService.createFormalUserFact({
+      projectId: chapter.value.projectId,
+      factType: "writing_constraint",
+      contentText: "周望必须守住钟楼，不能违背这条已经锁定的故事规则。".repeat(18),
+      actorId: created.runtime.story.actorId,
+      humanConfirmed: true,
+      lock: true,
+    });
+    if (!locked.ok) throw locked.error;
+    const experimental = await attachEnabledNovelSkills(created.runtime, created.chapterId);
+    const runtime = experimental.runtime;
+    await seedModelHubContinuationRoute(runtime);
+
+    const plan = await prepareGenerationPlan(runtime, created.chapterId, {
+      chapterSaved: true,
+      networkAvailable: true,
+      contextBudgetProfile: "custom",
+      customContextBudget: 1_024,
+    });
+
+    expect(plan.novelSkillPreparation.status).toBe("prepared_none_selected");
+    expect(
+      plan.novelSkillPreparation.methods.find(({ displayName }) => displayName === "场景推进"),
+    ).toMatchObject({ included: false, selectionReason: "token_budget_exhausted" });
+    expect(
+      plan.contextCompilation?.compiled.entries.some(({ included, evidence }) =>
+        included
+          ? evidence.some(({ sourceId }) => sourceId === "novel-skill:core.scene_craft")
+          : false,
+      ),
+    ).toBe(false);
+
+    const result = await executeGenerationPlan(runtime, plan);
+    expect(result.ok).toBe(true);
+    expect(generate).toHaveBeenCalledOnce();
+    expect(
+      experimental.persistence.commits[0]?.compiled.items.find(
+        ({ skillId }) => skillId === "core.scene_craft",
+      ),
+    ).toMatchObject({ included: false, selectionReason: "token_budget_exhausted" });
+  });
+
   it("fails closed before provider dispatch when an enabled writing method changes after preparation", async () => {
     const generate = vi.fn<NativeModelGatewayClient["generate"]>(() =>
       Promise.resolve(generationResult("This must never be dispatched.", 80, 20)),
@@ -1846,7 +2316,15 @@ describe("governed generation runtime", () => {
 
     expect(plan.executionMode).toBe("model_hub");
     expect(plan.novelSkillPreparation.status).toBe("prepared_applied");
-    expect(plan.messages.map(({ content }) => content).join("\n")).toContain("<novel_method>");
+    const preparedPayload = plan.messages.map(({ content }) => content).join("\n");
+    expect(preparedPayload).not.toContain("<novel_method>");
+    expect(preparedPayload).toContain("场景结束时至少改变信息、关系、位置、资源或人物决定中的一项");
+    expect(
+      plan.contextCompilation?.compiled.entries.some(
+        ({ included, evidence }) =>
+          included && evidence.some(({ sourceId }) => sourceId.startsWith("novel-skill:")),
+      ),
+    ).toBe(true);
     if (plan.projectId === null) {
       throw new Error("Expected the prepared project.");
     }
@@ -2199,10 +2677,19 @@ describe("governed generation runtime", () => {
     const freshPlan = await prepareGenerationPlan(runtime, chapterId, {
       chapterSaved: true,
       networkAvailable: true,
+      outputProfile: "standard",
+      customTargetVisibleCharacters: 3_300,
     });
     expect(freshPlan.taskId).not.toBe(plan.taskId);
     expect(freshPlan.runId).not.toBe(plan.runId);
     expect(freshPlan.idempotencyKey).not.toBe(plan.idempotencyKey);
+    expect(freshPlan.requestFingerprint).not.toBe(plan.requestFingerprint);
+    expect(freshPlan.outputContract).toMatchObject({
+      profile: "standard",
+      advancedTargetVisibleCharacters: 3_300,
+      targetVisibleCharacters: 3_300,
+    });
+    expect(generate).toHaveBeenCalledOnce();
   });
 
   it("does not reuse an ambiguously failed Provider action as an automatic retry", async () => {
@@ -2355,7 +2842,13 @@ describe("governed generation runtime", () => {
     expect(deferredTask).toMatchObject({
       id: deferred.taskId,
       type: "ai.generate.deferred",
-      metadata: { modelTask: "continuation" },
+      metadata: {
+        modelTask: "continuation",
+        requestFingerprint: offlinePlan.requestFingerprint,
+        outputProfile: "standard",
+        advancedTargetVisibleCharacters: null,
+        targetVisibleCharacters: 2_200,
+      },
     });
 
     const onlinePlan = await prepareGenerationPlan(runtime, chapter.value.chapter.id, {
@@ -2364,6 +2857,7 @@ describe("governed generation runtime", () => {
     });
     expect(onlinePlan.preflight.canStart).toBe(true);
     expect(onlinePlan.deferredRequest?.id).toBe(deferred.id);
+    expect(onlinePlan.requestFingerprint).toBe(offlinePlan.requestFingerprint);
     const executed = await executeGenerationPlan(runtime, onlinePlan);
     if (!executed.ok) {
       throw executed.error;
@@ -2382,6 +2876,46 @@ describe("governed generation runtime", () => {
         expect.objectContaining({ type: "ai.generate", status: "succeeded" }),
       ]),
     );
+  });
+
+  it("expires an offline request when the author changes the advanced target before restart recovery", async () => {
+    const generate = vi.fn<NativeModelGatewayClient["generate"]>(() =>
+      Promise.resolve(generationResult("只允许新确认后发送的候选。", 100, 20)),
+    );
+    const { runtime, chapterId } = await createRemoteRuntime({ generate });
+    const offlinePlan = await prepareGenerationPlan(runtime, chapterId, {
+      chapterSaved: true,
+      networkAvailable: false,
+      outputProfile: "long",
+      customTargetVisibleCharacters: 3_300,
+    });
+    const deferred = await saveDeferredGenerationPlan(runtime, offlinePlan);
+
+    const restarted = restartGenerationRuntime(runtime);
+    const changedPlan = await prepareGenerationPlan(restarted, chapterId, {
+      chapterSaved: true,
+      networkAvailable: true,
+      outputProfile: "long",
+      customTargetVisibleCharacters: 4_200,
+    });
+
+    expect(changedPlan.requestFingerprint).not.toBe(offlinePlan.requestFingerprint);
+    expect(changedPlan.deferredRequest).toBeNull();
+    expect(changedPlan.idempotencyKey).not.toBe(`ai.generate.resume:${deferred.id}`);
+    expect(changedPlan.outputContract).toMatchObject({
+      profile: "long",
+      advancedTargetVisibleCharacters: 4_200,
+      targetVisibleCharacters: 4_200,
+      minimumVisibleCharacters: 3_360,
+      maximumVisibleCharacters: 5_040,
+    });
+    expect(generate).not.toHaveBeenCalled();
+    await expect(
+      restarted.taskCenter.findTaskByIdempotencyKey(deferred.idempotencyKey),
+    ).resolves.toMatchObject({ status: "cancelled" });
+    expect(readPersistedDeferredRequest(deferred.id)).toMatchObject({
+      status: "blocked_stale",
+    });
   });
 
   it.each([
@@ -2852,6 +3386,7 @@ async function seedModelHubContinuationRoute(
   options: Readonly<{
     primaryInputTokenLimit?: number;
     includeFallback?: boolean;
+    fallbackOutputTokenLimit?: number;
     retryLimit?: number;
     providerKind?: "ollama" | "deepseek" | "custom_openai_compatible";
     baseUrl?: string;
@@ -2955,7 +3490,7 @@ async function seedModelHubContinuationRoute(
           providerModelId: "fallback-writer-model",
           lifecycle: "stable",
           inputTokenLimit: 32_000,
-          outputTokenLimit: 8_000,
+          outputTokenLimit: options.fallbackOutputTokenLimit ?? 8_000,
           staleAfter: "2027-08-10T00:00:00.000Z",
         },
       ],

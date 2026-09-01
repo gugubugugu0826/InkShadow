@@ -28,12 +28,21 @@ export const CHAPTER_SUMMARY_MAXIMUM_SOURCE_CHARACTERS =
   CHAPTER_SUMMARY_SEGMENT_CHARACTERS * CHAPTER_SUMMARY_MAXIMUM_SEGMENTS;
 export const CHAPTER_SUMMARY_EXPLICIT_CLOUD_AUTHORIZATION_REQUIRED =
   "CHAPTER_SUMMARY_EXPLICIT_CLOUD_AUTHORIZATION_REQUIRED" as const;
+export const CHAPTER_SUMMARY_LOCAL_PROVIDER = "本地确定性整理" as const;
+export const CHAPTER_SUMMARY_LOCAL_MODEL = "首尾句抽取摘要第一版" as const;
 
 export interface ChapterSummarySourceSegment {
   readonly evidenceId: string;
   readonly startOffset: number;
   readonly endOffset: number;
   readonly text: string;
+}
+
+export interface ChapterSummarySentenceRange {
+  readonly startOffset: number;
+  readonly endOffset: number;
+  readonly excerpt: string;
+  readonly closed: boolean;
 }
 
 export interface ChapterSummaryModelEntry {
@@ -296,6 +305,153 @@ export class ChapterSummaryService {
         "章节摘要云端派生尚未提供独立授权；本次未发送正文，也未调用模型。",
       ),
     );
+  }
+
+  /**
+   * Explicit, deterministic rebuild from the chapter's current immutable
+   * version. This path is entirely local and therefore does not reuse the
+   * retired cloud-summary API or imply any provider dispatch.
+   */
+  public async rebuildCurrentLocalSummary(input: {
+    readonly projectId: string;
+    readonly chapterId: string;
+  }): Promise<ChapterSummaryGenerationReceipt> {
+    const chapterId = parseDomainUuid(input.chapterId);
+    if (!chapterId.ok) throw chapterId.error;
+    const chapter = await this.dependencies.chapters.findById(chapterId.value);
+    if (!chapter.ok) throw chapter.error;
+    if (chapter.value?.projectId !== input.projectId) {
+      throw new ChapterSummarySourceError(
+        "CHAPTER_SUMMARY_CHAPTER_NOT_FOUND",
+        "找不到要重建摘要的章节。",
+      );
+    }
+    const request = Object.freeze({
+      projectId: input.projectId,
+      chapterId: input.chapterId,
+      versionId: chapter.value.currentVersionId,
+      trigger: "user_rebuild" as const,
+    });
+    try {
+      await this.assertProjectActive(input.projectId);
+      const source = await this.readVerifiedSource(request);
+      if (source.content.length === 0) {
+        return receipt(request, "skipped", "CHAPTER_SUMMARY_EMPTY_CHAPTER", "空章节无需重建摘要。");
+      }
+      if (source.content.length > CHAPTER_SUMMARY_MAXIMUM_SOURCE_CHARACTERS) {
+        return receipt(
+          request,
+          "skipped",
+          "CHAPTER_SUMMARY_SOURCE_TOO_LARGE",
+          "本章超过单次本地摘要的安全上限，请拆分章节后重试。",
+        );
+      }
+      const selected = extractiveChapterSummarySentenceRanges(source.content);
+      const primary = selected.at(0);
+      if (primary === undefined) {
+        return receipt(
+          request,
+          "skipped",
+          "CHAPTER_SUMMARY_LOCAL_NO_COMPLETE_SENTENCE",
+          "本章还没有可用于摘要的完整句子。",
+        );
+      }
+      const citations = Object.freeze(
+        selected.map((sentence) =>
+          Object.freeze({
+            evidenceId: `chapter:${source.chapterId}:version:${source.versionId}:sha256:${source.contentHash}:utf16:${String(sentence.startOffset)}-${String(sentence.endOffset)}`,
+            startOffset: sentence.startOffset,
+            endOffset: sentence.endOffset,
+            sourceLength: source.content.length,
+          }),
+        ),
+      );
+      const payload: StoredChapterSummaryPayload = Object.freeze({
+        schemaVersion: CHAPTER_SUMMARY_PAYLOAD_SCHEMA_VERSION,
+        sourceProjectId: source.projectId,
+        sourceChapterId: source.chapterId,
+        sourceVersionId: source.versionId,
+        sourceContentHash: source.contentHash,
+        authorityMode: "plain_non_authoritative",
+        citations,
+        keyEvents: Object.freeze([]),
+        continuityNotes: Object.freeze([]),
+        generation: Object.freeze({
+          task: CHAPTER_SUMMARY_TASK,
+          providerKind: CHAPTER_SUMMARY_LOCAL_PROVIDER,
+          modelId: CHAPTER_SUMMARY_LOCAL_MODEL,
+          invocationId: source.versionId,
+        }),
+        budget: Object.freeze({
+          strategy: "bounded_utf16_segments",
+          segmentCharacters: CHAPTER_SUMMARY_SEGMENT_CHARACTERS,
+          maximumSegments: CHAPTER_SUMMARY_MAXIMUM_SEGMENTS,
+          sourceCharacters: source.content.length,
+          estimatedInputTokens: Math.max(1, Math.ceil(source.content.length / 4)),
+          tokenEstimate: "model_hub_estimate_not_provider_tokenizer",
+        }),
+      });
+      const saved =
+        await this.dependencies.factService.replaceRebuildableSystemFactWithAuthorityFence(
+          {
+            projectId: source.projectId,
+            factType: "chapter_summary",
+            replacementKey: replacementKey(source.chapterId),
+            contentText: selected.map(({ excerpt }) => excerpt).join(" "),
+            payload,
+            source: {
+              kind: "chapter_span",
+              reference: `${REFERENCE_PREFIX}:${source.chapterId}:${source.versionId}:sha256:${source.contentHash}`,
+              chapterId: source.chapterId,
+              versionId: source.versionId,
+              startOffset: primary.startOffset,
+              endOffset: primary.endOffset,
+              sourceLength: source.content.length,
+              excerpt: primary.excerpt,
+            },
+            confidence: 1,
+          },
+          {
+            chapterId: source.chapterId,
+            expectedCurrentVersionId: source.versionId,
+          },
+        );
+      if (!saved.ok) throw saved.error;
+      return Object.freeze({
+        ...receipt(
+          request,
+          "generated",
+          "CHAPTER_SUMMARY_LOCAL_REBUILT",
+          "已在本机根据当前保存版本重建摘要；没有调用外部模型。",
+        ),
+        fact: saved.value.fact,
+        replacedFactIds: saved.value.replacedFactIds,
+        invocation: Object.freeze({
+          task: CHAPTER_SUMMARY_TASK,
+          providerKind: CHAPTER_SUMMARY_LOCAL_PROVIDER,
+          modelId: CHAPTER_SUMMARY_LOCAL_MODEL,
+          invocationId: source.versionId,
+        }),
+        authorityMode: "plain_non_authoritative" as const,
+      });
+    } catch (cause: unknown) {
+      if (
+        cause instanceof ChapterSummarySourceError &&
+        [
+          "CHAPTER_SUMMARY_SOURCE_NOT_CURRENT",
+          "CHAPTER_SUMMARY_EMPTY_CHAPTER",
+          "CHAPTER_SUMMARY_SOURCE_TOO_LARGE",
+        ].includes(cause.code)
+      ) {
+        return receipt(request, "skipped", cause.code, cause.message);
+      }
+      return receipt(
+        request,
+        "failed",
+        errorCode(cause),
+        cause instanceof Error ? cause.message : "章节摘要重建失败；正文和已有摘要均未被修改。",
+      );
+    }
   }
 
   public async clearChapterSummary(input: {
@@ -763,12 +919,40 @@ export function segmentChapterSource(
   return Object.freeze(segments);
 }
 
+/** Selects the first and last complete, bounded sentence without interpretation. */
+export function extractiveChapterSummarySentenceRanges(
+  content: string,
+): readonly Readonly<ChapterSummarySentenceRange>[] {
+  let first: Readonly<ChapterSummarySentenceRange> | null = null;
+  let last: Readonly<ChapterSummarySentenceRange> | null = null;
+  const pattern = /[^。！？\n]+[。！？]?/gu;
+  for (const match of content.matchAll(pattern)) {
+    const leading = /^\s*/u.exec(match[0])?.[0].length ?? 0;
+    const trailing = /\s*$/u.exec(match[0])?.[0].length ?? 0;
+    const excerpt = match[0].slice(leading, match[0].length - trailing);
+    if (excerpt.length === 0 || excerpt.length > 500) continue;
+    const sentence = Object.freeze({
+      startOffset: match.index + leading,
+      endOffset: match.index + match[0].length - trailing,
+      excerpt,
+      closed: /[。！？]$/u.test(excerpt) || content[match.index + match[0].length] === "\n",
+    });
+    if (!sentence.closed) continue;
+    first ??= sentence;
+    last = sentence;
+  }
+  if (first === null) return Object.freeze([]);
+  return Object.freeze(
+    last === null || last.startOffset === first.startOffset ? [first] : [first, last],
+  );
+}
+
 export function parseStoredChapterSummaryPayload(
   fact: StoryFact,
 ): StoredChapterSummaryPayload | null {
   const snapshot = fact.toSnapshot();
   const value = fact.toSnapshot().structuredValue;
-  if (!isRecord(value) || !hasExactKeys(value, ["schemaVersion", "replacementKey", "payload"])) {
+  if (!isRecord(value) || !hasStoredChapterSummaryRoot(value)) {
     return null;
   }
   if (value.schemaVersion !== REBUILDABLE_SYSTEM_FACT_SCHEMA_VERSION || !isRecord(value.payload)) {
@@ -841,6 +1025,16 @@ export function parseStoredChapterSummaryPayload(
     return null;
   }
   return parsed;
+}
+
+function hasStoredChapterSummaryRoot(value: Record<string, unknown>): boolean {
+  if (hasExactKeys(value, ["schemaVersion", "replacementKey", "payload"])) return true;
+  return (
+    hasExactKeys(value, ["schemaVersion", "replacementKey", "payload", "supersedesFactIds"]) &&
+    Array.isArray(value.supersedesFactIds) &&
+    value.supersedesFactIds.length > 0 &&
+    value.supersedesFactIds.every((id) => typeof id === "string" && parseStoryUuid(id).ok)
+  );
 }
 
 function resolveCitedSegments(

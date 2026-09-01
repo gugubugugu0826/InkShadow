@@ -20,10 +20,12 @@ import {
   type ProjectDisplayIdentity,
 } from "@inkshadow/application";
 import {
+  MAXIMUM_ADVANCED_TARGET_VISIBLE_CHARACTERS,
+  MINIMUM_ADVANCED_TARGET_VISIBLE_CHARACTERS,
   detectCandidateStableOverlap,
   type CandidateStableOverlapResult,
   type CandidateQualityGateResult,
-  type ContinuationDestinationId,
+  type ContinuationOutputContract,
   type ContinuationOutputProfileId,
   type ContextEvidenceSourceType,
   type ContextLayer,
@@ -199,7 +201,19 @@ import {
   type GenerationProgressStage,
 } from "../components/generation-progress-panel";
 import { CandidateFeedbackControls } from "../components/candidate-feedback-controls";
+import { NovelSkillPanel } from "../components/novel-skill-panel";
 import { PreparedNovelSkillReference } from "../components/novel-skill-reference";
+import type { NovelSkillProjectState } from "../infrastructure/novel-skill-runtime";
+import {
+  loadEditorWritingTaskDraft,
+  loadOrCreateEditorWritingSessionId,
+  sameEditorWritingTaskDraftIdentity,
+  saveEditorWritingTaskDraft,
+  settleEditorWritingTaskDraft,
+  type EditorWritingTask,
+  type EditorWritingTaskDraftIdentity,
+  type EditorWritingTaskDraftOutcome,
+} from "../infrastructure/editor-writing-task-draft-store";
 import {
   EditorAiSuggestionDiffViewer,
   type AiSuggestionDiffDecision,
@@ -223,6 +237,72 @@ const selectionDerivedInputTypes = new Set([
   "insertParagraph",
   "insertText",
 ]);
+
+type SelectionEditorWritingTask = Exclude<EditorWritingTask, "continuation">;
+
+const selectionWritingActions = Object.freeze([
+  Object.freeze({
+    action: "selection_rewrite" as const,
+    label: "改写",
+    instruction: "保留事实、原意和叙事视角，重写选中内容，使表达更清晰自然。",
+    requirementPlaceholder: "例如：改成林舟的第一人称。",
+  }),
+  Object.freeze({
+    action: "polish" as const,
+    label: "润色",
+    instruction: "保持原意、事实和语气，润色选中内容，使文字更自然流畅。",
+    requirementPlaceholder: "例如：语言更克制，减少比喻。",
+  }),
+  Object.freeze({
+    action: "expand" as const,
+    label: "扩写",
+    instruction: "保持既有事实与叙事视角，扩写选中内容的动作、感受和环境细节。",
+    requirementPlaceholder: "例如：补充人物动作和现场细节。",
+  }),
+  Object.freeze({
+    action: "shorten" as const,
+    label: "缩写",
+    instruction:
+      "在不改变事实、原意和叙事视角的前提下，缩写选中内容，删除重复和次要表达，保留关键情节与语气。",
+    requirementPlaceholder: "例如：保留争执结果，删去重复对话。",
+  }),
+]) satisfies readonly Readonly<{
+  action: SelectionEditorWritingTask;
+  label: "改写" | "润色" | "扩写" | "缩写";
+  instruction: string;
+  requirementPlaceholder: string;
+}>[];
+
+const CONTINUATION_REQUIREMENT_PLACEHOLDER = "例如：写到主角发现密信为止。";
+
+function selectionWritingActionDefinition(action: SelectionEditorWritingTask) {
+  const definition = selectionWritingActions.find((candidate) => candidate.action === action);
+  if (definition === undefined) {
+    throw new Error("无法识别当前选区写作任务");
+  }
+  return definition;
+}
+
+function continuationProfileDefaultTarget(profile: ContinuationOutputProfileId): number {
+  if (profile === "short") return 1_000;
+  if (profile === "long") return 4_000;
+  return 2_200;
+}
+
+function novelSkillSelectionReasonBrief(reason: string): string {
+  const labels: Readonly<Record<string, string>> = {
+    not_enabled: "当前项目未启用",
+    task_mismatch: "不适用于当前任务",
+    context_layer_unavailable: "所需故事资料当前不可用",
+    experimental_not_allowed: "当前任务不采用实验性技能",
+    precedence_conflict: "与更高优先级技能冲突",
+    token_budget_exhausted: "本次可参考篇幅已用完",
+    superseded_version: "项目固定使用另一版本",
+    archived: "技能已停用",
+    selected: "已采用",
+  };
+  return labels[reason] ?? "本次未采用";
+}
 
 const RECOVERY_DRAFT_DEBOUNCE_MS = 350;
 const BACKGROUND_FLUSH_TIMEOUT_MS = 3_000;
@@ -349,6 +429,12 @@ interface PreparedContinuationDirections {
   readonly plan: PreparedGenerationPlan;
   readonly disclosure: ContinuationGenerationDisclosure | null;
   readonly authorityRevision: number;
+  readonly requirement: string | null;
+}
+
+interface EditorWritingTaskDraftSnapshot {
+  readonly identity: EditorWritingTaskDraftIdentity;
+  readonly requirement: string;
 }
 
 interface DirectionFailureNotice {
@@ -887,6 +973,8 @@ export function EditorPage() {
   const editorDiagnosticRoute = `${location.pathname}${location.search}`;
   const directOpeningRouteNoticeRef = useRef(readDirectOpeningOrganizationNotice(location.state));
   const routeIdentityRef = useRef(editorRouteKey);
+  const currentWritingRouteRef = useRef({ projectId, chapterId, routeKey: editorRouteKey });
+  currentWritingRouteRef.current = { projectId, chapterId, routeKey: editorRouteKey };
   const loadOperationRevisionRef = useRef(0);
   const generationOperationRevisionRef = useRef(0);
   const writingModeAuthorityKey =
@@ -952,7 +1040,6 @@ export function EditorPage() {
     [],
   );
   const [directionError, setDirectionError] = useState<DirectionFailureNotice | null>(null);
-  const [customDirection, setCustomDirection] = useState("");
   const [directionBusy, setDirectionBusy] = useState(false);
   const [preparedDirections, setPreparedDirections] =
     useState<PreparedContinuationDirections | null>(null);
@@ -1009,8 +1096,8 @@ export function EditorPage() {
   const [cancelBusy, setCancelBusy] = useState(false);
   const [generationPreview, setGenerationPreview] = useState("");
   const [generationStage, setGenerationStage] = useState<GenerationProgressStage>("preparing");
-  const [selectionRewriteInstruction, setSelectionRewriteInstruction] =
-    useState("保持原意，让表达更自然。");
+  const [activeWritingTask, setActiveWritingTask] = useState<EditorWritingTask>("continuation");
+  const [writingRequirement, setWritingRequirement] = useState("");
   const [selectionRewriteBusy, setSelectionRewriteBusy] = useState(false);
   const [selectionRewriteContext, setSelectionRewriteContext] =
     useState<StoryContextCompilationReceipt | null>(null);
@@ -1036,8 +1123,23 @@ export function EditorPage() {
   );
   const [continuationPreference, setContinuationPreference] =
     useState<EditorContinuationPreference>(DEFAULT_EDITOR_CONTINUATION_PREFERENCE);
+  const [advancedTargetDraft, setAdvancedTargetDraft] = useState("");
+  const [advancedTargetError, setAdvancedTargetError] = useState<string | null>(null);
   const [selectionRequestId, setSelectionRequestId] = useState(0);
   const [selectionLength, setSelectionLength] = useState(0);
+  const [liveSelection, setLiveSelection] = useState<EditorSelection>({ start: 0, end: 0 });
+  const [writingSessionId, setWritingSessionId] = useState<string | null>(null);
+  const writingDraftAuthorityRef = useRef("");
+  const [novelSkillDrawerOpen, setNovelSkillDrawerOpen] = useState(false);
+  const [novelSkillProjectState, setNovelSkillProjectState] =
+    useState<NovelSkillProjectState | null>(null);
+  const [novelSkillSummaryLoading, setNovelSkillSummaryLoading] = useState(false);
+  const [writingDraftPersistenceError, setWritingDraftPersistenceError] = useState<
+    "read" | "write" | null
+  >(null);
+  const [legacyProjectWritingRequirement, setLegacyProjectWritingRequirement] = useState<
+    string | null
+  >(null);
   const [chapterListOpen, setChapterListOpen] = useState(true);
   const [chapterDrawerState, setChapterDrawerState] = useState(() => ({
     open: false,
@@ -1084,7 +1186,9 @@ export function EditorPage() {
   const editorWorkspaceRef = useRef<HTMLDivElement | null>(null);
   const assistantPanelRef = useRef<HTMLElement | null>(null);
   const assistantResizeDragRef = useRef<EditorAssistantResizeDrag | null>(null);
-  const selectionRewriteInstructionRef = useRef<HTMLTextAreaElement | null>(null);
+  const writingRequirementRef = useRef<HTMLTextAreaElement | null>(null);
+  const writingRequirementValueRef = useRef(writingRequirement);
+  writingRequirementValueRef.current = writingRequirement;
   const findInputRef = useRef<HTMLInputElement | null>(null);
   const historyRef = useRef<EditorHistory>(createEmptyEditorHistory());
   const compositionBaseRef = useRef<{
@@ -1113,6 +1217,13 @@ export function EditorPage() {
   const candidateGenerationFlightRef = useRef<
     "idle" | "preparing" | "awaiting_decision" | "executing" | "deferring"
   >("idle");
+  const activeWritingTaskRef = useRef<EditorWritingTask>(activeWritingTask);
+  activeWritingTaskRef.current = activeWritingTask;
+  const writingSessionIdRef = useRef<string | null>(writingSessionId);
+  writingSessionIdRef.current = writingSessionId;
+  const generationWritingDraftsRef = useRef(new Map<string, EditorWritingTaskDraftSnapshot>());
+  const selectionWritingDraftIdentityRef = useRef<EditorWritingTaskDraftSnapshot | null>(null);
+  const currentWritingDraftSnapshotRef = useRef<EditorWritingTaskDraftSnapshot | null>(null);
   const activeGenerationPlanRef = useRef<PreparedGenerationPlan | null>(null);
   const activeGenerationNavigationRef = useRef<{
     readonly id: string;
@@ -1542,6 +1653,7 @@ export function EditorPage() {
       selectionRef.current = selection;
       cursorRef.current = selection.start;
       setSelectionLength(Math.max(0, selection.end - selection.start));
+      setLiveSelection(selection);
       setSelectionRewriteDisclosure(null);
       pendingSelectionRef.current = Object.freeze({ selection, focus, scrollTop });
       setSelectionRequestId((current) => current + 1);
@@ -1629,7 +1741,15 @@ export function EditorPage() {
     authorityWriteBlockedRef.current = false;
     setError(null);
     setProjectDisplayIdentity(null);
-    setContinuationPreference(loadEditorContinuationPreference(window.localStorage, projectId));
+    const restoredContinuationPreference = loadEditorContinuationPreference(
+      window.localStorage,
+      projectId,
+    );
+    setContinuationPreference(restoredContinuationPreference);
+    setAdvancedTargetDraft(
+      restoredContinuationPreference.customTargetVisibleCharacters?.toString() ?? "",
+    );
+    setAdvancedTargetError(null);
     setPageState("loading");
     setRecoveryDecisionOpen(false);
     setRecoveryDraft(null);
@@ -1863,7 +1983,6 @@ export function EditorPage() {
     directionCandidateRef.current = directionSelection.candidate;
     setDirectionOptions(directionSelection.options);
     setDirectionError(null);
-    setCustomDirection("");
     const candidatesToReject = [...directionSelection.candidatesToReject];
     if (
       previousDirectionCandidate !== null &&
@@ -2141,6 +2260,27 @@ export function EditorPage() {
     };
   }, [clearScheduledPersistence, load]);
 
+  const loadNovelSkillSummary = useCallback(async (): Promise<void> => {
+    if (pageState !== "ready" || projectId === null) {
+      setNovelSkillProjectState(null);
+      return;
+    }
+    const expectedRouteKey = editorRouteKey;
+    setNovelSkillSummaryLoading(true);
+    try {
+      const next = await runtime.novelSkills.listProjectState(projectId);
+      if (routeIdentityRef.current === expectedRouteKey) setNovelSkillProjectState(next);
+    } catch {
+      if (routeIdentityRef.current === expectedRouteKey) setNovelSkillProjectState(null);
+    } finally {
+      if (routeIdentityRef.current === expectedRouteKey) setNovelSkillSummaryLoading(false);
+    }
+  }, [editorRouteKey, pageState, projectId, runtime.novelSkills]);
+
+  useEffect(() => {
+    void Promise.resolve().then(loadNovelSkillSummary);
+  }, [loadNovelSkillSummary]);
+
   useEffect(() => {
     if (pageState !== "ready" || projectId === null || chapter === null) return undefined;
     const storyProjectId = parseStoryUuidV7(projectId);
@@ -2172,7 +2312,6 @@ export function EditorPage() {
     directionCandidateRef.current = null;
     setDirectionOptions([]);
     setDirectionError(null);
-    setCustomDirection("");
     void rejectDirectionCandidateSafely(currentDirectionCandidate);
   }, [
     chapter?.currentVersionId,
@@ -2211,6 +2350,148 @@ export function EditorPage() {
     }
     pendingSelectionRef.current = null;
   }, [pageState, selectionRequestId]);
+
+  useLayoutEffect(() => {
+    if (pageState !== "ready" || projectId === null || chapterId === null || chapter === null) {
+      return;
+    }
+    const authorityKey = `${projectId}:${chapterId}:${chapter.currentVersionId}`;
+    if (writingDraftAuthorityRef.current === authorityKey) return;
+    writingDraftAuthorityRef.current = authorityKey;
+    const sessionId = loadOrCreateEditorWritingSessionId(
+      window.localStorage,
+      { projectId, chapterId, versionId: chapter.currentVersionId },
+      () => runtime.ids.next(),
+    );
+    writingSessionIdRef.current = sessionId;
+    activeWritingTaskRef.current = "continuation";
+    if (sessionId === null) {
+      writingRequirementValueRef.current = "";
+      void Promise.resolve().then(() => {
+        if (writingDraftAuthorityRef.current !== authorityKey) return;
+        setWritingSessionId(null);
+        if (
+          activeWritingTaskRef.current === "continuation" &&
+          writingRequirementValueRef.current.length === 0
+        ) {
+          setActiveWritingTask("continuation");
+          setWritingRequirement("");
+          setLegacyProjectWritingRequirement(null);
+          setWritingDraftPersistenceError("read");
+        }
+      });
+      return;
+    }
+    const identity = {
+      projectId,
+      chapterId,
+      versionId: chapter.currentVersionId,
+      sessionId,
+      task: "continuation" as const,
+      selection: null,
+    };
+    const restored = loadEditorWritingTaskDraft(window.localStorage, identity);
+    const legacyRequirement =
+      loadEditorContinuationPreference(window.localStorage, projectId)
+        .customDestinationInstruction ?? "";
+    writingRequirementValueRef.current = restored.value;
+    const nextLegacyRequirement =
+      restored.ok && restored.value.length === 0 && legacyRequirement.trim().length > 0
+        ? legacyRequirement
+        : null;
+    void Promise.resolve().then(() => {
+      if (writingDraftAuthorityRef.current !== authorityKey) return;
+      setWritingSessionId(sessionId);
+      if (
+        activeWritingTaskRef.current === "continuation" &&
+        writingRequirementValueRef.current === restored.value
+      ) {
+        setActiveWritingTask("continuation");
+        setWritingRequirement(restored.value);
+        setLegacyProjectWritingRequirement(nextLegacyRequirement);
+        setWritingDraftPersistenceError(restored.ok ? null : "read");
+      }
+    });
+  }, [chapter, chapterId, pageState, projectId, runtime.ids]);
+
+  useLayoutEffect(() => {
+    if (
+      pageState !== "ready" ||
+      projectId === null ||
+      chapterId === null ||
+      chapter === null ||
+      writingSessionId === null ||
+      activeWritingTask === "continuation"
+    ) {
+      return;
+    }
+    const normalizedSelection = normalizeEditorSelection(liveSelection, content.length);
+    if (
+      normalizedSelection.start === normalizedSelection.end ||
+      content.slice(normalizedSelection.start, normalizedSelection.end).trim().length === 0
+    ) {
+      activeWritingTaskRef.current = "continuation";
+      const restored = loadEditorWritingTaskDraft(window.localStorage, {
+        projectId,
+        chapterId,
+        versionId: chapter.currentVersionId,
+        sessionId: writingSessionId,
+        task: "continuation",
+        selection: null,
+      });
+      writingRequirementValueRef.current = restored.value;
+      let active = true;
+      void Promise.resolve().then(() => {
+        if (
+          !active ||
+          activeWritingTaskRef.current !== "continuation" ||
+          writingRequirementValueRef.current !== restored.value
+        ) {
+          return;
+        }
+        setActiveWritingTask("continuation");
+        setWritingRequirement(restored.value);
+        setWritingDraftPersistenceError(restored.ok ? null : "read");
+      });
+      return () => {
+        active = false;
+      };
+    }
+    const restored = loadEditorWritingTaskDraft(window.localStorage, {
+      projectId,
+      chapterId,
+      versionId: chapter.currentVersionId,
+      sessionId: writingSessionId,
+      task: activeWritingTask,
+      selection: normalizedSelection,
+    });
+    writingRequirementValueRef.current = restored.value;
+    const expectedWritingTask = activeWritingTask;
+    let active = true;
+    void Promise.resolve().then(() => {
+      if (
+        !active ||
+        activeWritingTaskRef.current !== expectedWritingTask ||
+        writingRequirementValueRef.current !== restored.value
+      ) {
+        return;
+      }
+      setWritingRequirement(restored.value);
+      setWritingDraftPersistenceError(restored.ok ? null : "read");
+    });
+    return () => {
+      active = false;
+    };
+  }, [
+    activeWritingTask,
+    chapter,
+    chapterId,
+    content,
+    liveSelection,
+    pageState,
+    projectId,
+    writingSessionId,
+  ]);
 
   useEffect(() => {
     if (!returnedFromAiSettings || pageState !== "ready") {
@@ -3152,6 +3433,7 @@ export function EditorPage() {
     selectionRef.current = selection;
     cursorRef.current = selection.start;
     setSelectionLength(Math.max(0, selection.end - selection.start));
+    setLiveSelection(selection);
     setSelectionRewriteDisclosure(null);
     setContent(nextContent);
     setRecovered(false);
@@ -3389,6 +3671,7 @@ export function EditorPage() {
     selectionRef.current = selectionAfter;
     cursorRef.current = selectionAfter.start;
     setSelectionLength(Math.max(0, selectionAfter.end - selectionAfter.start));
+    setLiveSelection(selectionAfter);
     setSelectionRewriteDisclosure(null);
     setContent(finalContent);
     setRecovered(false);
@@ -3483,9 +3766,218 @@ export function EditorPage() {
 
   function updateContinuationPreference(next: EditorContinuationPreference): void {
     setContinuationPreference(next);
+    setAdvancedTargetDraft(next.customTargetVisibleCharacters?.toString() ?? "");
+    setAdvancedTargetError(null);
     if (projectId !== null) {
       saveEditorContinuationPreference(window.localStorage, projectId, next);
     }
+  }
+
+  function writingTaskDraftIdentity(
+    task: EditorWritingTask,
+  ): EditorWritingTaskDraftIdentity | null {
+    const stableChapter = chapterRef.current;
+    const currentRoute = currentWritingRouteRef.current;
+    const currentSessionId = writingSessionIdRef.current;
+    if (
+      currentRoute.projectId === null ||
+      currentRoute.chapterId === null ||
+      stableChapter === null ||
+      currentSessionId === null ||
+      stableChapter.projectId !== currentRoute.projectId ||
+      stableChapter.id !== currentRoute.chapterId
+    ) {
+      return null;
+    }
+    if (task === "continuation") {
+      return Object.freeze({
+        projectId: currentRoute.projectId,
+        chapterId: currentRoute.chapterId,
+        versionId: stableChapter.currentVersionId,
+        sessionId: currentSessionId,
+        task,
+        selection: null,
+      });
+    }
+    const selection = normalizeEditorSelection(selectionRef.current, stableChapter.content.length);
+    if (
+      selection.start === selection.end ||
+      stableChapter.content.slice(selection.start, selection.end).trim().length === 0
+    ) {
+      return null;
+    }
+    return Object.freeze({
+      projectId: currentRoute.projectId,
+      chapterId: currentRoute.chapterId,
+      versionId: stableChapter.currentVersionId,
+      sessionId: currentSessionId,
+      task,
+      selection,
+    });
+  }
+
+  function currentWritingTaskDraftIdentity(): EditorWritingTaskDraftIdentity | null {
+    return writingTaskDraftIdentity(activeWritingTaskRef.current);
+  }
+
+  function writingTaskDraftSnapshot(
+    task: EditorWritingTask,
+    requirement: string,
+  ): EditorWritingTaskDraftSnapshot | null {
+    const identity = writingTaskDraftIdentity(task);
+    return identity === null ? null : Object.freeze({ identity, requirement });
+  }
+
+  function settleWritingTaskDraft(
+    snapshot: EditorWritingTaskDraftSnapshot | null,
+    outcome: EditorWritingTaskDraftOutcome,
+  ): void {
+    if (snapshot === null) return;
+    const settled = settleEditorWritingTaskDraft(
+      window.localStorage,
+      snapshot.identity,
+      outcome,
+      snapshot.requirement,
+    );
+    if (!settled) {
+      setWritingDraftPersistenceError("write");
+      return;
+    }
+    const currentRoute = currentWritingRouteRef.current;
+    const stableChapter = chapterRef.current;
+    const currentSelection =
+      snapshot.identity.selection === null || stableChapter === null
+        ? null
+        : normalizeEditorSelection(selectionRef.current, stableChapter.content.length);
+    const currentSnapshot = currentWritingDraftSnapshotRef.current;
+    const snapshotStillCurrent =
+      currentSnapshot !== null &&
+      sameEditorWritingTaskDraftIdentity(currentSnapshot.identity, snapshot.identity) &&
+      currentSnapshot.requirement === snapshot.requirement &&
+      currentRoute.projectId === snapshot.identity.projectId &&
+      currentRoute.chapterId === snapshot.identity.chapterId &&
+      stableChapter?.currentVersionId === snapshot.identity.versionId &&
+      writingSessionIdRef.current === snapshot.identity.sessionId &&
+      activeWritingTaskRef.current === snapshot.identity.task &&
+      (snapshot.identity.selection === null ||
+        (currentSelection !== null &&
+          currentSelection.start === snapshot.identity.selection.start &&
+          currentSelection.end === snapshot.identity.selection.end));
+    if (
+      outcome === "in_progress" ||
+      outcome === "failed_final" ||
+      outcome === "recoverable_failure" ||
+      outcome === "result_needs_review" ||
+      (!sameEditorWritingTaskDraftIdentity(currentWritingTaskDraftIdentity(), snapshot.identity) &&
+        !snapshotStillCurrent) ||
+      writingRequirementValueRef.current !== snapshot.requirement
+    ) {
+      return;
+    }
+    writingRequirementValueRef.current = "";
+    currentWritingDraftSnapshotRef.current = Object.freeze({
+      identity: snapshot.identity,
+      requirement: "",
+    });
+    setWritingRequirement("");
+    setWritingDraftPersistenceError(null);
+  }
+
+  async function generationFailureDraftOutcome(
+    plan: PreparedGenerationPlan,
+    receivedVisibleText: string,
+  ): Promise<EditorWritingTaskDraftOutcome> {
+    if (receivedVisibleText.trim().length > 0) return "recoverable_failure";
+    try {
+      const run = await runtime.generationGovernance.findRunById(plan.runId);
+      if (run === null) return "failed_final";
+      if (run.state === "completed") return "generation_succeeded";
+      if (run.state === "failed_final" || run.state === "cancelled") return "failed_final";
+      return "result_needs_review";
+    } catch {
+      return "result_needs_review";
+    }
+  }
+
+  function selectionFailureDraftOutcome(
+    cause: unknown,
+    receivedVisibleText: string,
+  ): EditorWritingTaskDraftOutcome {
+    if (receivedVisibleText.trim().length > 0) return "recoverable_failure";
+    if (cause instanceof AggregateError) return "result_needs_review";
+    if (
+      typeof cause === "object" &&
+      cause !== null &&
+      "code" in cause &&
+      cause.code === "PROVIDER_RESULT_AMBIGUOUS"
+    ) {
+      return "result_needs_review";
+    }
+    return "failed_final";
+  }
+
+  function requirementForWritingTask(task: EditorWritingTask): string {
+    const identity = writingTaskDraftIdentity(task);
+    if (identity === null) return "";
+    if (activeWritingTaskRef.current === task) return writingRequirementValueRef.current;
+    const restored = loadEditorWritingTaskDraft(window.localStorage, identity);
+    if (!restored.ok) setWritingDraftPersistenceError("read");
+    return restored.value;
+  }
+
+  function activateWritingTask(task: EditorWritingTask): void {
+    const identity = writingTaskDraftIdentity(task);
+    if (identity === null) return;
+    const restored = loadEditorWritingTaskDraft(window.localStorage, identity);
+    currentWritingDraftSnapshotRef.current = Object.freeze({
+      identity,
+      requirement: restored.value,
+    });
+    activeWritingTaskRef.current = task;
+    setActiveWritingTask(task);
+    writingRequirementValueRef.current = restored.value;
+    setWritingRequirement(restored.value);
+    setWritingDraftPersistenceError(restored.ok ? null : "read");
+    setSelectionRewriteDisclosure(null);
+    window.requestAnimationFrame(() =>
+      writingRequirementRef.current?.focus({ preventScroll: true }),
+    );
+  }
+
+  function updateWritingRequirement(value: string): void {
+    writingRequirementValueRef.current = value;
+    setWritingRequirement(value);
+    setSelectionRewriteDisclosure(null);
+    setPreparedDirections(null);
+    const identity = writingTaskDraftIdentity(activeWritingTaskRef.current);
+    if (identity === null) return;
+    currentWritingDraftSnapshotRef.current = Object.freeze({ identity, requirement: value });
+    const saved = saveEditorWritingTaskDraft(window.localStorage, identity, value);
+    setWritingDraftPersistenceError(saved ? null : "write");
+  }
+
+  function restoreLegacyWritingRequirementForCurrentChapter(): void {
+    if (legacyProjectWritingRequirement === null) return;
+    const identity = writingTaskDraftIdentity("continuation");
+    if (identity === null) {
+      setWritingDraftPersistenceError("write");
+      return;
+    }
+    activeWritingTaskRef.current = "continuation";
+    setActiveWritingTask("continuation");
+    writingRequirementValueRef.current = legacyProjectWritingRequirement;
+    setWritingRequirement(legacyProjectWritingRequirement);
+    setSelectionRewriteDisclosure(null);
+    const saved = saveEditorWritingTaskDraft(
+      window.localStorage,
+      identity,
+      legacyProjectWritingRequirement,
+    );
+    setWritingDraftPersistenceError(saved ? null : "write");
+    if (saved) setLegacyProjectWritingRequirement(null);
+    window.requestAnimationFrame(() =>
+      writingRequirementRef.current?.focus({ preventScroll: true }),
+    );
   }
 
   async function generateCandidate(
@@ -3493,6 +3985,14 @@ export function EditorPage() {
     directDirection: string | null = null,
   ): Promise<void> {
     if (blockNewGenerationWhileFragmentNeedsDecision()) return;
+    if (
+      continuationPreference.customTargetVisibleCharacters !== null &&
+      advancedTargetDraft !== continuationPreference.customTargetVisibleCharacters.toString()
+    ) {
+      setAdvancedTargetError("请输入 200–12,000 之间的整数；当前输入尚未保存。");
+      setEditorNotice("请先修正高级篇幅中的目标字数，再开始创作。");
+      return;
+    }
     if (
       authorityWriteBlockedRef.current ||
       candidateGenerationFlightRef.current !== "idle" ||
@@ -3504,17 +4004,29 @@ export function EditorPage() {
     }
     candidateGenerationFlightRef.current = "preparing";
     const directAtStart = directMode;
+    const savedContinuationRequirement = requirementForWritingTask("continuation");
+    const writingDraftAtStart = writingTaskDraftSnapshot(
+      "continuation",
+      savedContinuationRequirement,
+    );
+    const savedDirectRequirement = directAtStart ? savedContinuationRequirement : "";
+    const directRequirement =
+      directDirection === null
+        ? savedDirectRequirement
+        : savedDirectRequirement.trim().length === 0
+          ? directDirection
+          : `${directDirection}\n作者补充要求：${savedDirectRequirement}`;
     const normalizedDirectDirection =
-      directDirection === null || directDirection.trim().length === 0
-        ? null
-        : directDirection.normalize("NFC").trim();
-    const normalizedCustomDestinationInstruction =
-      continuationPreference.customDestinationInstruction?.normalize("NFC").trim() ?? "";
+      directRequirement.trim().length === 0 ? null : directRequirement.normalize("NFC").trim();
+    const normalizedCustomDestinationInstruction = savedContinuationRequirement
+      .normalize("NFC")
+      .trim();
     const professionalDestination =
-      continuationPreference.destination === "custom_instruction" &&
-      normalizedCustomDestinationInstruction.length === 0
-        ? "complete_scene"
-        : continuationPreference.destination;
+      normalizedCustomDestinationInstruction.length > 0
+        ? "custom_instruction"
+        : continuationPreference.profile === "short"
+          ? "next_segment"
+          : "complete_scene";
     const operation = beginGenerationOperation();
     setLastGenerationAction(
       (chapterRef.current?.content.trim().length ?? 0) === 0 ? "opening" : "continuation",
@@ -3529,6 +4041,7 @@ export function EditorPage() {
     setGenerationError(null);
     setGenerationReceipt(null);
     setGenerationAttemptUsage([]);
+    let preparedDraftRequestId: string | null = null;
     try {
       const plan = await prepareGenerationPlan(runtime, chapterId, {
         chapterSaved: editorClean,
@@ -3536,10 +4049,8 @@ export function EditorPage() {
         cursorUtf16: directAtStart
           ? contentRef.current.length
           : normalizeEditorSelection(selectionRef.current, contentRef.current.length).start,
-        outputProfile: directAtStart ? "standard" : continuationPreference.profile,
-        customTargetVisibleCharacters: directAtStart
-          ? null
-          : continuationPreference.customTargetVisibleCharacters,
+        outputProfile: continuationPreference.profile,
+        customTargetVisibleCharacters: continuationPreference.customTargetVisibleCharacters,
         destination: directAtStart
           ? normalizedDirectDirection === null
             ? "complete_scene"
@@ -3547,12 +4058,11 @@ export function EditorPage() {
           : professionalDestination,
         customDestinationInstruction: directAtStart
           ? normalizedDirectDirection
-          : professionalDestination === "custom_instruction"
+          : normalizedCustomDestinationInstruction.length > 0
             ? normalizedCustomDestinationInstruction
             : null,
-        contextBudgetProfile: directAtStart
-          ? "standard"
-          : continuationPreference.profile === "long"
+        contextBudgetProfile:
+          continuationPreference.profile === "long"
             ? "long"
             : continuationPreference.profile === "short"
               ? "economy"
@@ -3561,6 +4071,10 @@ export function EditorPage() {
       });
       if (!isCurrentGenerationOperation(operation)) return;
       setGenerationPlan(plan);
+      if (writingDraftAtStart !== null) {
+        generationWritingDraftsRef.current.set(plan.requestId, writingDraftAtStart);
+        preparedDraftRequestId = plan.requestId;
+      }
       if (directAtStart) directGenerationRequestIdsRef.current.add(plan.requestId);
       const continuationActionDisclosure = await prepareContinuationGenerationDisclosure(
         runtime,
@@ -3589,7 +4103,13 @@ export function EditorPage() {
         setPreflightOpen(true);
       }
     } catch (cause: unknown) {
-      if (isCurrentGenerationOperation(operation)) setGenerationError(cause);
+      if (isCurrentGenerationOperation(operation)) {
+        setGenerationError(cause);
+        settleWritingTaskDraft(writingDraftAtStart, "failed_final");
+        if (preparedDraftRequestId !== null) {
+          generationWritingDraftsRef.current.delete(preparedDraftRequestId);
+        }
+      }
     } finally {
       if (isCurrentGenerationOperation(operation)) setCandidateBusy(false);
       if (
@@ -3666,6 +4186,9 @@ export function EditorPage() {
     }
 
     const operation = beginGenerationOperation();
+    const normalizedRequirement = requirementForWritingTask("continuation")
+      .normalize("NFKC")
+      .trim();
     setDirectionBusy(true);
     setCandidateBusy(true);
     setDirectionError(null);
@@ -3676,6 +4199,14 @@ export function EditorPage() {
         networkAvailable: online,
         cursorUtf16: stableChapter.content.length,
         purpose: "continuation_directions",
+        customDestinationInstruction:
+          normalizedRequirement.length === 0 ? null : normalizedRequirement,
+        contextBudgetProfile:
+          continuationPreference.profile === "long"
+            ? "long"
+            : continuationPreference.profile === "short"
+              ? "economy"
+              : "standard",
       });
       if (!isCurrentGenerationOperation(operation)) return;
       if (!plan.preflight.canStart) {
@@ -3706,6 +4237,7 @@ export function EditorPage() {
           plan,
           disclosure,
           authorityRevision: currentAuthority.revision,
+          requirement: normalizedRequirement.length === 0 ? null : normalizedRequirement,
         }),
       );
       setEditorNotice("方向生成信息已准备好；明确确认前不会调用 AI。");
@@ -3931,11 +4463,19 @@ export function EditorPage() {
     if (authorityAtStart === null) return;
     const operation = beginGenerationOperation();
     const directAtStart = authorityAtStart.mode === "direct";
-    const rewriteInstruction = instructionOverride ?? selectionRewriteInstruction;
     const selectionAction: EditorGenerationAction =
       directAction === "polish" || directAction === "expand" || directAction === "shorten"
         ? directAction
         : "selection_rewrite";
+    const selectedRequirementDraft = requirementForWritingTask(selectionAction);
+    const writingDraftAtStart = writingTaskDraftSnapshot(selectionAction, selectedRequirementDraft);
+    selectionWritingDraftIdentityRef.current = writingDraftAtStart;
+    const selectedRequirement = selectedRequirementDraft.normalize("NFC").trim();
+    const rewriteInstruction =
+      instructionOverride ??
+      (selectedRequirement.length > 0
+        ? selectedRequirement
+        : selectionWritingActionDefinition(selectionAction).instruction);
 
     setLastGenerationAction(selectionAction);
     setLastSelectionRewriteInstruction(rewriteInstruction);
@@ -3955,6 +4495,7 @@ export function EditorPage() {
     let selectionSettlementCause: unknown = null;
     let selectionSession: GenerationNavigationSession | null = null;
     let retainUnsafeSelectionPreview = false;
+    let writingDraftOutcome: EditorWritingTaskDraftOutcome = "in_progress";
     const releaseUnsafeSelectionFragment = (): void => {
       if (
         selectionSession !== null &&
@@ -4003,6 +4544,7 @@ export function EditorPage() {
         authorityBeforeDispatch.mode !== authorityAtStart.mode ||
         authorityBeforeDispatch.revision !== authorityAtStart.revision
       ) {
+        writingDraftOutcome = "failed_final";
         setSelectionRewriteDisclosure(null);
         setEditorNotice("写作方式已经变化；本次没有调用 AI，请重新查看发送前说明。");
         return;
@@ -4062,6 +4604,7 @@ export function EditorPage() {
         },
       });
       candidatePersisted = true;
+      writingDraftOutcome = "generation_succeeded";
       if (!isCurrentGenerationOperation(operation)) return;
       setSelectionRewriteDisclosure(null);
       const previousCandidate = candidate;
@@ -4084,6 +4627,7 @@ export function EditorPage() {
     } catch (cause: unknown) {
       selectionSettlementCause = cause;
       if (isCurrentGenerationOperation(operation)) {
+        writingDraftOutcome = selectionFailureDraftOutcome(cause, receivedVisibleText);
         setSelectionRewriteDisclosure(null);
         setGenerationError(selectionRewriteUiError(cause));
       }
@@ -4108,6 +4652,23 @@ export function EditorPage() {
         setSelectionRewriteBusy(false);
         setCandidateBusy(false);
         if (!retainUnsafeSelectionPreview) setGenerationPreview("");
+      }
+      settleWritingTaskDraft(writingDraftAtStart, writingDraftOutcome);
+      if (
+        writingDraftOutcome === "generation_succeeded" ||
+        writingDraftOutcome === "failed_final" ||
+        writingDraftOutcome === "cancelled_before_dispatch"
+      ) {
+        const currentSelectionDraft = selectionWritingDraftIdentityRef.current;
+        if (
+          currentSelectionDraft !== null &&
+          sameEditorWritingTaskDraftIdentity(
+            currentSelectionDraft.identity,
+            writingDraftAtStart?.identity ?? null,
+          )
+        ) {
+          selectionWritingDraftIdentityRef.current = null;
+        }
       }
     }
   }
@@ -4189,6 +4750,7 @@ export function EditorPage() {
     }
     const operation = beginGenerationOperation();
     const plan = generationPlan;
+    const writingDraftAtStart = generationWritingDraftsRef.current.get(plan.requestId) ?? null;
     const directPlan = directGenerationRequestIdsRef.current.has(plan.requestId);
     setBudgetSaving(true);
     setError(null);
@@ -4232,7 +4794,7 @@ export function EditorPage() {
         cursorUtf16: plan.applicationCursorUtf16,
         outputProfile: plan.outputContract.profile,
         customTargetVisibleCharacters:
-          plan.outputContract.profile === "custom"
+          plan.outputContract.advancedTargetVisibleCharacters !== null
             ? plan.outputContract.targetVisibleCharacters
             : null,
         destination: plan.outputContract.destination,
@@ -4246,6 +4808,10 @@ export function EditorPage() {
       });
       if (!isCurrentGenerationOperation(operation)) return;
       setGenerationPlan(refreshed);
+      generationWritingDraftsRef.current.delete(plan.requestId);
+      if (writingDraftAtStart !== null) {
+        generationWritingDraftsRef.current.set(refreshed.requestId, writingDraftAtStart);
+      }
       if (directPlan) {
         directGenerationRequestIdsRef.current.delete(plan.requestId);
         directGenerationRequestIdsRef.current.add(refreshed.requestId);
@@ -4279,6 +4845,7 @@ export function EditorPage() {
     ) {
       return;
     }
+    const writingDraftAtStart = generationWritingDraftsRef.current.get(plan.requestId) ?? null;
     setPreflightOpen(false);
     setCandidateBusy(true);
     setGenerationStage("generating");
@@ -4288,6 +4855,7 @@ export function EditorPage() {
     const settlement = registerPlanGenerationNavigationGuard(plan);
     let settlementCause: unknown = null;
     let receivedVisibleText = "";
+    let writingDraftOutcome: EditorWritingTaskDraftOutcome = "in_progress";
     try {
       const directExecution = directGenerationRequestIdsRef.current.has(plan.requestId);
       const generationAction: EditorGenerationAction =
@@ -4311,6 +4879,11 @@ export function EditorPage() {
         },
         { generationRetryLimit: 0 },
       );
+      writingDraftOutcome = result.ok
+        ? result.value.candidate === null
+          ? "failed_final"
+          : "generation_succeeded"
+        : await generationFailureDraftOutcome(plan, receivedVisibleText);
       if (!isCurrentGenerationOperation(operation)) return;
       setGenerationStage("finalizing");
       if (plan.deferredRequest !== null) {
@@ -4361,6 +4934,9 @@ export function EditorPage() {
       });
     } catch (cause: unknown) {
       settlementCause = cause;
+      if (writingDraftOutcome === "in_progress") {
+        writingDraftOutcome = await generationFailureDraftOutcome(plan, receivedVisibleText);
+      }
       if (isCurrentGenerationOperation(operation)) setGenerationError(cause);
     } finally {
       const navigationCause = await reconcileGenerationNavigationSafety(
@@ -4387,6 +4963,14 @@ export function EditorPage() {
         activeGenerationNavigationRef.current = null;
       }
       settlement.settle(navigationCause);
+      settleWritingTaskDraft(writingDraftAtStart, writingDraftOutcome);
+      if (
+        writingDraftOutcome === "generation_succeeded" ||
+        writingDraftOutcome === "failed_final" ||
+        writingDraftOutcome === "cancelled_before_dispatch"
+      ) {
+        generationWritingDraftsRef.current.delete(plan.requestId);
+      }
     }
   }
 
@@ -4447,7 +5031,12 @@ export function EditorPage() {
   }
 
   function cancelPreflightAndFocusEditor(): void {
+    const plan = generationPlan;
+    const writingDraftAtStart =
+      plan === null ? null : (generationWritingDraftsRef.current.get(plan.requestId) ?? null);
     if (closePreflightAndFocusEditor()) {
+      settleWritingTaskDraft(writingDraftAtStart, "cancelled_before_dispatch");
+      if (plan !== null) generationWritingDraftsRef.current.delete(plan.requestId);
       recordCancelledProviderAction();
     }
   }
@@ -4679,7 +5268,10 @@ export function EditorPage() {
   }
 
   function cancelSelectionRewriteDisclosure(): void {
+    const writingDraftAtStart = selectionWritingDraftIdentityRef.current;
     setSelectionRewriteDisclosure(null);
+    settleWritingTaskDraft(writingDraftAtStart, "cancelled_before_dispatch");
+    selectionWritingDraftIdentityRef.current = null;
     recordCancelledProviderAction();
     window.requestAnimationFrame(() =>
       primaryEditorActionRef.current?.focus({ preventScroll: true }),
@@ -5441,6 +6033,9 @@ export function EditorPage() {
       candidate.status === "accepted" ||
       candidate.status === "rejected" ||
       candidate.status === "expired");
+  const continuationTargetDraftValid =
+    continuationPreference.customTargetVisibleCharacters === null ||
+    advancedTargetDraft === continuationPreference.customTargetVisibleCharacters.toString();
   const usesNativeModel = runtime.mode === "tauri";
   const recoveryDraftSnapshot = recoveryDraft?.toSnapshot() ?? null;
   const candidateSelectedDecisions =
@@ -5559,21 +6154,9 @@ export function EditorPage() {
         },
       };
     }
-    if (usesNativeModel && selectionLength > 0 && canGenerateCandidate) {
-      return {
-        label: "修改选中内容",
-        disabled: candidateBusy,
-        run: () => {
-          setAssistantOpen(true);
-          window.requestAnimationFrame(() => {
-            selectionRewriteInstructionRef.current?.focus({ preventScroll: true });
-          });
-        },
-      };
-    }
     return {
       label: savedGenerationActionLabel,
-      disabled: candidateBusy || !canGenerateCandidate,
+      disabled: candidateBusy || !canGenerateCandidate || !continuationTargetDraftValid,
       run: () => {
         setAssistantOpen(true);
         void generateCandidate();
@@ -5581,40 +6164,18 @@ export function EditorPage() {
     };
   })();
 
-  const selectionWritingActions = [
-    {
-      action: "selection_rewrite" as const,
-      label: "改写",
-      instruction: "保留事实、原意和叙事视角，重写选中内容，使表达更清晰自然。",
-    },
-    {
-      action: "polish" as const,
-      label: "润色",
-      instruction: "保持原意、事实和语气，润色选中内容，使文字更自然流畅。",
-    },
-    {
-      action: "expand" as const,
-      label: "扩写",
-      instruction: "保持既有事实与叙事视角，扩写选中内容的动作、感受和环境细节。",
-    },
-    {
-      action: "shorten" as const,
-      label: "缩写",
-      instruction:
-        "在不改变事实、原意和叙事视角的前提下，缩写选中内容，删除重复和次要表达，保留关键情节与语气。",
-    },
-  ];
+  const normalizedLiveSelection = normalizeEditorSelection(liveSelection, content.length);
+  const hasValidSelection =
+    normalizedLiveSelection.start !== normalizedLiveSelection.end &&
+    content.slice(normalizedLiveSelection.start, normalizedLiveSelection.end).trim().length > 0;
   const selectionExceedsLimit = selectionLength > MAXIMUM_SELECTION_REWRITE_CHARACTERS;
   const selectionWritingControls =
-    usesNativeModel && canGenerateCandidate ? (
+    usesNativeModel && canGenerateCandidate && hasValidSelection ? (
       <section className="candidate-content" aria-label="选中文本写作操作">
         <div className="candidate-content__meta">
           <strong>修改选中内容</strong>
           <span>{selectionLength.toLocaleString("zh-CN")} 个字符</span>
         </div>
-        {selectionLength === 0 && (
-          <p role="status">先在正文中选中需要处理的文字，再选择改写、润色、扩写或缩写。</p>
-        )}
         {selectionExceedsLimit && (
           <InlineAlert
             tone="warning"
@@ -5638,20 +6199,28 @@ export function EditorPage() {
             {selectionWritingActions.map((action) => (
               <Button
                 key={action.action}
-                variant="secondary"
+                variant={activeWritingTask === action.action ? "primary" : "secondary"}
+                aria-pressed={activeWritingTask === action.action}
                 loading={selectionRewriteBusy && lastGenerationAction === action.action}
                 disabled={
                   !editorClean ||
                   candidateBusy ||
-                  selectionLength === 0 ||
                   selectionExceedsLimit ||
                   chapter?.isLocalOnly === true
                 }
-                onClick={() => void rewriteSelectedText(action.instruction, action.action)}
+                onClick={() => activateWritingTask(action.action)}
               >
                 {action.label}
               </Button>
             ))}
+            <Button
+              variant="ghost"
+              onClick={() =>
+                scheduleSelection({ start: cursorRef.current, end: cursorRef.current }, true)
+              }
+            >
+              取消选区
+            </Button>
           </div>
         ) : (
           <>
@@ -5659,14 +6228,28 @@ export function EditorPage() {
               tone="warning"
               title={"确认本次" + selectionRewriteActionLabel(lastGenerationAction)}
               onDismiss={cancelSelectionRewriteDisclosure}
-              description={`${chapter !== null ? `作品《${project.name}》 · 章节《${chapter.title}》；` : ""}模型：${selectionRewriteDisclosure.connectionDisplayName} · ${selectionRewriteDisclosure.modelId}；资料：当前选中文字和处理要求；预计发送 1 次；${formatSelectionRewriteCostSummary(selectionRewriteDisclosure)}；私密内容：不包含私密章节。`}
+              description={`任务：${selectionRewriteActionLabel(lastGenerationAction)}；本次要求：${formatRequirementConfirmationSummary(lastSelectionRewriteInstruction)}；模型：${selectionRewriteDisclosure.connectionDisplayName} · ${selectionRewriteDisclosure.modelId}；资料：当前选中文字和本次要求，${formatPrivateContentSummary(selectionRewriteDisclosure.dataDestination)}；预计发送 1 次、自动重试 0 次，${formatSelectionRewriteCostSummary(selectionRewriteDisclosure)}`}
             />
             <details className="candidate-panel__disclosure-details">
-              <summary>查看详细信息</summary>
+              <summary>查看详情</summary>
+              {chapter !== null && (
+                <p>
+                  作品《{project.name}》 · 章节《{chapter.title}》 · 当前稳定正文{" "}
+                  {chapter.content.length.toLocaleString("zh-CN")} 字。
+                </p>
+              )}
+              <p>
+                完整本次要求：
+                {lastSelectionRewriteInstruction.trim() || "未填写额外要求"}
+              </p>
               <p>{selectionRewriteDisclosure.privacy}</p>
               <p>发送内容：{selectionRewriteDisclosure.sends.join("；")}。</p>
               <p>本次最多向模型服务发送 1 次，自动重试 0 次。</p>
-              <p>{formatSelectionRewriteCost(selectionRewriteDisclosure)}</p>
+              <p>完整结果会先保持隔离，不会自动改写正文；只有你明确使用后才会创建新的正文版本。</p>
+              {selectionRewriteDisclosure.estimatedMaximumCostMicros !== null &&
+                selectionRewriteDisclosure.currency !== null && (
+                  <p>{formatSelectionRewriteCost(selectionRewriteDisclosure)}</p>
+                )}
             </details>
             <div className="candidate-actions">
               <Button
@@ -5676,14 +6259,14 @@ export function EditorPage() {
                   void rewriteSelectedText(lastSelectionRewriteInstruction, lastGenerationAction)
                 }
               >
-                确认并生成{selectionRewriteActionLabel(lastGenerationAction)}结果
+                确认生成
               </Button>
               <Button
                 variant="ghost"
                 disabled={selectionRewriteBusy}
                 onClick={cancelSelectionRewriteDisclosure}
               >
-                取消，不发送
+                取消
               </Button>
             </div>
           </>
@@ -5707,6 +6290,246 @@ export function EditorPage() {
         {directGenerationUndo.undoLabel}
       </Button>
     ) : null;
+  const activeSelectionWritingAction =
+    activeWritingTask === "continuation"
+      ? null
+      : selectionWritingActionDefinition(activeWritingTask);
+  const continuationLengthControls = (
+    <section className="candidate-content" aria-label="篇幅">
+      <FormField label="篇幅" required hint="选择本次推进的体量和自然收束位置；默认使用“中”。">
+        {(fieldProps) => (
+          <Select
+            {...fieldProps}
+            value={continuationPreference.profile}
+            options={[
+              { value: "short", label: "短 · 一小段推进" },
+              { value: "standard", label: "中 · 一个完整场景" },
+              { value: "long", label: "长 · 一场完整事件或情绪推进" },
+            ]}
+            disabled={candidateBusy}
+            onChange={(event) => {
+              const profile = event.currentTarget.value as ContinuationOutputProfileId;
+              updateContinuationPreference({
+                schemaVersion: 1,
+                profile,
+                customTargetVisibleCharacters: null,
+                destination: profile === "short" ? "next_segment" : "complete_scene",
+                customDestinationInstruction: null,
+              });
+            }}
+          />
+        )}
+      </FormField>
+      <details>
+        <summary>高级篇幅设置</summary>
+        <label className="checkbox-row">
+          <input
+            type="checkbox"
+            aria-label="使用目标字数"
+            checked={continuationPreference.customTargetVisibleCharacters !== null}
+            disabled={candidateBusy}
+            onChange={(event) =>
+              updateContinuationPreference({
+                ...continuationPreference,
+                customTargetVisibleCharacters: event.currentTarget.checked
+                  ? continuationProfileDefaultTarget(continuationPreference.profile)
+                  : null,
+              })
+            }
+          />
+          <span>使用目标字数</span>
+        </label>
+        {continuationPreference.customTargetVisibleCharacters !== null && (
+          <FormField
+            label="目标字数，允许约 ±20% 浮动"
+            hint="可填写 200–12,000 字；这是柔性目标，实际结果仍受自然收束和模型安全上限保护。"
+            error={advancedTargetError ?? undefined}
+          >
+            {(fieldProps) => (
+              <Input
+                {...fieldProps}
+                type="number"
+                min={MINIMUM_ADVANCED_TARGET_VISIBLE_CHARACTERS}
+                max={MAXIMUM_ADVANCED_TARGET_VISIBLE_CHARACTERS}
+                step={100}
+                value={advancedTargetDraft}
+                disabled={candidateBusy}
+                onChange={(event) => {
+                  const raw = event.currentTarget.value;
+                  setAdvancedTargetDraft(raw);
+                  const value = Number(raw);
+                  if (
+                    raw.trim().length === 0 ||
+                    !Number.isSafeInteger(value) ||
+                    value < MINIMUM_ADVANCED_TARGET_VISIBLE_CHARACTERS ||
+                    value > MAXIMUM_ADVANCED_TARGET_VISIBLE_CHARACTERS
+                  ) {
+                    setAdvancedTargetError("请输入 200–12,000 之间的整数；当前输入尚未保存。");
+                    return;
+                  }
+                  updateContinuationPreference({
+                    ...continuationPreference,
+                    customTargetVisibleCharacters: value,
+                  });
+                }}
+                onBlur={() => {
+                  if (
+                    advancedTargetDraft ===
+                    continuationPreference.customTargetVisibleCharacters?.toString()
+                  ) {
+                    return;
+                  }
+                  setAdvancedTargetDraft(
+                    continuationPreference.customTargetVisibleCharacters?.toString() ?? "",
+                  );
+                  setAdvancedTargetError("输入未保存，已恢复上次有效的目标字数。");
+                }}
+              />
+            )}
+          </FormField>
+        )}
+      </details>
+      {continuationPreference.profile === "long" && (
+        <p className="candidate-panel__hint" role="status">
+          长篇会在一场完整事件或情绪变化形成阶段性结果后收束，并可能需要更长等待时间或更高费用。
+        </p>
+      )}
+    </section>
+  );
+  const writingRequirementControls = (
+    <section className="candidate-content" aria-label="本次写作要求">
+      <div className="candidate-content__meta">
+        <strong>
+          当前任务：{activeSelectionWritingAction?.label ?? savedGenerationActionLabel}
+        </strong>
+        {activeSelectionWritingAction !== null && (
+          <Button variant="ghost" onClick={() => activateWritingTask("continuation")}>
+            切换到续写要求
+          </Button>
+        )}
+      </div>
+      <FormField
+        label="本次要求（可选）"
+        optionalLabel=""
+        hint="只用于当前作品、章节、正文版本、任务与选区；不会写成正式设定，也不会自动带入其他任务。"
+      >
+        {(fieldProps) => (
+          <Textarea
+            {...fieldProps}
+            ref={writingRequirementRef}
+            value={writingRequirement}
+            rows={3}
+            maxLength={2_000}
+            currentLength={writingRequirement.length}
+            disabled={candidateBusy}
+            placeholder={
+              activeSelectionWritingAction?.requirementPlaceholder ??
+              CONTINUATION_REQUIREMENT_PLACEHOLDER
+            }
+            onChange={(event) => updateWritingRequirement(event.currentTarget.value)}
+          />
+        )}
+      </FormField>
+      {writingDraftPersistenceError && (
+        <InlineAlert
+          tone="warning"
+          title={
+            writingDraftPersistenceError === "read"
+              ? "本次要求草稿无法安全读取"
+              : "本次要求暂时无法保留到重启后"
+          }
+          description={
+            writingDraftPersistenceError === "read"
+              ? "这份任务草稿的本机记录无法安全解析。原始记录已保留，也不会被当作空要求自动发送；请重新输入本次要求并复制留存，或重启后再试。"
+              : "当前输入仍可用于这次生成，但本机无法安全保存这份任务草稿；已有记录不会被覆盖。请复制要求后重试，墨影不会改用其他章节或任务的旧草稿。"
+          }
+        />
+      )}
+      {activeWritingTask === "continuation" &&
+        writingRequirement.length === 0 &&
+        legacyProjectWritingRequirement !== null && (
+          <InlineAlert
+            tone="info"
+            title="发现旧版续写要求"
+            description="旧版本按整部作品保存，无法确定它属于哪个章节，因此不会自动用于本次生成。你可以先确认，再把它恢复到当前章节。"
+            action={{
+              label: "确认用于当前章节",
+              onClick: restoreLegacyWritingRequirementForCurrentChapter,
+            }}
+          />
+        )}
+      {activeSelectionWritingAction !== null && (
+        <>
+          <p className="candidate-panel__hint">
+            写作技能目前用于续写；本次选区操作只采用当前要求和本次挑选的故事资料。
+          </p>
+          <Button
+            variant="ai-primary"
+            loading={selectionRewriteBusy}
+            disabled={
+              !editorClean ||
+              candidateBusy ||
+              selectionExceedsLimit ||
+              chapter?.isLocalOnly === true ||
+              selectionRewriteDisclosure !== null
+            }
+            onClick={() => void rewriteSelectedText(null, activeSelectionWritingAction.action)}
+          >
+            查看{activeSelectionWritingAction.label}发送前说明
+          </Button>
+        </>
+      )}
+    </section>
+  );
+  const enabledNovelSkills =
+    novelSkillProjectState?.methods.filter((method) => method.enabled && !method.archived) ?? [];
+  const preparedNovelSkills = displayedNovelSkillPreparation?.methods ?? [];
+  const appliedNovelSkills = preparedNovelSkills.filter(({ included }) => included);
+  const omittedNovelSkills = preparedNovelSkills.filter(({ included }) => !included);
+  const novelSkillSummary = (
+    <section className="candidate-content" aria-label="写作技能摘要">
+      <div className="candidate-content__meta">
+        <strong>
+          {novelSkillSummaryLoading
+            ? "正在读取写作技能"
+            : `已启用 ${String(enabledNovelSkills.length)} 项${
+                enabledNovelSkills.length === 0
+                  ? ""
+                  : `：${enabledNovelSkills
+                      .slice(0, 2)
+                      .map(({ displayName }) => displayName)
+                      .join("、")}`
+              }`}
+        </strong>
+        <Button variant="ghost" onClick={() => setNovelSkillDrawerOpen(true)}>
+          设置
+        </Button>
+      </div>
+      {displayedNovelSkillPreparation === null ? (
+        <p className="candidate-panel__hint">发送前准备完成后，这里会显示本次实际采用结果。</p>
+      ) : (
+        <>
+          <p className="candidate-panel__hint">
+            本次实际采用：
+            {appliedNovelSkills.length === 0
+              ? "无"
+              : appliedNovelSkills.map(({ displayName }) => displayName).join("、")}
+            。
+          </p>
+          {omittedNovelSkills.length > 0 && (
+            <p className="candidate-panel__hint">
+              未采用：{omittedNovelSkills[0]?.displayName}（
+              {novelSkillSelectionReasonBrief(omittedNovelSkills[0]?.selectionReason ?? "")}）
+              {omittedNovelSkills.length > 1
+                ? `，另有 ${String(omittedNovelSkills.length - 1)} 项可在“本次参考”查看。`
+                : "。"}
+            </p>
+          )}
+        </>
+      )}
+      <p className="candidate-panel__hint">选区改写、润色、扩写和缩写暂不采用写作技能。</p>
+    </section>
+  );
   return (
     <PageStateBoundary
       className="editor-page-boundary"
@@ -5821,11 +6644,6 @@ export function EditorPage() {
               variant={candidateReady ? "ai-primary" : "primary"}
               disabled={primaryAction.disabled}
               loading={candidateBusy || saveState === "saving"}
-              onMouseDown={(event) => {
-                if (primaryAction.label === "修改选中内容") {
-                  event.preventDefault();
-                }
-              }}
               onClick={primaryAction.run}
             >
               {primaryAction.label}
@@ -6207,6 +7025,7 @@ export function EditorPage() {
                 selectionRef.current = selection;
                 cursorRef.current = selection.start;
                 setSelectionLength(Math.max(0, selection.end - selection.start));
+                setLiveSelection(selection);
                 setSelectionRewriteDisclosure(null);
                 scheduleEditorViewPersistence(selection);
               }}
@@ -6311,28 +7130,27 @@ export function EditorPage() {
                   </div>
                 </section>
               )}
-              {!directMode &&
-                (displayedContextCompilation !== null ||
-                  displayedNovelSkillPreparation !== null) && (
-                  <button
-                    type="button"
-                    className="context-sources-trigger"
-                    onClick={() => setContextSourcesOpen(true)}
-                  >
-                    <span>
-                      <strong>本次参考</strong>
-                      <small>查看 AI 为什么选用这些故事资料</small>
-                    </span>
-                    <Badge tone="info">
-                      {(displayedContextCompilation?.compiled.entries.filter(
-                        ({ included }) => included,
-                      ).length ?? 0) +
-                        (displayedNovelSkillPreparation?.methods.filter(({ included }) => included)
-                          .length ?? 0)}{" "}
-                      项
-                    </Badge>
-                  </button>
-                )}
+              {(displayedContextCompilation !== null ||
+                displayedNovelSkillPreparation !== null) && (
+                <button
+                  type="button"
+                  className="context-sources-trigger"
+                  onClick={() => setContextSourcesOpen(true)}
+                >
+                  <span>
+                    <strong>本次参考</strong>
+                    <small>查看 AI 为什么选用这些故事资料</small>
+                  </span>
+                  <Badge tone="info">
+                    {(displayedContextCompilation?.compiled.entries.filter(
+                      ({ included }) => included,
+                    ).length ?? 0) +
+                      (displayedNovelSkillPreparation?.methods.filter(({ included }) => included)
+                        .length ?? 0)}{" "}
+                    项
+                  </Badge>
+                </button>
+              )}
               {!directMode && projectId !== null && (
                 <Link className="back-link" to={`/projects/${projectId}/context`}>
                   查看 AI 参考记录
@@ -6472,12 +7290,7 @@ export function EditorPage() {
                     }
                     modelLabel={generationPlan.modelId}
                     reasoningMode={generationPlan.visibleProseReasoningMode}
-                    minimumVisibleCharacters={
-                      generationPlan.outputContract.minimumVisibleCharacters
-                    }
-                    maximumVisibleCharacters={
-                      generationPlan.outputContract.maximumVisibleCharacters
-                    }
+                    lengthSummary={generationLengthSummary(generationPlan.outputContract)}
                     receivedVisibleCharacters={generationPreview.length}
                     stage={generationStage}
                     preview={generationPreview}
@@ -6733,24 +7546,43 @@ export function EditorPage() {
                             title="确认本次方向生成"
                             description={
                               preparedDirections.disclosure === null
-                                ? "本次只在本机准备三个方向，不会发送给外部服务。明确确认后才会开始生成。"
-                                : `${project !== null && chapter !== null ? `作品《${project.name}》 · 章节《${chapter.title}》；` : ""}模型：${preparedDirections.disclosure.connectionDisplayName} · ${preparedDirections.disclosure.modelId}；资料：${preparedDirections.disclosure.sentScopeLabel}；预计发送 ${String(preparedDirections.disclosure.maximumProviderCalls)} 次；${formatProviderActionCostSummary(preparedDirections.disclosure)}；私密内容：${chapter?.isLocalOnly === true ? (preparedDirections.disclosure.dataDestination === "local" ? "包含，只在本机处理" : "不会发送") : "不包含私密章节"}。`
+                                ? `任务：生成三个创作方向；本次要求：${formatRequirementConfirmationSummary(preparedDirections.requirement)}；模型：本机处理；资料：当前稳定正文和本次要求，私密内容仅在本机处理；预计发送 0 次、自动重试 0 次。`
+                                : `任务：生成三个创作方向；本次要求：${formatRequirementConfirmationSummary(preparedDirections.requirement)}；模型：${preparedDirections.disclosure.connectionDisplayName} · ${preparedDirections.disclosure.modelId}；资料：${preparedDirections.disclosure.sentScopeLabel}，${formatPrivateContentSummary(preparedDirections.disclosure.dataDestination)}；预计发送 ${String(preparedDirections.disclosure.maximumProviderCalls)} 次、自动重试 ${String(preparedDirections.disclosure.automaticRetryCount)} 次，${formatProviderActionCostSummary(preparedDirections.disclosure)}`
                             }
                           />
-                          {preparedDirections.disclosure !== null && (
-                            <details>
-                              <summary>查看详细信息</summary>
-                              <p>{preparedDirections.disclosure.privacy}</p>
-                              <p>发送内容：{preparedDirections.disclosure.sends.join("；")}。</p>
+                          <details>
+                            <summary>查看详情</summary>
+                            {project !== null && chapter !== null && (
                               <p>
-                                本次最多向模型服务发送{" "}
-                                {String(preparedDirections.disclosure.maximumProviderCalls)} 次，
-                                自动重试 {String(preparedDirections.disclosure.automaticRetryCount)}{" "}
-                                次。
+                                作品《{project.name}》 · 章节《{chapter.title}》 · 当前稳定正文{" "}
+                                {chapter.content.length.toLocaleString("zh-CN")} 字。
                               </p>
-                              <p>{formatProviderActionCost(preparedDirections.disclosure)}</p>
-                            </details>
-                          )}
+                            )}
+                            <p>
+                              完整本次要求：
+                              {preparedDirections.requirement ?? "未填写额外要求"}
+                            </p>
+                            {preparedDirections.disclosure === null ? (
+                              <p>本次只在本机准备三个方向，不会发送给外部服务。</p>
+                            ) : (
+                              <>
+                                <p>{preparedDirections.disclosure.privacy}</p>
+                                <p>发送内容：{preparedDirections.disclosure.sends.join("；")}。</p>
+                                <p>
+                                  本次最多向模型服务发送{" "}
+                                  {String(preparedDirections.disclosure.maximumProviderCalls)} 次，
+                                  自动重试{" "}
+                                  {String(preparedDirections.disclosure.automaticRetryCount)} 次。
+                                </p>
+                                {preparedDirections.disclosure.estimatedMaximumCostMicros !==
+                                  null &&
+                                  preparedDirections.disclosure.currency !== null && (
+                                    <p>{formatProviderActionCost(preparedDirections.disclosure)}</p>
+                                  )}
+                              </>
+                            )}
+                            <p>三个方向只用于作者选择，不会自动写入正文。</p>
+                          </details>
                         </>
                       )}
                       {directionOptions.length > 0 && (
@@ -6789,7 +7621,7 @@ export function EditorPage() {
                             disabled={!editorClean}
                             onClick={() => void confirmContinuationDirections()}
                           >
-                            确认并生成三个方向
+                            确认生成
                           </Button>
                           <Button
                             variant="ghost"
@@ -6801,221 +7633,24 @@ export function EditorPage() {
                               );
                             }}
                           >
-                            取消，不发送
+                            取消
                           </Button>
                         </div>
                       )}
-                      <FormField label="自定义方向">
-                        {(fieldProps) => (
-                          <Textarea
-                            {...fieldProps}
-                            rows={3}
-                            maxLength={500}
-                            value={customDirection}
-                            disabled={candidateBusy || !editorClean}
-                            onChange={(event) => setCustomDirection(event.currentTarget.value)}
-                          />
-                        )}
-                      </FormField>
-                      <Button
-                        variant="ai-primary"
-                        disabled={
-                          candidateBusy || !editorClean || customDirection.trim().length === 0
-                        }
-                        onClick={() =>
-                          void generateCandidate(
-                            null,
-                            customDirection.normalize("NFKC").trim().replace(/\s+/gu, " "),
-                          )
-                        }
-                      >
-                        按这个方向写
-                      </Button>
                     </section>
                   </>
+                  {activeWritingTask === "continuation" && continuationLengthControls}
                   {selectionWritingControls}
+                  {writingRequirementControls}
+                  {novelSkillSummary}
                 </section>
               )}
               {(canGenerateCandidate || candidateIncomplete) && !directMode && (
                 <>
-                  <section className="candidate-content" aria-label="续写长度">
-                    <FormField
-                      label="本次续写长度"
-                      hint="这是本设备对当前作品的编辑器偏好；每次生成前都可更改，不会写成故事设定。"
-                    >
-                      {(fieldProps) => (
-                        <Select
-                          {...fieldProps}
-                          value={continuationPreference.profile}
-                          options={[
-                            { value: "short", label: "短 · 约 1,000 字" },
-                            { value: "standard", label: "标准 · 约 2,200 字" },
-                            { value: "long", label: "长 · 约 4,000 字" },
-                            { value: "custom", label: "自定义" },
-                          ]}
-                          disabled={candidateBusy}
-                          onChange={(event) => {
-                            const profile = event.currentTarget
-                              .value as ContinuationOutputProfileId;
-                            updateContinuationPreference({
-                              schemaVersion: 1,
-                              profile,
-                              customTargetVisibleCharacters:
-                                profile === "custom"
-                                  ? (continuationPreference.customTargetVisibleCharacters ?? 2_200)
-                                  : null,
-                              destination: continuationPreference.destination,
-                              customDestinationInstruction:
-                                continuationPreference.customDestinationInstruction,
-                            });
-                          }}
-                        />
-                      )}
-                    </FormField>
-                    {continuationPreference.profile === "custom" && (
-                      <FormField label="目标字数" hint="可填写 200–12,000 字。">
-                        {(fieldProps) => (
-                          <Input
-                            {...fieldProps}
-                            type="number"
-                            min={200}
-                            max={12_000}
-                            step={100}
-                            value={continuationPreference.customTargetVisibleCharacters ?? 2_200}
-                            disabled={candidateBusy}
-                            onChange={(event) => {
-                              const value = Number(event.currentTarget.value);
-                              if (!Number.isSafeInteger(value) || value < 200 || value > 12_000) {
-                                return;
-                              }
-                              updateContinuationPreference({
-                                schemaVersion: 1,
-                                profile: "custom",
-                                customTargetVisibleCharacters: value,
-                                destination: continuationPreference.destination,
-                                customDestinationInstruction:
-                                  continuationPreference.customDestinationInstruction,
-                              });
-                            }}
-                          />
-                        )}
-                      </FormField>
-                    )}
-                    {continuationPreference.profile === "long" && (
-                      <p className="candidate-panel__hint" role="status">
-                        长篇续写通常需要更长等待时间，并可能产生更高的模型费用；发送前仍会检查模型上限、预算和隐私设置。
-                      </p>
-                    )}
-                    <FormField
-                      label="写到哪里"
-                      hint="用于约束本次续写的收束位置；会进入本次任务指令，不会自动写成故事设定。"
-                    >
-                      {(fieldProps) => (
-                        <Select
-                          {...fieldProps}
-                          value={continuationPreference.destination}
-                          options={[
-                            { value: "complete_scene", label: "推进一个完整场景" },
-                            { value: "next_segment", label: "只写下一小段" },
-                            { value: "custom_instruction", label: "按我的要求" },
-                          ]}
-                          disabled={candidateBusy}
-                          onChange={(event) => {
-                            const destination = event.currentTarget
-                              .value as ContinuationDestinationId;
-                            updateContinuationPreference({
-                              ...continuationPreference,
-                              destination,
-                              customDestinationInstruction:
-                                destination === "custom_instruction"
-                                  ? continuationPreference.customDestinationInstruction
-                                  : null,
-                            });
-                          }}
-                        />
-                      )}
-                    </FormField>
-                    {continuationPreference.destination === "custom_instruction" && (
-                      <>
-                        <FormField
-                          label="本次写作要求"
-                          hint="例如：写到主角发现密信为止。最多 2,000 字。"
-                        >
-                          {(fieldProps) => (
-                            <Textarea
-                              {...fieldProps}
-                              value={continuationPreference.customDestinationInstruction ?? ""}
-                              currentLength={
-                                continuationPreference.customDestinationInstruction?.length ?? 0
-                              }
-                              rows={3}
-                              maxLength={2_000}
-                              disabled={candidateBusy}
-                              onChange={(event) =>
-                                updateContinuationPreference({
-                                  ...continuationPreference,
-                                  customDestinationInstruction: event.currentTarget.value,
-                                })
-                              }
-                            />
-                          )}
-                        </FormField>
-                        {(continuationPreference.customDestinationInstruction?.trim().length ??
-                          0) === 0 && (
-                          <p className="candidate-panel__hint" role="status">
-                            未填写具体要求时，将继续按当前正文和本次选中的故事资料自然续写。
-                          </p>
-                        )}
-                      </>
-                    )}
-                  </section>
+                  {activeWritingTask === "continuation" && continuationLengthControls}
                   {selectionWritingControls}
-                  {usesNativeModel &&
-                    selectionLength > 0 &&
-                    selectionRewriteDisclosure === null &&
-                    chapter?.isLocalOnly !== true && (
-                      <section className="candidate-content" aria-label="自定义改写选中内容">
-                        <FormField
-                          label={`自定义改写选中的 ${selectionLength.toLocaleString("zh-CN")} 个字符`}
-                          hint={
-                            selectionLength > MAXIMUM_SELECTION_REWRITE_CHARACTERS
-                              ? `选区最多支持 ${MAXIMUM_SELECTION_REWRITE_CHARACTERS.toLocaleString("zh-CN")} 个字符，请缩小选区。`
-                              : "补充自己的要求；前后正文会原样保留，结果仍先进入隔离候选。"
-                          }
-                          required
-                        >
-                          {(fieldProps) => (
-                            <Textarea
-                              {...fieldProps}
-                              ref={selectionRewriteInstructionRef}
-                              value={selectionRewriteInstruction}
-                              rows={3}
-                              maxLength={2_000}
-                              currentLength={selectionRewriteInstruction.length}
-                              disabled={candidateBusy}
-                              placeholder="例如：保留原意，让对话更自然"
-                              onChange={(event) => {
-                                setSelectionRewriteInstruction(event.currentTarget.value);
-                                setSelectionRewriteDisclosure(null);
-                              }}
-                            />
-                          )}
-                        </FormField>
-                        <Button
-                          variant="secondary"
-                          loading={selectionRewriteBusy}
-                          disabled={
-                            !editorClean ||
-                            candidateBusy ||
-                            selectionRewriteInstruction.trim().length === 0 ||
-                            selectionLength > MAXIMUM_SELECTION_REWRITE_CHARACTERS
-                          }
-                          onClick={() => void rewriteSelectedText()}
-                        >
-                          查看自定义改写发送前说明
-                        </Button>
-                      </section>
-                    )}
+                  {writingRequirementControls}
+                  {novelSkillSummary}
                   {usesNativeModel && chapter?.isLocalOnly !== true && (
                     <Link className="back-link" to="/settings#model-center">
                       设置 AI 服务
@@ -7089,6 +7724,35 @@ export function EditorPage() {
             ))}
           </ol>
         </nav>
+      </Drawer>
+
+      <Drawer
+        open={novelSkillDrawerOpen}
+        onOpenChange={(open) => {
+          setNovelSkillDrawerOpen(open);
+          if (!open) void loadNovelSkillSummary();
+        }}
+        title="写作技能"
+        description="这里与设定页使用同一套项目技能状态；保存后会参与适用的后续续写准备。"
+        footer={
+          <Button
+            variant="secondary"
+            onClick={() => {
+              setNovelSkillDrawerOpen(false);
+              void loadNovelSkillSummary();
+            }}
+          >
+            完成
+          </Button>
+        }
+      >
+        {projectId !== null && (
+          <NovelSkillPanel
+            projectId={projectId}
+            runtime={runtime.novelSkills}
+            readonly={readonly}
+          />
+        )}
       </Drawer>
 
       <Drawer
@@ -8018,11 +8682,7 @@ export function EditorPage() {
           }
         }}
         title={(generationPlan?.actionLabel ?? savedGenerationActionLabel) + "前检查"}
-        description={
-          "开始" +
-          (generationPlan?.actionLabel ?? savedGenerationActionLabel) +
-          "前会检查正文是否已保存、AI 服务是否可用以及预算是否允许；有问题时会告诉你如何解决。"
-        }
+        description="请核对本次使用的模型、故事资料和发送次数；只有点击确认后才会发送。"
         footer={
           generationPlan?.preflight.readiness === "BLOCKED" ? (
             <>
@@ -8065,17 +8725,8 @@ export function EditorPage() {
                 disabled={budgetSaving || directDisclosureSaving || candidateBusy}
                 onClick={cancelPreflightAndFocusEditor}
               >
-                暂不生成
+                取消
               </Button>
-              {generationPlan?.preflight.readiness === "READY_WITH_WARNINGS" && (
-                <Link
-                  className="button-link button-link--secondary"
-                  to={preflightModelHubLink("model-pricing")}
-                  onClick={() => persistEditorView(selectionRef.current)}
-                >
-                  去完善模型信息
-                </Link>
-              )}
               <Button
                 variant="ai-primary"
                 loading={directDisclosureSaving}
@@ -8087,11 +8738,7 @@ export function EditorPage() {
                 }
                 onClick={() => void confirmGeneration()}
               >
-                {continuationConfirmationIsRemembered
-                  ? "按本次摘要" + (generationPlan?.actionLabel ?? savedGenerationActionLabel)
-                  : generationPlan?.preflight.readiness === "READY_WITH_WARNINGS"
-                    ? "使用安全默认值并" + generationPlan.actionLabel
-                    : "确认并" + (generationPlan?.actionLabel ?? savedGenerationActionLabel)}
+                确认生成
               </Button>
             </>
           )
@@ -8099,31 +8746,17 @@ export function EditorPage() {
       >
         {generationPlan !== null && (
           <div className="generation-preflight">
-            <InlineAlert
-              tone={
-                generationPlan.preflight.readiness === "BLOCKED"
-                  ? "error"
-                  : generationPlan.preflight.readiness === "READY_WITH_WARNINGS"
-                    ? "warning"
-                    : "info"
-              }
-              title={
-                generationPlan.preflight.readiness === "BLOCKED"
-                  ? "当前无法调用 AI"
-                  : generationPlan.preflight.readiness === "READY_WITH_WARNINGS"
-                    ? `可以开始生成，但有 ${String(generationPlan.preflight.warnings.length)} 项提示`
-                    : "检查通过"
-              }
-              description={
-                generationPlan.preflight.readiness !== "BLOCKED"
-                  ? generationPlan.preflight.readiness === "READY_WITH_WARNINGS"
-                    ? "这些提示不会阻止生成；墨影会使用已列出的安全默认值。供应商仍可能按实际调用计费。"
-                    : "确认后才会开始生成。重复确认同一份检查结果会复用原任务，不会重复调用 AI 服务。"
-                  : canDeferGenerationPlan(generationPlan)
+            {generationPlan.preflight.readiness === "BLOCKED" && (
+              <InlineAlert
+                tone="error"
+                title="当前无法调用 AI"
+                description={
+                  canDeferGenerationPlan(generationPlan)
                     ? "当前只因网络离线而阻断；可保存不含正文和创作指令的待执行记录，联网后重新检查并确认。"
                     : "请按下列操作修复后重新检查；当前不会调用 AI 服务，但正文仍可编辑和保存。"
-              }
-            />
+                }
+              />
+            )}
 
             {continuationDisclosure === null ? (
               generationPlan.executionMode === "local_demo" ? (
@@ -8139,368 +8772,372 @@ export function EditorPage() {
                 title={
                   continuationConfirmationIsRemembered ? "已记住本次会话的相同确认" : "发送确认摘要"
                 }
-                description={`${project !== null && chapter !== null ? `作品《${project.name}》 · 章节《${chapter.title}》；` : ""}模型：${continuationDisclosure.connectionDisplayName} · ${continuationDisclosure.modelId}；资料：${continuationDisclosure.sentScopeLabel}；预计发送 ${String(continuationDisclosure.maximumProviderCalls)} 次；${formatProviderActionCostSummary(continuationDisclosure)}；私密内容：${chapter?.isLocalOnly === true ? (continuationDisclosure.dataDestination === "local" ? "包含，只在本机处理" : "不会发送") : "不包含私密章节"}。${continuationConfirmationIsRemembered ? `仍需点击“按本次摘要${generationPlan.actionLabel}”才会发送。` : "确认后才会发送，生成结果不会自动写入正文。"}`}
+                description={`任务：${generationPlan.actionLabel}；本次要求：${formatRequirementConfirmationSummary(generationPlan.outputContract.customDestinationInstruction)}；模型：${continuationDisclosure.connectionDisplayName} · ${continuationDisclosure.modelId}；资料：${continuationDisclosure.sentScopeLabel}，${formatPrivateContentSummary(continuationDisclosure.dataDestination)}；预计发送 ${String(continuationDisclosure.maximumProviderCalls)} 次、自动重试 ${String(continuationDisclosure.automaticRetryCount)} 次，${formatProviderActionCostSummary(continuationDisclosure)}`}
               />
             )}
-            {continuationDisclosure !== null && (
-              <details>
-                <summary>查看详细信息</summary>
-                {project !== null && chapter !== null && (
-                  <section
-                    className="generation-preflight__confirmation-memory"
-                    aria-label="本次写作章节"
-                  >
-                    <h3>本次写作章节</h3>
-                    <p>
-                      作品《{project.name}》 · 章节《{chapter.title}》 · 当前稳定正文{" "}
-                      {chapter.content.length.toLocaleString("zh-CN")} 字。
-                    </p>
-                  </section>
-                )}
-                <section
-                  className="generation-preflight__confirmation-memory"
-                  aria-label="完整发送前说明"
-                >
-                  <h3>完整发送前说明</h3>
-                  <p>{continuationDisclosure.privacy}</p>
-                  <p>发送内容：{continuationDisclosure.sends.join("；")}。</p>
-                  <p>
-                    本次最多向模型服务发送 {String(continuationDisclosure.maximumProviderCalls)}{" "}
-                    次，自动重试 {String(continuationDisclosure.automaticRetryCount)} 次。
-                  </p>
-                  <p>
-                    这次确认只适用于当前正文版本与本次生成计划；任一项变化都会停止发送并要求重新确认。完整结果只会保存为隔离的
-                    {directMode ? "创作结果" : " AI 建议草稿"}
-                    ，正文和版本保持不变，直到你明确选择使用。
-                  </p>
-                </section>
-                {!continuationConfirmationIsRemembered && (
-                  <section
-                    className="generation-preflight__confirmation-memory"
-                    aria-label="本次确认方式"
-                  >
-                    <label className="checkbox-row">
-                      <input
-                        type="checkbox"
-                        aria-label="在当前会话记住本次确认"
-                        checked={rememberContinuationConfirmationForSession}
-                        onChange={(event) =>
-                          setRememberContinuationConfirmationForSession(event.currentTarget.checked)
-                        }
-                      />
-                      <span>在当前会话记住本次确认</span>
-                    </label>
-                    <p>
-                      仅限同一作品、章节、正文版本、模型、服务、任务、资料范围和隐私去向；任一项变化都会重新确认。
-                    </p>
-                  </section>
-                )}
-              </details>
-            )}
-
-            {generationPlan.contextCompilation !== null &&
-              generationPlan.contextCompilation.compiled.entries.some(
-                ({ included, layer }) => included && layer === "locked_hard_rules",
-              ) && (
-                <section
-                  className="generation-preflight__confirmation-memory"
-                  aria-labelledby="generation-confirmed-constraints-heading"
-                >
-                  <h3 id="generation-confirmed-constraints-heading">本次必须遵守的创作约束</h3>
-                  <p>以下内容会随本次任务发送给上方列明的模型服务；未列出的资料不会因此加入。</p>
-                  <ul>
-                    {generationPlan.contextCompilation.compiled.entries
-                      .filter(({ included, layer }) => included && layer === "locked_hard_rules")
-                      .map((entry) => (
-                        <li key={`confirmed-constraint:${entry.id}`}>
-                          <blockquote>{entry.content}</blockquote>
-                        </li>
-                      ))}
-                  </ul>
-                </section>
-              )}
-
             <details>
-              <summary>创作任务安排与隐私详情（高级）</summary>
-              <InlineAlert
-                tone={generationPlan.routeReason === "role_fallback" ? "warning" : "info"}
-                title={
-                  generationPlan.routeReason === "role_fallback"
-                    ? "将使用已配置的备用服务"
-                    : "本次创作任务安排"
-                }
-                description={`${generationRouteRoleLabel(generationPlan.modelRole)} · ${
-                  continuationDisclosure?.connectionDisplayName ??
-                  (generationPlan.executionMode === "local_demo" ? "本机演示" : "已确认的 AI 服务")
-                } / ${generationPlan.modelId} · ${
-                  generationPlan.profile?.provider === "ollama" ||
-                  generationPlan.modelHubInspection?.dataDestination === "local"
-                    ? "数据仅发送到本机 AI 服务"
-                    : generationPlan.routeReason === "local_demo"
-                      ? "内置演示，不外发"
-                      : "本次所需内容将发送到外部 AI 服务"
-                }${
-                  generationPlan.routeFallback === null
-                    ? ""
-                    : "；已配置备用模型，实际调用对象以上方确认信息为准"
-                }。`}
-              />
-            </details>
-
-            {generationPlan.contextCompilation !== null && (
-              <details>
-                <summary>本次会参考哪些故事内容</summary>
-                <div className="generation-receipt" aria-label="本次故事资料来源">
-                  <div>
-                    <span>已选资料</span>
-                    <strong>
-                      {
-                        generationPlan.contextCompilation.compiled.entries.filter(
-                          ({ included }) => included,
-                        ).length
-                      }{" "}
-                      项
-                    </strong>
-                  </div>
-                  <p>
-                    发送给 AI 的文字量（不是金额）约为{" "}
-                    {generationPlan.contextCompilation.compiled.trace.usedTokens.toLocaleString(
-                      "zh-CN",
+              <summary>查看详情</summary>
+              {(displayedContextCompilation !== null ||
+                displayedNovelSkillPreparation !== null) && (
+                <Button variant="secondary" onClick={() => setContextSourcesOpen(true)}>
+                  查看本次参考
+                </Button>
+              )}
+              {continuationDisclosure !== null && (
+                <>
+                  {project !== null && chapter !== null && (
+                    <section
+                      className="generation-preflight__confirmation-memory"
+                      aria-label="本次写作章节"
+                    >
+                      <h3>本次写作章节</h3>
+                      <p>
+                        作品《{project.name}》 · 章节《{chapter.title}》 · 当前稳定正文{" "}
+                        {chapter.content.length.toLocaleString("zh-CN")} 字。
+                      </p>
+                    </section>
+                  )}
+                  <section
+                    className="generation-preflight__confirmation-memory"
+                    aria-label="完整发送前说明"
+                  >
+                    <h3>完整发送前说明</h3>
+                    <p>
+                      完整本次要求：
+                      {generationPlan.outputContract.customDestinationInstruction ??
+                        "未填写额外要求"}
+                    </p>
+                    <p>{continuationDisclosure.privacy}</p>
+                    <p>发送内容：{continuationDisclosure.sends.join("；")}。</p>
+                    <p>
+                      本次最多向模型服务发送 {String(continuationDisclosure.maximumProviderCalls)}{" "}
+                      次，自动重试 {String(continuationDisclosure.automaticRetryCount)} 次。
+                    </p>
+                    <p>
+                      这次确认只适用于当前正文版本与本次生成计划；任一项变化都会停止发送并要求重新确认。完整结果只会保存为隔离的
+                      {directMode ? "创作结果" : " AI 建议草稿"}
+                      ，正文和版本保持不变，直到你明确选择使用。
+                    </p>
+                    {continuationConfirmationIsRemembered && (
+                      <p>当前会话已记住完全相同的发送范围；仍需点击“确认生成”才会发送。</p>
                     )}
-                    /
-                    {generationPlan.contextCompilation.compiled.trace.maximumContextTokens.toLocaleString(
-                      "zh-CN",
-                    )}{" "}
-                    个本机估算单位（不是计费回执）；未选资料不会发送给模型。
-                  </p>
-                  <p>{contextBudgetExplanation(generationPlan.contextCompilation.compiled)}</p>
-                  <ul>
-                    {generationPlan.contextCompilation.compiled.entries.map((entry) => (
-                      <li key={entry.id}>
-                        <Badge tone={entry.included ? "info" : "neutral"}>
-                          {contextEntryStatusLabel(entry)}
-                        </Badge>{" "}
-                        <strong>{contextLayerLabel(entry.layer)}</strong>
-                        <span>
-                          {" "}
-                          · 发送给 AI 的文字量约 {entry.estimatedTokens.toLocaleString(
-                            "zh-CN",
-                          )}{" "}
-                          个本机估算单位
-                        </span>
-                        <p>{contextSelectionReasonLabel(entry)}</p>
-                        {entry.evidence.length > 0 && (
-                          <small>
-                            来源：
-                            {uniqueContextSourceTypes(entry.evidence)
-                              .map(contextSourceTypeLabel)
-                              .join("；")}
-                          </small>
-                        )}
-                      </li>
-                    ))}
-                  </ul>
-                </div>
-              </details>
-            )}
-
-            <ul className="generation-preflight__checks">
-              {generationPlan.preflight.checks
-                .filter(({ code }) => code !== "PREFLIGHT_WARNING_PRICING_UNKNOWN")
-                .map((check) => (
-                  <li key={check.code}>
-                    <div>
-                      <Badge
-                        tone={
-                          check.severity === "blocking"
-                            ? "danger"
-                            : check.severity === "fix_recommended"
-                              ? "warning"
-                              : "neutral"
-                        }
-                      >
-                        {preflightSeverityLabel(check.severity)}
-                      </Badge>
-                      <strong>{preflightCheckLabel(check.code)}</strong>
-                    </div>
-                    {check.action === "SAVE_CHAPTER" ? (
-                      <Button variant="secondary" onClick={() => void manualSave()}>
-                        保存章节
-                      </Button>
-                    ) : check.action === "OPEN_MODEL_CENTER" ||
-                      check.action === "UPDATE_PRICING" ||
-                      check.action === "RETRY_CONNECTION" ? (
-                      <Link
-                        className="back-link"
-                        to={preflightModelHubLink(
-                          check.action === "UPDATE_PRICING"
-                            ? "model-pricing"
-                            : check.action === "RETRY_CONNECTION"
-                              ? "provider-connection"
-                              : "model-selection",
-                        )}
-                        onClick={() => persistEditorView(selectionRef.current)}
-                      >
-                        设置 AI 服务
-                      </Link>
-                    ) : check.action === "REDUCE_CONTEXT" ? (
-                      <Button variant="secondary" onClick={cancelPreflightAndFocusEditor}>
-                        返回正文精简内容
-                      </Button>
-                    ) : null}
-                  </li>
-                ))}
-            </ul>
-
-            {generationPlan.preflight.costStatus === "pricing_unavailable" && (
-              <section className="generation-preflight__cost" aria-label="费用估算">
-                <div>
-                  <span>预计费用</span>
-                  <strong>暂时无法计算</strong>
-                </div>
-                <p>服务商没有提供可计算的单价，实际费用请以服务商账单为准。</p>
-                <Link
-                  className="back-link"
-                  to={preflightModelHubLink("model-pricing")}
-                  onClick={() => persistEditorView(selectionRef.current)}
-                >
-                  填写费用信息
-                </Link>
-              </section>
-            )}
-
-            {generationEstimate !== null && (
-              <section className="generation-preflight__cost" aria-label="费用估算">
-                <div>
-                  <span>本次费用上界估算</span>
-                  <strong>
-                    {formatCostEstimate(generationEstimate.micros, generationEstimate.currency)}
-                  </strong>
-                </div>
-                <details>
-                  <summary>用量与计价依据（高级）</summary>
-                  <dl>
-                    <div>
-                      <dt>发送给 AI / AI 返回的文字量（不是金额）</dt>
-                      <dd>
-                        {generationPlan.preflight.inputTokens.toLocaleString("zh-CN")} /{" "}
-                        {generationPlan.preflight.maximumOutputTokens.toLocaleString("zh-CN")}{" "}
-                        个本机估算单位
-                      </dd>
-                    </div>
-                    <div>
-                      <dt>估算依据</dt>
-                      <dd>
-                        {generationPlan.tokenEstimateSource === "local_demo"
-                          ? "内置演示，不计费"
-                          : "按文本体积保守估算"}
-                      </dd>
-                    </div>
-                    <div>
-                      <dt>价格来源</dt>
-                      <dd>
-                        {generationEstimate.pricingVersion} ·{" "}
-                        {generationEstimate.priceUpdatedAt.slice(0, 10)}
-                      </dd>
-                    </div>
-                  </dl>
-                </details>
-                {generationPlan.preflight.budget?.alerts.map((alert) => (
-                  <InlineAlert
-                    key={alert.scope}
-                    tone={alert.severity === "blocked" ? "error" : "warning"}
-                    title={`${budgetScopeLabel(alert.scope)}预算${
-                      alert.severity === "blocked" ? "已阻断" : "接近或超过阈值"
-                    }`}
-                    description={`预计累计 ${formatCostEstimate(
-                      alert.projectedMicros,
-                      generationEstimate.currency,
-                    )}，预算 ${formatCostEstimate(
-                      alert.limitMicros,
-                      generationEstimate.currency,
-                    )}。`}
-                  />
-                ))}
-              </section>
-            )}
-
-            {generationPlan.projectId !== null &&
-              generationPlan.preflight.estimate !== null &&
-              runtime.mode === "tauri" && (
-                <section className="generation-preflight__budgets" aria-label="预算设置">
-                  <div>
-                    <h3>预算限制</h3>
-                    <p>金额按当前计价币种填写；达到 80% 会提醒，硬上限超出时阻断生成。</p>
-                  </div>
-                  <div className="generation-preflight__budget-grid">
-                    <FormField label="项目预算">
-                      {(fieldProps) => (
-                        <Input
-                          {...fieldProps}
-                          type="number"
-                          min={0}
-                          step="0.000001"
-                          value={projectBudgetAmount}
-                          placeholder="未设置"
-                          onChange={(event) => setProjectBudgetAmount(event.currentTarget.value)}
-                        />
-                      )}
-                    </FormField>
-                    <FormField label="项目策略">
-                      {(fieldProps) => (
-                        <Select
-                          {...fieldProps}
-                          value={projectBudgetEnforcement}
-                          options={[
-                            { value: "hard", label: "硬上限" },
-                            { value: "warn", label: "仅提醒" },
-                          ]}
+                  </section>
+                  {!continuationConfirmationIsRemembered && (
+                    <section
+                      className="generation-preflight__confirmation-memory"
+                      aria-label="本次确认方式"
+                    >
+                      <label className="checkbox-row">
+                        <input
+                          type="checkbox"
+                          aria-label="在当前会话记住本次确认"
+                          checked={rememberContinuationConfirmationForSession}
                           onChange={(event) =>
-                            setProjectBudgetEnforcement(
-                              event.currentTarget.value as "warn" | "hard",
+                            setRememberContinuationConfirmationForSession(
+                              event.currentTarget.checked,
                             )
                           }
                         />
-                      )}
-                    </FormField>
-                    <FormField label="本月预算">
-                      {(fieldProps) => (
-                        <Input
-                          {...fieldProps}
-                          type="number"
-                          min={0}
-                          step="0.000001"
-                          value={monthBudgetAmount}
-                          placeholder="未设置"
-                          onChange={(event) => setMonthBudgetAmount(event.currentTarget.value)}
-                        />
-                      )}
-                    </FormField>
-                    <FormField label="本月策略">
-                      {(fieldProps) => (
-                        <Select
-                          {...fieldProps}
-                          value={monthBudgetEnforcement}
-                          options={[
-                            { value: "hard", label: "硬上限" },
-                            { value: "warn", label: "仅提醒" },
-                          ]}
-                          onChange={(event) =>
-                            setMonthBudgetEnforcement(event.currentTarget.value as "warn" | "hard")
-                          }
-                        />
-                      )}
-                    </FormField>
-                  </div>
-                  <Button
-                    variant="secondary"
-                    loading={budgetSaving}
-                    onClick={() => void saveBudgetsAndRefresh()}
+                        <span>在当前会话记住本次确认</span>
+                      </label>
+                      <p>
+                        仅限同一作品、章节、正文版本、模型、服务、任务、资料范围和隐私去向；任一项变化都会重新确认。
+                      </p>
+                    </section>
+                  )}
+                </>
+              )}
+              {generationPlan.contextCompilation !== null &&
+                generationPlan.contextCompilation.compiled.entries.some(
+                  ({ included, layer }) => included && layer === "locked_hard_rules",
+                ) && (
+                  <section
+                    className="generation-preflight__confirmation-memory"
+                    aria-labelledby="generation-confirmed-constraints-heading"
                   >
-                    保存预算并重新检查
-                  </Button>
+                    <h3 id="generation-confirmed-constraints-heading">本次必须遵守的创作约束</h3>
+                    <p>以下内容会随本次任务发送给上方列明的模型服务；未列出的资料不会因此加入。</p>
+                    <ul>
+                      {generationPlan.contextCompilation.compiled.entries
+                        .filter(({ included, layer }) => included && layer === "locked_hard_rules")
+                        .map((entry) => (
+                          <li key={`confirmed-constraint:${entry.id}`}>
+                            <blockquote>{entry.content}</blockquote>
+                          </li>
+                        ))}
+                    </ul>
+                  </section>
+                )}
+
+              <details>
+                <summary>创作任务安排与隐私详情（高级）</summary>
+                <InlineAlert
+                  tone={generationPlan.routeReason === "role_fallback" ? "warning" : "info"}
+                  title={
+                    generationPlan.routeReason === "role_fallback"
+                      ? "将使用已配置的备用服务"
+                      : "本次创作任务安排"
+                  }
+                  description={`${generationRouteRoleLabel(generationPlan.modelRole)} · ${
+                    continuationDisclosure?.connectionDisplayName ??
+                    (generationPlan.executionMode === "local_demo"
+                      ? "本机演示"
+                      : "已确认的 AI 服务")
+                  } / ${generationPlan.modelId} · ${
+                    generationPlan.profile?.provider === "ollama" ||
+                    generationPlan.modelHubInspection?.dataDestination === "local"
+                      ? "数据仅发送到本机 AI 服务"
+                      : generationPlan.routeReason === "local_demo"
+                        ? "内置演示，不外发"
+                        : "本次所需内容将发送到外部 AI 服务"
+                  }${
+                    generationPlan.routeFallback === null
+                      ? ""
+                      : "；已配置备用模型，实际调用对象以上方确认信息为准"
+                  }。`}
+                />
+              </details>
+
+              {generationPlan.contextCompilation !== null && (
+                <details>
+                  <summary>本次会参考哪些故事内容</summary>
+                  <div className="generation-receipt" aria-label="本次故事资料来源">
+                    <div>
+                      <span>已选资料</span>
+                      <strong>
+                        {
+                          generationPlan.contextCompilation.compiled.entries.filter(
+                            ({ included }) => included,
+                          ).length
+                        }{" "}
+                        项
+                      </strong>
+                    </div>
+                    <p>
+                      发送给 AI 的文字量（不是金额）约为{" "}
+                      {generationPlan.contextCompilation.compiled.trace.usedTokens.toLocaleString(
+                        "zh-CN",
+                      )}
+                      /
+                      {generationPlan.contextCompilation.compiled.trace.maximumContextTokens.toLocaleString(
+                        "zh-CN",
+                      )}{" "}
+                      个本机估算单位（不是计费回执）；未选资料不会发送给模型。
+                    </p>
+                    <p>{contextBudgetExplanation(generationPlan.contextCompilation.compiled)}</p>
+                    <ul>
+                      {generationPlan.contextCompilation.compiled.entries.map((entry) => (
+                        <li key={entry.id}>
+                          <Badge tone={entry.included ? "info" : "neutral"}>
+                            {contextEntryStatusLabel(entry)}
+                          </Badge>{" "}
+                          <strong>{contextLayerLabel(entry.layer)}</strong>
+                          <span>
+                            {" "}
+                            · 发送给 AI 的文字量约 {entry.estimatedTokens.toLocaleString(
+                              "zh-CN",
+                            )}{" "}
+                            个本机估算单位
+                          </span>
+                          <p>{contextSelectionReasonLabel(entry)}</p>
+                          {entry.evidence.length > 0 && (
+                            <small>
+                              来源：
+                              {uniqueContextSourceTypes(entry.evidence)
+                                .map(contextSourceTypeLabel)
+                                .join("；")}
+                            </small>
+                          )}
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                </details>
+              )}
+
+              <ul className="generation-preflight__checks">
+                {generationPlan.preflight.checks
+                  .filter(({ code }) => code !== "PREFLIGHT_WARNING_PRICING_UNKNOWN")
+                  .map((check) => (
+                    <li key={check.code}>
+                      <div>
+                        <Badge
+                          tone={
+                            check.severity === "blocking"
+                              ? "danger"
+                              : check.severity === "fix_recommended"
+                                ? "warning"
+                                : "neutral"
+                          }
+                        >
+                          {preflightSeverityLabel(check.severity)}
+                        </Badge>
+                        <strong>{preflightCheckLabel(check.code)}</strong>
+                      </div>
+                      {check.action === "SAVE_CHAPTER" ? (
+                        <Button variant="secondary" onClick={() => void manualSave()}>
+                          保存章节
+                        </Button>
+                      ) : check.action === "OPEN_MODEL_CENTER" ||
+                        check.action === "UPDATE_PRICING" ||
+                        check.action === "RETRY_CONNECTION" ? (
+                        <Link
+                          className="back-link"
+                          to={preflightModelHubLink(
+                            check.action === "UPDATE_PRICING"
+                              ? "model-pricing"
+                              : check.action === "RETRY_CONNECTION"
+                                ? "provider-connection"
+                                : "model-selection",
+                          )}
+                          onClick={() => persistEditorView(selectionRef.current)}
+                        >
+                          设置 AI 服务
+                        </Link>
+                      ) : check.action === "REDUCE_CONTEXT" ? (
+                        <Button variant="secondary" onClick={cancelPreflightAndFocusEditor}>
+                          返回正文精简内容
+                        </Button>
+                      ) : null}
+                    </li>
+                  ))}
+              </ul>
+
+              {generationEstimate !== null && (
+                <section className="generation-preflight__cost" aria-label="费用估算">
+                  <div>
+                    <span>本次费用上界估算</span>
+                    <strong>
+                      {formatCostEstimate(generationEstimate.micros, generationEstimate.currency)}
+                    </strong>
+                  </div>
+                  <details>
+                    <summary>用量与计价依据（高级）</summary>
+                    <dl>
+                      <div>
+                        <dt>发送给 AI / AI 返回的文字量（不是金额）</dt>
+                        <dd>
+                          {generationPlan.preflight.inputTokens.toLocaleString("zh-CN")} /{" "}
+                          {generationPlan.preflight.maximumOutputTokens.toLocaleString("zh-CN")}{" "}
+                          个本机估算单位
+                        </dd>
+                      </div>
+                      <div>
+                        <dt>估算依据</dt>
+                        <dd>
+                          {generationPlan.tokenEstimateSource === "local_demo"
+                            ? "内置演示，不计费"
+                            : "按文本体积保守估算"}
+                        </dd>
+                      </div>
+                      <div>
+                        <dt>价格来源</dt>
+                        <dd>
+                          {generationEstimate.pricingVersion} ·{" "}
+                          {generationEstimate.priceUpdatedAt.slice(0, 10)}
+                        </dd>
+                      </div>
+                    </dl>
+                  </details>
+                  {generationPlan.preflight.budget?.alerts.map((alert) => (
+                    <InlineAlert
+                      key={alert.scope}
+                      tone={alert.severity === "blocked" ? "error" : "warning"}
+                      title={`${budgetScopeLabel(alert.scope)}预算${
+                        alert.severity === "blocked" ? "已阻断" : "接近或超过阈值"
+                      }`}
+                      description={`预计累计 ${formatCostEstimate(
+                        alert.projectedMicros,
+                        generationEstimate.currency,
+                      )}，预算 ${formatCostEstimate(
+                        alert.limitMicros,
+                        generationEstimate.currency,
+                      )}。`}
+                    />
+                  ))}
                 </section>
               )}
+
+              {generationPlan.projectId !== null &&
+                generationPlan.preflight.estimate !== null &&
+                runtime.mode === "tauri" && (
+                  <section className="generation-preflight__budgets" aria-label="预算设置">
+                    <div>
+                      <h3>预算限制</h3>
+                      <p>金额按当前计价币种填写；达到 80% 会提醒，硬上限超出时阻断生成。</p>
+                    </div>
+                    <div className="generation-preflight__budget-grid">
+                      <FormField label="项目预算">
+                        {(fieldProps) => (
+                          <Input
+                            {...fieldProps}
+                            type="number"
+                            min={0}
+                            step="0.000001"
+                            value={projectBudgetAmount}
+                            placeholder="未设置"
+                            onChange={(event) => setProjectBudgetAmount(event.currentTarget.value)}
+                          />
+                        )}
+                      </FormField>
+                      <FormField label="项目策略">
+                        {(fieldProps) => (
+                          <Select
+                            {...fieldProps}
+                            value={projectBudgetEnforcement}
+                            options={[
+                              { value: "hard", label: "硬上限" },
+                              { value: "warn", label: "仅提醒" },
+                            ]}
+                            onChange={(event) =>
+                              setProjectBudgetEnforcement(
+                                event.currentTarget.value as "warn" | "hard",
+                              )
+                            }
+                          />
+                        )}
+                      </FormField>
+                      <FormField label="本月预算">
+                        {(fieldProps) => (
+                          <Input
+                            {...fieldProps}
+                            type="number"
+                            min={0}
+                            step="0.000001"
+                            value={monthBudgetAmount}
+                            placeholder="未设置"
+                            onChange={(event) => setMonthBudgetAmount(event.currentTarget.value)}
+                          />
+                        )}
+                      </FormField>
+                      <FormField label="本月策略">
+                        {(fieldProps) => (
+                          <Select
+                            {...fieldProps}
+                            value={monthBudgetEnforcement}
+                            options={[
+                              { value: "hard", label: "硬上限" },
+                              { value: "warn", label: "仅提醒" },
+                            ]}
+                            onChange={(event) =>
+                              setMonthBudgetEnforcement(
+                                event.currentTarget.value as "warn" | "hard",
+                              )
+                            }
+                          />
+                        )}
+                      </FormField>
+                    </div>
+                    <Button
+                      variant="secondary"
+                      loading={budgetSaving}
+                      onClick={() => void saveBudgetsAndRefresh()}
+                    >
+                      保存预算并重新检查
+                    </Button>
+                  </section>
+                )}
+            </details>
           </div>
         )}
       </Dialog>
@@ -8531,16 +9168,16 @@ function selectionRewriteUiError(cause: unknown): unknown {
 
 function formatSelectionRewriteCost(disclosure: SelectionRewriteDisclosure): string {
   if (disclosure.estimatedMaximumCostMicros === null || disclosure.currency === null) {
-    return "服务商没有提供可计算的单价，实际费用请以服务商账单为准。";
+    return "服务商未提供费用信息，本次费用暂无法估算。";
   }
   return `本次费用上限 ${disclosure.estimatedMaximumCostMicros} 微单位 ${disclosure.currency}`;
 }
 
 function formatSelectionRewriteCostSummary(disclosure: SelectionRewriteDisclosure): string {
   if (disclosure.estimatedMaximumCostMicros === null || disclosure.currency === null) {
-    return "费用：暂时无法计算";
+    return "服务商未提供费用信息，本次费用暂无法估算。";
   }
-  return `费用上限：${disclosure.estimatedMaximumCostMicros} 微单位 ${disclosure.currency}`;
+  return `费用上限：${disclosure.estimatedMaximumCostMicros} 微单位 ${disclosure.currency}。`;
 }
 
 function selectionRewriteActionLabel(action: EditorGenerationAction): string {
@@ -8552,16 +9189,36 @@ function selectionRewriteActionLabel(action: EditorGenerationAction): string {
 
 function formatProviderActionCost(disclosure: ContinuationGenerationDisclosure): string {
   if (disclosure.estimatedMaximumCostMicros === null || disclosure.currency === null) {
-    return "服务商没有提供可计算的单价，实际费用请以服务商账单为准。";
+    return "服务商未提供费用信息，本次费用暂无法估算。";
   }
   return `本次费用上限 ${disclosure.estimatedMaximumCostMicros} 微单位 ${disclosure.currency}`;
 }
 
 function formatProviderActionCostSummary(disclosure: ContinuationGenerationDisclosure): string {
   if (disclosure.estimatedMaximumCostMicros === null || disclosure.currency === null) {
-    return "费用：暂时无法计算";
+    return "服务商未提供费用信息，本次费用暂无法估算。";
   }
-  return `费用上限：${disclosure.estimatedMaximumCostMicros} 微单位 ${disclosure.currency}`;
+  return `费用上限：${disclosure.estimatedMaximumCostMicros} 微单位 ${disclosure.currency}。`;
+}
+
+function formatPrivateContentSummary(dataDestination: "local" | "remote"): string {
+  return dataDestination === "local" ? "私密内容仅在本机处理" : "不包含私密内容";
+}
+
+function generationLengthSummary(contract: ContinuationOutputContract): string {
+  const sizeLabel = contract.profile === "short" ? "短" : contract.profile === "long" ? "长" : "中";
+  if (contract.advancedTargetVisibleCharacters !== null) {
+    return `${sizeLabel} · 目标约 ${String(contract.advancedTargetVisibleCharacters)} 字（允许约 ±20% 浮动）`;
+  }
+  return contract.profile === "short"
+    ? "短 · 一小段推进"
+    : contract.profile === "long"
+      ? "长 · 一场完整事件或情绪推进"
+      : "中 · 一个完整场景";
+}
+
+function formatRequirementConfirmationSummary(requirement: string | null | undefined): string {
+  return requirement?.normalize("NFKC").trim().length ? "已填写要求" : "未填写额外要求";
 }
 
 function continuationConfirmationScope(
@@ -8575,7 +9232,7 @@ function continuationConfirmationScope(
     bodyVersionId: plan.baseVersionId,
     modelId: disclosure.modelId,
     providerDisplayName: disclosure.connectionDisplayName,
-    taskType: "continuation",
+    taskType: plan.modelTask,
     storyDataScope: disclosure.sentScopeLabel,
     privacyDestination: disclosure.dataDestination,
     disclosureFingerprint: disclosure.fingerprint,

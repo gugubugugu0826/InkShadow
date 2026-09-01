@@ -7,8 +7,7 @@ export interface GenerationProgressPanelProps {
   readonly providerLabel: string;
   readonly modelLabel: string;
   readonly reasoningMode: "disabled" | "provider_default";
-  readonly minimumVisibleCharacters: number;
-  readonly maximumVisibleCharacters: number;
+  readonly lengthSummary: string;
   readonly receivedVisibleCharacters: number;
   readonly stage: GenerationProgressStage;
   readonly preview: string;
@@ -45,11 +44,8 @@ export function GenerationProgressPanel(props: GenerationProgressPanelProps) {
           </dd>
         </div>
         <div>
-          <dt>本次目标</dt>
-          <dd>
-            {props.minimumVisibleCharacters.toLocaleString("zh-CN")}–
-            {props.maximumVisibleCharacters.toLocaleString("zh-CN")} 字
-          </dd>
+          <dt>篇幅</dt>
+          <dd>{props.lengthSummary}</dd>
         </div>
         <div>
           <dt>当前阶段</dt>

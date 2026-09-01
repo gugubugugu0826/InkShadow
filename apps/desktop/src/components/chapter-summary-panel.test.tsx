@@ -3,6 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 
 import type { ChapterSummaryDashboard } from "../infrastructure/chapter-summary-service";
+import type { ContinuousStoryStateDashboard } from "../infrastructure/continuous-story-state-extraction";
 import type { HistoricalChapterBackfillPlan } from "../infrastructure/historical-chapter-backfill-service";
 import { ChapterSummaryPanel } from "./chapter-summary-panel";
 
@@ -42,13 +43,56 @@ describe("ChapterSummaryPanel historical backfill", () => {
     );
 
     expect(await screen.findByText("林舟抵达雾港。")).toBeVisible();
+    expect(screen.getByText("已更新")).toBeVisible();
     expect(document.body).not.toHaveTextContent(invocationId);
     expect(screen.getByText(/模型：OpenAI · summary-model/u)).toBeVisible();
     expect(document.body).not.toHaveTextContent("模型：openai");
     expect(screen.getByText(/本次模型结果已记录，可在模型使用与费用中核对/u)).toBeVisible();
   });
 
-  it("retires legacy automatic cloud preferences and keeps direct actions disabled", async () => {
+  it("uses a natural fallback instead of exposing an unknown extraction task name", async () => {
+    const internalTaskName = "character_extraction_v2";
+    const continuousState = createContinuousStateService();
+    continuousState.inspectProject.mockResolvedValue({
+      changes: [
+        {
+          fact: {
+            toSnapshot: () => ({
+              structuredValue: {
+                extraction: {
+                  task: internalTaskName,
+                  providerKind: "openai",
+                  modelId: "writer-v2",
+                },
+              },
+            }),
+          } as unknown as ContinuousStoryStateDashboard["changes"][number]["fact"],
+          evidenceState: "current",
+          evidenceMessage: "证据对应当前保存版本。",
+        },
+      ],
+      detectedCount: 1,
+      needsConfirmationCount: 1,
+      reversibleCount: 1,
+      historicalCount: 0,
+      invalidEvidenceCount: 0,
+    });
+
+    render(
+      <ChapterSummaryPanel
+        projectId={PROJECT_ID}
+        service={createSummaryService()}
+        continuousState={continuousState}
+        historicalBackfill={{ plan: vi.fn(), register: vi.fn() }}
+      />,
+    );
+
+    expect(await screen.findByText(/最近使用：其他设定整理：OpenAI · writer-v2/u)).toBeVisible();
+    expect(document.body).not.toHaveTextContent(internalTaskName);
+  });
+
+  it("retires legacy automatic cloud preferences and exposes only the local rebuild action", async () => {
+    const user = userEvent.setup();
     const summaryService = createSummaryService();
     summaryService.inspectProject.mockResolvedValue({
       automaticOnManualSaveEnabled: true,
@@ -57,7 +101,7 @@ describe("ChapterSummaryPanel historical backfill", () => {
           chapterId: PROJECT_ID,
           chapterTitle: "第一章",
           currentVersionId: PROJECT_ID,
-          state: "missing",
+          state: "stale",
           message: "尚无摘要",
           summary: null,
           sourceVersionId: null,
@@ -84,7 +128,14 @@ describe("ChapterSummaryPanel historical backfill", () => {
     await screen.findByText("第一章");
     expect(summaryService.setAutomaticOnManualSaveEnabled).toHaveBeenCalledWith(PROJECT_ID, false);
     expect(continuousState.setAutomaticOnManualSaveEnabled).toHaveBeenCalledWith(PROJECT_ID, false);
-    expect(screen.getByRole("button", { name: "重建摘要（暂不可用）" })).toBeDisabled();
+    expect(screen.getByText("摘要待更新")).toBeVisible();
+    await user.click(screen.getByRole("button", { name: "重建摘要" }));
+    expect(summaryService.rebuildCurrentLocalSummary).toHaveBeenCalledWith({
+      projectId: PROJECT_ID,
+      chapterId: PROJECT_ID,
+    });
+    expect(await screen.findByText("章节摘要已更新")).toBeVisible();
+    expect(screen.getByText(/没有调用外部模型/u)).toBeVisible();
     expect(screen.queryByRole("button", { name: /启用手动保存/u })).not.toBeInTheDocument();
   });
 
@@ -241,12 +292,24 @@ function createSummaryService() {
     setAutomaticOnManualSaveEnabled: vi.fn(),
     summarizeSavedVersion: vi.fn(),
     clearChapterSummary: vi.fn(),
+    rebuildCurrentLocalSummary: vi.fn().mockResolvedValue({
+      status: "generated",
+      code: "CHAPTER_SUMMARY_LOCAL_REBUILT",
+      message: "已在本机根据当前保存版本重建摘要；没有调用外部模型。",
+      projectId: PROJECT_ID,
+      chapterId: PROJECT_ID,
+      versionId: PROJECT_ID,
+      fact: null,
+      replacedFactIds: [],
+      invocation: null,
+      authorityMode: "plain_non_authoritative",
+    }),
   };
 }
 
 function createContinuousStateService() {
   return {
-    inspectProject: vi.fn().mockResolvedValue({
+    inspectProject: vi.fn<() => Promise<ContinuousStoryStateDashboard>>().mockResolvedValue({
       changes: [],
       detectedCount: 0,
       needsConfirmationCount: 0,

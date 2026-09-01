@@ -110,6 +110,8 @@ export interface GenerationPreflightInput {
 }
 
 export interface GenerationPreflightSnapshot {
+  /** Content-free SHA-256 request identity; absent only on legacy/non-generation snapshots. */
+  readonly requestFingerprint?: string;
   readonly checkedAt: string;
   readonly readiness: GenerationPreflightReadiness;
   readonly canStart: boolean;
@@ -133,6 +135,8 @@ export interface GenerationPreflightSnapshot {
   /** Safe task-aware budget facts. Optional for legacy/non-continuation callers. */
   readonly generationBudget?: Readonly<{
     outputProfile: string;
+    /** Optional only for reading generation receipts written before 0.2.17. */
+    advancedTargetVisibleCharacters?: number | null;
     targetVisibleCharacters: number;
     minimumVisibleCharacters: number;
     maximumVisibleCharacters: number;

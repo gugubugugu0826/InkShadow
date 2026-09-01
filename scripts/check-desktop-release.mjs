@@ -18,16 +18,20 @@ const desktopRoot = path.join(workspaceRoot, "apps", "desktop");
 const tauriRoot = path.join(desktopRoot, "src-tauri");
 
 const budgets = Object.freeze({
-  entryChunk: 300 * 1024,
+  // Keep this aligned with apps/desktop/vite.config.ts. v0.2.17 retains the
+  // audited editor recovery and local summary path in the entry chunk while
+  // continuing to reject source maps, tests and unrelated aggregate growth.
+  entryChunk: 352 * 1024,
   // Keep this aligned with apps/desktop/vite.config.ts. The v0.2.16 change is
-  // limited to one cohesive lazy route; the aggregate payload ceiling remains
-  // unchanged so unrelated growth still fails the release audit.
+  // limited to one cohesive lazy route. v0.2.17 adds exactly 32 KiB to the
+  // audited aggregate ceiling for the editor recovery, prompt boundary and
+  // local summary production graph; unrelated growth still fails the audit.
   asyncChunk: 520 * 1024,
   cssAsset: 128 * 1024,
   workerAsset: 1_536 * 1024,
   generalAsset: 2 * 1024 * 1024,
   releaseManifest: 32 * 1024,
-  totalFrontend: 7 * 1024 * 1024 + 128 * 1024,
+  totalFrontend: 7 * 1024 * 1024 + 160 * 1024,
   maximumFiles: 200,
 });
 

@@ -102,7 +102,7 @@ export function ContextHistoryPanel({ projectId, store, novelSkills }: ContextHi
       if (trace?.projectId !== expectedProjectId) {
         throw new UiActionError(
           "CONTEXT_TRACE_NOT_FOUND",
-          "这条上下文记录已不存在，请刷新列表后重试。",
+          "这条本次参考记录已不存在，请刷新列表后重试。",
         );
       }
       setSelected(trace);
@@ -143,10 +143,10 @@ export function ContextHistoryPanel({ projectId, store, novelSkills }: ContextHi
       )}
 
       {loading && summaries.length === 0 ? (
-        <p role="status">正在读取上下文记录…</p>
+        <p role="status">正在读取本次参考记录…</p>
       ) : summaries.length === 0 ? (
         <EmptyState
-          title="还没有上下文记录"
+          title="还没有本次参考记录"
           description="第一次使用“继续创作”等 AI 功能后，这里会显示 AI 采用了哪些设定，以及哪些资料因为可参考文字量或相关性被舍弃。"
         />
       ) : (

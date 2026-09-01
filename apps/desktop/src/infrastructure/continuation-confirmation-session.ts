@@ -4,7 +4,7 @@ export interface ContinuationConfirmationScope {
   readonly bodyVersionId: string;
   readonly modelId: string;
   readonly providerDisplayName: string;
-  readonly taskType: "continuation";
+  readonly taskType: "prose_generation" | "continuation";
   readonly storyDataScope: string;
   readonly privacyDestination: "local" | "remote";
   readonly disclosureFingerprint: string;
@@ -79,7 +79,11 @@ function sameScope(
 }
 
 function parseStoredConfirmation(value: unknown): StoredContinuationConfirmation | null {
-  if (!isRecord(value) || value.schemaVersion !== 1 || value.taskType !== "continuation") {
+  if (
+    !isRecord(value) ||
+    value.schemaVersion !== 1 ||
+    (value.taskType !== "prose_generation" && value.taskType !== "continuation")
+  ) {
     return null;
   }
   if (value.privacyDestination !== "local" && value.privacyDestination !== "remote") {
@@ -103,7 +107,7 @@ function parseStoredConfirmation(value: unknown): StoredContinuationConfirmation
     bodyVersionId: value.bodyVersionId,
     modelId: value.modelId,
     providerDisplayName: value.providerDisplayName,
-    taskType: "continuation",
+    taskType: value.taskType,
     storyDataScope: value.storyDataScope,
     privacyDestination: value.privacyDestination,
     disclosureFingerprint: value.disclosureFingerprint,

@@ -11,6 +11,10 @@ import {
   type NativeModelGatewayClient,
 } from "../infrastructure/runtime";
 import { saveEditorPreferences } from "../infrastructure/editor-preferences-store";
+import {
+  loadEditorContinuationPreference,
+  saveEditorContinuationPreference,
+} from "../infrastructure/editor-continuation-preference";
 import { RuntimeProvider } from "../runtime-context";
 import { EditorPage } from "./editor-page";
 
@@ -145,65 +149,242 @@ describe("simplified editor workspace", () => {
   });
 
   it.each(["direct", "professional"] as const)(
-    "keeps all four selection writing actions discoverable in %s mode before text is selected",
+    "keeps continuation permanent and reveals selection tools only for a live selection in %s mode",
     async (mode) => {
       const runtime = createNativeEditorRuntime();
       await ensureWritingMode(runtime, mode);
       const { chapter, project } = await seedProject(runtime);
+      const user = userEvent.setup();
 
       renderEditor(runtime, project, chapter);
 
+      const editor = await screen.findByRole<HTMLTextAreaElement>("textbox", {
+        name: "章节正文",
+      });
+      const toolbar = document.querySelector(".editor-toolbar");
+      if (!(toolbar instanceof HTMLElement)) throw new Error("找不到编辑器顶部操作区");
+      expect(within(toolbar).getByRole("button", { name: "生成续写建议" })).toBeVisible();
+      expect(screen.getAllByRole("textbox", { name: /^本次要求（可选）/u })).toHaveLength(1);
+      expect(screen.queryByRole("textbox", { name: "自定义方向" })).not.toBeInTheDocument();
+      expect(screen.queryByRole("region", { name: "选中文本写作操作" })).not.toBeInTheDocument();
+
+      editor.focus();
+      editor.setSelectionRange(0, 3);
+      fireEvent.select(editor);
       const actions = await screen.findByRole("region", { name: "选中文本写作操作" });
-      expect(
-        within(actions).getByText("先在正文中选中需要处理的文字，再选择改写、润色、扩写或缩写。"),
-      ).toBeVisible();
+      expect(within(toolbar).getByRole("button", { name: "生成续写建议" })).toBeVisible();
+      expect(screen.getAllByRole("textbox", { name: /^本次要求（可选）/u })).toHaveLength(1);
       for (const name of ["改写", "润色", "扩写", "缩写"]) {
-        expect(within(actions).getByRole("button", { name })).toBeDisabled();
+        expect(within(actions).getByRole("button", { name })).toBeEnabled();
       }
+      await user.click(within(actions).getByRole("button", { name: "取消选区" }));
+      expect(screen.queryByRole("region", { name: "选中文本写作操作" })).not.toBeInTheDocument();
+      expect(within(toolbar).getByRole("button", { name: "生成续写建议" })).toBeVisible();
     },
   );
 
-  it("remembers the selected continuation length and safely falls back when my requirement is blank", async () => {
-    const runtime = createDevelopmentRuntime(window.localStorage);
+  it.each(["direct", "professional"] as const)(
+    "uses one requirement control, three plain-language lengths and an optional advanced target in %s mode",
+    async (mode) => {
+      const runtime = createDevelopmentRuntime(window.localStorage);
+      await ensureWritingMode(runtime, mode);
+      const { chapter, project } = await seedProject(runtime);
+      const user = userEvent.setup();
+
+      const firstRender = renderEditor(runtime, project, chapter);
+      const firstExpandAssistant = await screen.findByRole("button", {
+        name:
+          mode === "direct" ? /展开创作助手|收起创作助手/u : /展开 AI 创作助手|收起 AI 创作助手/u,
+      });
+      if (firstExpandAssistant.getAttribute("aria-expanded") === "false") {
+        await user.click(firstExpandAssistant);
+      }
+      const firstLength = await screen.findByRole("combobox", { name: /篇幅/u });
+      expect(within(firstLength).getByRole("option", { name: "短 · 一小段推进" })).toBeVisible();
+      expect(within(firstLength).getByRole("option", { name: "中 · 一个完整场景" })).toBeVisible();
+      expect(
+        within(firstLength).getByRole("option", { name: "长 · 一场完整事件或情绪推进" }),
+      ).toBeVisible();
+      expect(
+        within(firstLength).queryByRole("option", { name: /自定义/u }),
+      ).not.toBeInTheDocument();
+      await user.selectOptions(firstLength, "long");
+      expect(firstLength).toHaveValue("long");
+      firstRender.unmount();
+
+      renderEditor(runtime, project, chapter);
+      const secondExpandAssistant = await screen.findByRole("button", {
+        name:
+          mode === "direct" ? /展开创作助手|收起创作助手/u : /展开 AI 创作助手|收起 AI 创作助手/u,
+      });
+      if (secondExpandAssistant.getAttribute("aria-expanded") === "false") {
+        await user.click(secondExpandAssistant);
+      }
+      expect(await screen.findByRole("combobox", { name: /篇幅/u })).toHaveValue("long");
+      expect(screen.queryByRole("combobox", { name: /写到哪里/u })).not.toBeInTheDocument();
+      expect(screen.getAllByRole("textbox", { name: /^本次要求（可选）/u })).toHaveLength(1);
+      expect(screen.getByRole("textbox", { name: /^本次要求（可选）/u })).toHaveAttribute(
+        "placeholder",
+        "例如：写到主角发现密信为止。",
+      );
+      await user.click(screen.getByText("高级篇幅设置"));
+      await user.click(screen.getByRole("checkbox", { name: "使用目标字数" }));
+      const advancedTarget = screen.getByRole("spinbutton", {
+        name: /目标字数，允许约 ±20% 浮动/u,
+      });
+      expect(advancedTarget).toBeVisible();
+      await user.clear(advancedTarget);
+      await user.type(advancedTarget, "3300");
+      expect(advancedTarget).toHaveValue(3_300);
+      expect(loadEditorContinuationPreference(window.localStorage, project.id)).toMatchObject({
+        profile: "long",
+        customTargetVisibleCharacters: 3_300,
+      });
+
+      await user.clear(advancedTarget);
+      await user.type(advancedTarget, "33");
+      expect(screen.getByText("请输入 200–12,000 之间的整数；当前输入尚未保存。")).toBeVisible();
+      expect(screen.getByRole("button", { name: "生成续写建议" })).toBeDisabled();
+      await user.tab();
+      expect(advancedTarget).toHaveValue(3_300);
+      expect(screen.getByText("输入未保存，已恢复上次有效的目标字数。")).toBeVisible();
+      expect(screen.getByRole("button", { name: "生成续写建议" })).toBeEnabled();
+
+      await user.click(screen.getByRole("button", { name: "生成续写建议" }));
+      await waitFor(async () => {
+        const candidates = await runtime.repositories.aiCandidates.listByChapterId(chapter.id);
+        expect(candidates.ok && candidates.value[0]?.status).toBe("ready");
+      });
+      const stable = await runtime.repositories.chapters.findById(chapter.id);
+      expect(stable.ok && stable.value?.content).toBe(chapter.content);
+    },
+  );
+
+  it("shows continuation length only while the active writing task actually consumes it", async () => {
+    const runtime = createNativeEditorRuntime();
     await ensureWritingMode(runtime, "professional");
     const { chapter, project } = await seedProject(runtime);
     const user = userEvent.setup();
 
-    const firstRender = renderEditor(runtime, project, chapter);
-    const firstExpandAssistant = await screen.findByRole("button", {
-      name: /展开 AI 创作助手|收起 AI 创作助手/u,
+    renderEditor(runtime, project, chapter);
+
+    const editor = await screen.findByRole<HTMLTextAreaElement>("textbox", {
+      name: "章节正文",
     });
-    if (firstExpandAssistant.getAttribute("aria-expanded") === "false") {
-      await user.click(firstExpandAssistant);
+    expect(screen.getByRole("combobox", { name: /篇幅/u })).toBeVisible();
+
+    editor.focus();
+    editor.setSelectionRange(0, 3);
+    fireEvent.select(editor);
+    const selectionActions = await screen.findByRole("region", {
+      name: "选中文本写作操作",
+    });
+
+    for (const action of ["改写", "润色", "扩写", "缩写"]) {
+      await user.click(within(selectionActions).getByRole("button", { name: action }));
+      expect(screen.queryByRole("combobox", { name: /篇幅/u })).not.toBeInTheDocument();
+      expect(screen.getByText(`当前任务：${action}`)).toBeVisible();
+      expect(screen.getByRole("button", { name: `查看${action}发送前说明` })).toBeEnabled();
+
+      await user.click(screen.getByRole("button", { name: "切换到续写要求" }));
+      expect(await screen.findByRole("combobox", { name: /篇幅/u })).toBeVisible();
+      expect(screen.getByText("当前任务：生成续写建议")).toBeVisible();
     }
-    const firstLength = await screen.findByRole("combobox", { name: /本次续写长度/u });
-    await user.selectOptions(firstLength, "long");
-    expect(firstLength).toHaveValue("long");
-    firstRender.unmount();
+  });
+
+  it("keeps the same length control available for an empty chapter opening", async () => {
+    const runtime = createDevelopmentRuntime(window.localStorage);
+    const { chapter, project } = await seedProject(runtime, "   ");
 
     renderEditor(runtime, project, chapter);
-    const secondExpandAssistant = await screen.findByRole("button", {
-      name: /展开 AI 创作助手|收起 AI 创作助手/u,
-    });
-    if (secondExpandAssistant.getAttribute("aria-expanded") === "false") {
-      await user.click(secondExpandAssistant);
-    }
-    expect(await screen.findByRole("combobox", { name: /本次续写长度/u })).toHaveValue("long");
-    await user.selectOptions(
-      screen.getByRole("combobox", { name: /写到哪里/u }),
-      "custom_instruction",
-    );
-    expect(
-      screen.getByText("未填写具体要求时，将继续按当前正文和本次选中的故事资料自然续写。"),
-    ).toBeVisible();
 
-    await user.click(screen.getByRole("button", { name: "生成续写建议" }));
-    await waitFor(async () => {
-      const candidates = await runtime.repositories.aiCandidates.listByChapterId(chapter.id);
-      expect(candidates.ok && candidates.value[0]?.status).toBe("ready");
+    await screen.findByRole("textbox", { name: "章节正文" });
+    const toolbar = document.querySelector(".editor-toolbar");
+    if (!(toolbar instanceof HTMLElement)) throw new Error("找不到编辑器顶部操作区");
+    expect(await within(toolbar).findByRole("button", { name: "生成开头" })).toBeVisible();
+    expect(screen.getByRole("combobox", { name: /篇幅/u })).toBeVisible();
+  });
+
+  it("offers an old project-wide requirement for explicit chapter recovery without cross-chapter use", async () => {
+    const runtime = createDevelopmentRuntime(window.localStorage);
+    const { chapter, project } = await seedProject(runtime);
+    const secondChapter = await runtime.useCases.createChapter.execute({
+      projectId: project.id,
+      title: "第二章",
+      content: "第二章正文",
     });
-    const stable = await runtime.repositories.chapters.findById(chapter.id);
-    expect(stable.ok && stable.value?.content).toBe(chapter.content);
+    if (!secondChapter.ok) throw secondChapter.error;
+    saveEditorContinuationPreference(window.localStorage, project.id, {
+      schemaVersion: 1,
+      profile: "custom",
+      customTargetVisibleCharacters: 3_300,
+      destination: "custom_instruction",
+      customDestinationInstruction: "写到主角发现密信为止。",
+    });
+    const user = userEvent.setup();
+
+    const firstRender = renderEditor(runtime, project, chapter);
+    const requirement = await screen.findByRole<HTMLTextAreaElement>("textbox", {
+      name: /^本次要求（可选）/u,
+    });
+    expect(requirement).toHaveValue("");
+    expect(screen.getByText("发现旧版续写要求")).toBeVisible();
+    await user.click(screen.getByRole("button", { name: "确认用于当前章节" }));
+    expect(requirement).toHaveValue("写到主角发现密信为止。");
+    expect(loadEditorContinuationPreference(window.localStorage, project.id)).toMatchObject({
+      customDestinationInstruction: "写到主角发现密信为止。",
+    });
+    firstRender.unmount();
+
+    const restarted = renderEditor(runtime, project, chapter);
+    expect(
+      await screen.findByRole<HTMLTextAreaElement>("textbox", {
+        name: /^本次要求（可选）/u,
+      }),
+    ).toHaveValue("写到主角发现密信为止。");
+    expect(screen.queryByText("发现旧版续写要求")).not.toBeInTheDocument();
+    restarted.unmount();
+
+    renderEditor(runtime, project, secondChapter.value.chapter);
+    expect(
+      await screen.findByRole<HTMLTextAreaElement>("textbox", {
+        name: /^本次要求（可选）/u,
+      }),
+    ).toHaveValue("");
+    expect(screen.getByText("发现旧版续写要求")).toBeVisible();
+  });
+
+  it("shows a corrupt same-key writing draft and preserves its original bytes across restart", async () => {
+    window.localStorage.clear();
+    const runtime = createDevelopmentRuntime(window.localStorage);
+    const { chapter, project } = await seedProject(runtime);
+    const user = userEvent.setup();
+
+    const first = renderEditor(runtime, project, chapter);
+    const requirement = await screen.findByRole("textbox", { name: /^本次要求（可选）/u });
+    await user.type(requirement, "先保存一条可恢复要求");
+    const draftKey = Object.keys(window.localStorage).find((key) =>
+      key.startsWith("inkshadow.editor-writing-task-draft.v1:"),
+    );
+    expect(draftKey).toBeDefined();
+    if (draftKey === undefined) {
+      throw new Error("Expected the exact writing draft key to be present.");
+    }
+    first.unmount();
+    window.localStorage.setItem(draftKey, "{not-json");
+
+    renderEditor(runtime, project, chapter);
+    expect(await screen.findByRole("textbox", { name: /^本次要求（可选）/u })).toHaveValue("");
+    expect(await screen.findByText("本次要求草稿无法安全读取")).toBeVisible();
+    expect(screen.getByText(/原始记录已保留.*不会被当作空要求自动发送/u)).toBeVisible();
+    expect(window.localStorage.getItem(draftKey)).toBe("{not-json");
+
+    await user.type(
+      screen.getByRole("textbox", { name: /^本次要求（可选）/u }),
+      "重新输入也不能静默覆盖",
+    );
+    expect(await screen.findByText("本次要求暂时无法保留到重启后")).toBeVisible();
+    expect(window.localStorage.getItem(draftKey)).toBe("{not-json");
   });
 
   it("shows local-only limits and direct recovery entries before private generation", async () => {
@@ -373,17 +554,13 @@ describe("simplified editor workspace", () => {
     fireEvent.select(editor);
     expect(editor).toHaveFocus();
 
-    const toolbar = document.querySelector(".editor-toolbar");
-    if (!(toolbar instanceof HTMLElement)) {
-      throw new Error("找不到编辑器顶部操作区");
-    }
-    const rewriteAction = within(toolbar).getByRole("button", { name: "修改选中内容" });
+    const selectionActions = screen.getByRole("region", { name: "选中文本写作操作" });
+    const rewriteAction = within(selectionActions).getByRole("button", { name: "改写" });
     expect(rewriteAction).toBeVisible();
     const instruction = screen.getByRole<HTMLTextAreaElement>("textbox", {
-      name: "自定义改写选中的 3 个字符",
+      name: /^本次要求（可选）/u,
     });
-    expect(instruction).toHaveValue("保持原意，让表达更自然。");
-    expect(screen.getByRole("button", { name: "查看自定义改写发送前说明" })).toBeEnabled();
+    expect(instruction).toHaveValue("");
 
     let scheduledFocus: FrameRequestCallback | undefined;
     const animationFrame = vi
@@ -399,6 +576,8 @@ describe("simplified editor workspace", () => {
     }
     scheduledFocus(0);
     expect(instruction).toHaveFocus();
+    expect(instruction).toHaveAttribute("placeholder", "例如：改成林舟的第一人称。");
+    expect(screen.getByRole("button", { name: "查看改写发送前说明" })).toBeEnabled();
     animationFrame.mockRestore();
   });
 

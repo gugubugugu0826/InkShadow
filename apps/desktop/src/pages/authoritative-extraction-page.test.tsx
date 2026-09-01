@@ -82,6 +82,9 @@ describe("AuthoritativeExtractionPage", () => {
       "0",
     );
     expect(within(decisionSurface).getByRole("heading", { name: "地点设定待确认" })).toBeVisible();
+    expect(within(decisionSurface).getByText("South City")).toBeVisible();
+    expect(within(decisionSurface).getByText("North Tower")).toBeVisible();
+    expect(decisionSurface.querySelectorAll(".authoritative-extraction-diff pre")).toHaveLength(0);
     const advancedDetails = within(decisionSurface).getByText("高级诊断详情");
     const diagnosticValues = [
       "linzhou.location",
@@ -113,8 +116,15 @@ describe("AuthoritativeExtractionPage", () => {
     expect(decisionSurface.querySelector(":scope > .ink-card__footer")).toHaveClass(
       "candidate-decision-actions",
     );
-    await user.click(screen.getByRole("button", { name: "修改后使用" }));
-    expect(screen.getByRole("textbox", { name: "修改后保存的设定内容" })).toBeVisible();
+    await user.click(screen.getByRole("button", { name: "高级修改" }));
+    const rawEditor = screen.getByRole("textbox", {
+      name: "修改后保存的设定内容",
+      hidden: true,
+    });
+    expect(rawEditor).not.toBeVisible();
+    expect((rawEditor as HTMLTextAreaElement).value).toContain("location");
+    await user.click(screen.getByText("高级：按原始结构修改"));
+    expect(rawEditor).toBeVisible();
     await user.click(screen.getByRole("button", { name: "取消修改" }));
 
     await user.click(screen.getByRole("button", { name: "使用这条设定" }));

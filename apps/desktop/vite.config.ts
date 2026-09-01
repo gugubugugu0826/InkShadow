@@ -2,7 +2,12 @@ import { defineConfig, type Plugin } from "vite";
 import react from "@vitejs/plugin-react";
 import { fileURLToPath } from "node:url";
 
-const ENTRY_CHUNK_BUDGET_BYTES = 300 * 1024;
+// v0.2.17 keeps the editor draft recovery, local summary rebuild and author-visible
+// status handling on the startup path. A current Rollup graph audit found only
+// production modules: no source maps, tests or duplicate framework runtimes. The
+// minified entry is 349,325 bytes, so retain a bounded 352 KiB ceiling instead of
+// weakening behavior solely to meet the historical 300 KiB allowance.
+const ENTRY_CHUNK_BUDGET_BYTES = 352 * 1024;
 // v0.2.16 adds the reviewed consistency-investigation disclosure and recovery
 // states to one cohesive lazy route. The minified route is 513,065 bytes, so
 // allow 520 KiB without raising the aggregate payload ceiling or weakening the
@@ -45,10 +50,12 @@ const PDFJS_WORKER_LICENSE_BANNER = `/*!
 // dispatch receipts and the reviewed settings workflows. A current/baseline
 // Rollup audit found no duplicated runtimes, source maps or test modules; the
 // verified production graph grew by 60,542 bytes. Add exactly 128 KiB to the
-// aggregate allowance. v0.2.16 narrowly raises only the asynchronous-chunk
-// ceiling documented above, while continuing to count every lazy chunk toward
-// this unchanged total.
-const TOTAL_FRONTEND_BUDGET_BYTES = 7 * 1024 * 1024 + 128 * 1024;
+// aggregate allowance. v0.2.16 narrowly raised only the asynchronous-chunk
+// ceiling. The audited v0.2.17 editor recovery, prompt boundary and local
+// summary implementation bring the complete production graph to 7,487,568
+// bytes. No source maps, tests or duplicate runtimes are present, so add exactly
+// 32 KiB while continuing to count every startup and lazy chunk.
+const TOTAL_FRONTEND_BUDGET_BYTES = 7 * 1024 * 1024 + 160 * 1024;
 
 function isPdfJsWorkerModule(facadeModuleId: string | null): boolean {
   return (

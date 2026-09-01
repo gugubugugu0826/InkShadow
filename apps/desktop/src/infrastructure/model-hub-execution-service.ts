@@ -1,3 +1,4 @@
+import { assertVisibleProseOutput, VisibleProseOutputError } from "@inkshadow/ai-core";
 import type { Clock, UuidV7Generator } from "@inkshadow/domain";
 
 import {
@@ -481,6 +482,13 @@ export async function executeModelHubTextTask(
     if (executionPolicy.outputContract === "visible_text" && generated.text.trim().length === 0) {
       throw visibleTextOutputEmptyFailure(generated);
     }
+    if (executionPolicy.reasoningMode === "provider_visible_prose") {
+      try {
+        assertVisibleProseOutput(generated.text);
+      } catch (cause: unknown) {
+        throw responseValidationFailure(cause, generated);
+      }
+    }
     if (input.validateGeneratedText !== undefined) {
       try {
         const validator = input.validateGeneratedText as (text: string) => unknown;
@@ -882,7 +890,9 @@ function responseValidationFailure(
       : explicitCode !== null && /(?:JSON|OUTPUT|RESPONSE|SCHEMA)/u.test(explicitCode)
         ? explicitCode
         : "MODEL_STRUCTURED_OUTPUT_SCHEMA_MISMATCH";
-  return new ModelHubResponseValidationFailure(code, generated);
+  return new ModelHubResponseValidationFailure(code, generated, {
+    ...(cause instanceof VisibleProseOutputError ? { message: cause.message } : {}),
+  });
 }
 
 async function resolveTextPlan(

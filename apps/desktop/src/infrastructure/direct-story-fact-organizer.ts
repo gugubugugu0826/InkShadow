@@ -16,16 +16,17 @@ import {
 import {
   CHAPTER_SUMMARY_MAXIMUM_SEGMENTS,
   CHAPTER_SUMMARY_MAXIMUM_SOURCE_CHARACTERS,
+  CHAPTER_SUMMARY_LOCAL_MODEL,
+  CHAPTER_SUMMARY_LOCAL_PROVIDER,
   CHAPTER_SUMMARY_PAYLOAD_SCHEMA_VERSION,
   CHAPTER_SUMMARY_SEGMENT_CHARACTERS,
   CHAPTER_SUMMARY_TASK,
+  extractiveChapterSummarySentenceRanges,
 } from "./chapter-summary-service";
 
 const ORGANIZER_SCHEMA = "inkshadow.direct-local-story-fact.v1";
 const MAXIMUM_FACTS_PER_VERSION = 128;
 const ORGANIZER_REFERENCE_PREFIX = `direct-local:${ORGANIZER_SCHEMA}:`;
-const LOCAL_SUMMARY_PROVIDER = "本地确定性整理";
-const LOCAL_SUMMARY_MODEL = "首尾句抽取摘要第一版";
 const SOURCE_CONTENT_HASH_PATTERN = /^[a-f0-9]{64}$/u;
 
 export interface DirectStoryFactOrganizerInput {
@@ -215,6 +216,8 @@ export async function organizeDirectStoryFacts(
   const deletedEvidence = new Set<string>();
   const confirmedFactTexts: string[] = [];
   const userAuthoredFacts = new Set<string>();
+  const snapshots = listed.value.map((fact) => fact.toSnapshot());
+  const automaticallySupersededSummaryFactIds = explicitlySupersededLocalSummaryFactIds(snapshots);
   for (const fact of listed.value) {
     const snapshot = fact.toSnapshot();
     existingEvidence.add(evidenceIdentity(fact));
@@ -223,7 +226,9 @@ export async function organizeDirectStoryFacts(
     }
     const directIdentity = directOrganizerEvidenceIdentity(snapshot);
     if (snapshot.status === "deprecated") {
-      if (directIdentity !== null) deletedEvidence.add(directIdentity);
+      if (directIdentity !== null && !automaticallySupersededSummaryFactIds.has(snapshot.id)) {
+        deletedEvidence.add(directIdentity);
+      }
       continue;
     }
     if (directIdentity !== null && snapshot.source.versionId !== null) {
@@ -455,8 +460,8 @@ function directOrganizerEvidenceIdentity(
   const isLocalSummary =
     snapshot.factType === "chapter_summary" &&
     rebuildablePayload?.schemaVersion === CHAPTER_SUMMARY_PAYLOAD_SCHEMA_VERSION &&
-    generation?.providerKind === LOCAL_SUMMARY_PROVIDER &&
-    generation.modelId === LOCAL_SUMMARY_MODEL &&
+    generation?.providerKind === CHAPTER_SUMMARY_LOCAL_PROVIDER &&
+    generation.modelId === CHAPTER_SUMMARY_LOCAL_MODEL &&
     snapshot.origin === "system" &&
     snapshot.source.reference.startsWith("chapter-summary:");
   if (!isDirectOrganizer && !isLocalSummary) {
@@ -469,6 +474,38 @@ function directOrganizerEvidenceIdentity(
   return typeof excerptDigest === "string" && /^[a-f0-9]{64}$/u.test(excerptDigest)
     ? directEvidenceIdentity(snapshot.source.chapterId, snapshot.factType, excerptDigest)
     : null;
+}
+
+function explicitlySupersededLocalSummaryFactIds(
+  snapshots: readonly ReturnType<StoryFact["toSnapshot"]>[],
+): ReadonlySet<string> {
+  const localSummaries = snapshots.filter(
+    (snapshot) =>
+      snapshot.factType === "chapter_summary" && directOrganizerEvidenceIdentity(snapshot) !== null,
+  );
+  const byId = new Map<string, (typeof localSummaries)[number]>(
+    localSummaries.map((snapshot) => [snapshot.id, snapshot] as const),
+  );
+  const superseded = new Set<string>();
+  for (const successor of localSummaries) {
+    const successorStructured = storyValueRecord(successor.structuredValue);
+    const predecessorIds = successorStructured?.supersedesFactIds;
+    if (!Array.isArray(predecessorIds)) continue;
+    for (const predecessorId of predecessorIds) {
+      const predecessor = typeof predecessorId === "string" ? byId.get(predecessorId) : undefined;
+      const predecessorStructured = storyValueRecord(predecessor?.structuredValue);
+      if (
+        predecessor?.status === "deprecated" &&
+        predecessor.projectId === successor.projectId &&
+        predecessor.source.chapterId === successor.source.chapterId &&
+        typeof successorStructured?.replacementKey === "string" &&
+        successorStructured.replacementKey === predecessorStructured?.replacementKey
+      ) {
+        superseded.add(predecessor.id);
+      }
+    }
+  }
+  return superseded;
 }
 
 function directOrganizerReferenceDigest(reference: string): string | null {
@@ -519,7 +556,7 @@ async function organizeExtractiveChapterSummary(
   ) {
     return true;
   }
-  const selected = extractiveSummarySentenceRanges(input.acceptedText);
+  const selected = extractiveChapterSummarySentenceRanges(input.acceptedText);
   const primary = selected[0];
   if (primary === undefined) return true;
 
@@ -567,8 +604,8 @@ async function organizeExtractiveChapterSummary(
         continuityNotes: [],
         generation: {
           task: CHAPTER_SUMMARY_TASK,
-          providerKind: LOCAL_SUMMARY_PROVIDER,
-          modelId: LOCAL_SUMMARY_MODEL,
+          providerKind: CHAPTER_SUMMARY_LOCAL_PROVIDER,
+          modelId: CHAPTER_SUMMARY_LOCAL_MODEL,
           invocationId: input.versionId,
         },
         budget: {
@@ -857,6 +894,25 @@ function extractHighConfidenceNarrativeFacts(sentence: string): readonly Natural
     });
   }
 
+  const recollection =
+    /^(?<rememberer>[\p{Script=Han}A-Za-z·]{1,12}?)(?:忽然|突然|再次|又)?(?:想起|回想起|记起|忆起)(?<memory>[^。！？]{2,200})[。！？]?$/u.exec(
+      narrativeBody,
+    );
+  const rememberer = recollection?.groups?.rememberer;
+  const memory = recollection?.groups?.memory;
+  if (rememberer !== undefined && memory !== undefined) {
+    add({
+      factType: "recalled_memory",
+      contentText: narrativeBody,
+      kind: "ordinary",
+      payload: {
+        kind: "explicit_narrative_recollection",
+        rememberer,
+        memory,
+      },
+    });
+  }
+
   const character =
     /^(?<character>[\p{Script=Han}A-Za-z·]{2,12})(?:(?:今年(?<age>[一二三四五六七八九十百0-9]{1,3})岁)|(?:担任(?<role>[^，。！？]{2,24}))|(?:是一名(?<occupation>[^，。！？]{2,24})))[，。！？]?/u.exec(
       narrativeBody,
@@ -1091,10 +1147,10 @@ function isExplicitCharacterName(value: string): boolean {
 }
 
 interface SentenceRange {
-  startOffset: number;
-  endOffset: number;
-  excerpt: string;
-  closed: boolean;
+  readonly startOffset: number;
+  readonly endOffset: number;
+  readonly excerpt: string;
+  readonly closed: boolean;
 }
 
 function* sentenceRanges(content: string): Generator<Readonly<SentenceRange>, void> {
@@ -1111,20 +1167,6 @@ function* sentenceRanges(content: string): Generator<Readonly<SentenceRange>, vo
       closed: /[。！？]$/u.test(excerpt) || content[match.index + match[0].length] === "\n",
     });
   }
-}
-
-function extractiveSummarySentenceRanges(content: string): readonly Readonly<SentenceRange>[] {
-  let first: Readonly<SentenceRange> | null = null;
-  let last: Readonly<SentenceRange> | null = null;
-  for (const sentence of sentenceRanges(content)) {
-    if (!sentence.closed) continue;
-    first ??= sentence;
-    last = sentence;
-  }
-  if (first === null) return Object.freeze([]);
-  return Object.freeze(
-    last === null || last.startOffset === first.startOffset ? [first] : [first, last],
-  );
 }
 
 function isSentenceBoundary(value: string): boolean {
@@ -1145,11 +1187,7 @@ function classifyImportantSetting(
   if (/(?:真实身份|真正身份|真名(?:是|叫)|改名为)/u.test(sentence)) {
     return "character_identity";
   }
-  if (
-    /(?:父亲|母亲|亲生父母|兄弟|姐妹|哥哥|姐姐|弟弟|妹妹|兄长|长姐|丈夫|妻子|恋人|夫妻)/u.test(
-      sentence,
-    )
-  ) {
+  if (isExplicitCoreRelationship(sentence)) {
     return "core_relationship";
   }
   if (/(?:世界规则|在这个世界|所有人).{0,80}(?:必须|不能|无法)/u.test(sentence)) {
@@ -1182,6 +1220,18 @@ function classifyImportantSetting(
     return "uncertain_major_setting";
   }
   return null;
+}
+
+function isExplicitCoreRelationship(sentence: string): boolean {
+  const person = "[\\p{Script=Han}A-Za-z·]{1,12}";
+  const kinship = "(?:父亲|母亲|亲生父母|兄弟|姐妹|哥哥|姐姐|弟弟|妹妹|兄长|长姐|丈夫|妻子|恋人)";
+  const mutualRelationship =
+    "(?:(?:多年的?)?(?:老邻居|邻居|老朋友|朋友|同事|战友|搭档|师徒|同学|恋人|夫妻|兄弟|姐妹))";
+  return (
+    new RegExp(`^${person}(?:是|为)${person}的${kinship}[。！？]?$`, "u").test(sentence) ||
+    new RegExp(`^${person}的${kinship}(?:是|为)${person}[。！？]?$`, "u").test(sentence) ||
+    new RegExp(`^${person}(?:和|与)${person}是${mutualRelationship}[。！？]?$`, "u").test(sentence)
+  );
 }
 
 function conflictsWithConfirmedFact(

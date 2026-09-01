@@ -26,6 +26,7 @@ import type {
   ModelHubStore,
   ModelInvocationFact,
 } from "./model-hub-store";
+import { ProjectContextPrivacyError } from "./project-context-privacy-authority";
 import { BrowserDevelopmentStoryPlanningCandidateStore } from "./story-planning-candidate-store";
 
 const NOW_TEXT = "2026-08-01T00:00:00.000Z";
@@ -42,6 +43,22 @@ if (!parsedNow.ok) {
 const NOW = parsedNow.value;
 
 describe("Model Hub story planning service", () => {
+  it("blocks remote planning for the whole project when one retained chapter is private", async () => {
+    const harness = createHarness(outlineResponse(), { privateProject: true });
+
+    await expect(
+      generateConfirmed(harness.service, {
+        projectId: PROJECT_ID,
+        task: "outline_planning",
+      }),
+    ).resolves.toMatchObject({
+      status: "skipped",
+      code: "PRIVATE_CHAPTER_LOCAL_ONLY",
+    });
+    expect(harness.inspectText).toHaveBeenCalled();
+    expect(harness.executeText).not.toHaveBeenCalled();
+  });
+
   it("requires confirmation and rejects route drift before Provider dispatch", async () => {
     const harness = createHarness(outlineResponse());
 
@@ -713,6 +730,7 @@ function createHarness(
   options: Readonly<{
     structuredOutput?: boolean;
     structuredOutputRevokedBeforeFinal?: boolean;
+    privateProject?: boolean;
   }> = {},
 ) {
   const responseTask = responseText.includes('"scene_breakdown"')
@@ -788,7 +806,10 @@ function createHarness(
     candidates,
     inspectText,
     executeText,
-    projectContextPrivacy: standardProjectPrivacyAuthority(),
+    projectContextPrivacy:
+      options.privateProject === true
+        ? privateProjectPrivacyAuthority()
+        : standardProjectPrivacyAuthority(),
   });
   return {
     service,
@@ -816,6 +837,30 @@ function standardProjectPrivacyAuthority() {
     ),
     assertCurrentBeforeDispatch: vi.fn(() => Promise.resolve()),
     assertRouteEligible: vi.fn(),
+  };
+}
+
+function privateProjectPrivacyAuthority() {
+  const receipt = {
+    schemaVersion: 1 as const,
+    projectId: PROJECT_ID,
+    fingerprint: `privacy:${PROJECT_ID}:private`,
+    activeChapterCount: 2,
+    retainedChapterCount: 2,
+    requiresVerifiedLocal: true,
+    chapters: [] as const,
+  };
+  return {
+    inspect: vi.fn(() => Promise.resolve(receipt)),
+    assertCurrentBeforeDispatch: vi.fn(() => Promise.resolve()),
+    assertRouteEligible: vi.fn((_receipt: typeof receipt, verifiedLocalEligible: boolean) => {
+      if (!verifiedLocalEligible) {
+        throw new ProjectContextPrivacyError(
+          "PRIVATE_CHAPTER_LOCAL_ONLY",
+          "private project must stay local",
+        );
+      }
+    }),
   };
 }
 

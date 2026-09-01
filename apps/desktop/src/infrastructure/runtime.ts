@@ -30,15 +30,19 @@ import {
 } from "@inkshadow/application";
 import {
   CONSERVATIVE_GENERATION_CONTEXT_POLICY,
+  assertVisibleProseOutput,
+  buildVisibleProseSystemInstruction,
   estimateGenerationCost,
   combineContinuationFragments,
   recoverVisiblePartialOutput,
+  naturalProseStopInstruction,
   rerankWithLocalEvidence,
   resolveContinuationOutputContract,
   resolveDynamicContextBudget,
   resolveModelRoute,
   runGenerationPreflight,
   type ContextCandidateDraft,
+  type ContextCandidate,
   type CandidateQualityGateResult,
   type GenerationPreflightSnapshot,
   type ModelPricing,
@@ -48,6 +52,7 @@ import {
   type ContinuationOutputProfileId,
   type ContextBudgetProfileId,
   type DynamicContextBudget,
+  VisibleProseOutputError,
 } from "@inkshadow/ai-core";
 import { CloudMarketplaceClient, InkShadowCloudApiClient } from "@inkshadow/cloud-client";
 import { DEFAULT_FEATURE_FLAGS, resolveFeatureFlags, type FeatureFlags } from "@inkshadow/config";
@@ -317,6 +322,7 @@ import {
 import {
   compileStoryContextForGeneration,
   formatStoryContextPrompt,
+  recompileStoryContextWithAdditionalCandidates,
   StoryContextRuntimeError,
   type StoryContextCompilationReceipt,
 } from "./story-context-runtime";
@@ -2256,7 +2262,7 @@ async function readTauriRuntimeInformation(): Promise<RuntimeInformation> {
 
 function readBrowserRuntimeInformation(): Promise<RuntimeInformation> {
   return Promise.resolve({
-    appVersion: "0.2.16",
+    appVersion: "0.2.17",
     platform: "browser",
     architecture: "web",
     environment: "development",
@@ -2791,6 +2797,8 @@ export interface PreparedGenerationPlan {
   readonly contextTraceId: string | null;
   readonly leaseToken: string;
   readonly idempotencyKey: string;
+  /** SHA-256 of the exact request authority; no prompt or正文 is persisted with tasks. */
+  readonly requestFingerprint: string;
   readonly projectId: string | null;
   readonly chapterId: UuidV7;
   readonly baseVersionId: string | null;
@@ -2929,14 +2937,79 @@ async function generationTaskHasModelIdentity(
     idempotencyKey: string;
     taskType: "ai.generate" | "ai.generate.deferred";
     modelTask: PreparedGenerationModelTask;
+    requestFingerprint: string;
   }>,
 ): Promise<boolean> {
   const task = await runtime.taskCenter.findTaskByIdempotencyKey(input.idempotencyKey);
   return (
     task?.id === input.taskId &&
     task.type === input.taskType &&
-    task.metadata.modelTask === input.modelTask
+    task.metadata.modelTask === input.modelTask &&
+    task.metadata.requestFingerprint === input.requestFingerprint
   );
+}
+
+async function generationRequestFingerprint(
+  runtime: DesktopRuntime,
+  input: Readonly<{
+    purpose: AiCandidatePurpose;
+    modelTask: PreparedGenerationModelTask;
+    chapterId: string;
+    baseVersionId: string | null;
+    applicationCursorUtf16: number;
+    providerId: string;
+    modelId: string;
+    modelRole: ModelRouteRole;
+    routeReason: PreparedGenerationPlan["routeReason"];
+    routeFallback: PreparedGenerationPlan["routeFallback"];
+    outputContract: ContinuationOutputContract;
+    contextBudget: DynamicContextBudget;
+    preflight: GenerationPreflightSnapshot;
+    privacyFingerprint: string | null;
+    dataDestination: "local" | "remote" | null;
+    messages: readonly NativeModelMessage[];
+  }>,
+): Promise<string> {
+  const canonical = JSON.stringify({
+    schemaVersion: 1,
+    purpose: input.purpose,
+    modelTask: input.modelTask,
+    chapterId: input.chapterId,
+    baseVersionId: input.baseVersionId,
+    applicationCursorUtf16: input.applicationCursorUtf16,
+    providerId: input.providerId,
+    modelId: input.modelId,
+    modelRole: input.modelRole,
+    routeReason: input.routeReason,
+    routeFallback: input.routeFallback,
+    outputContract: input.outputContract,
+    contextBudget: {
+      profile: input.contextBudget.profile,
+      taskProfileLimit: input.contextBudget.taskProfileLimit,
+      effectiveInputBudget: input.contextBudget.effectiveInputBudget,
+      budgetStatus: input.contextBudget.budgetStatus,
+    },
+    preflight: {
+      inputTokens: input.preflight.inputTokens,
+      maximumOutputTokens: input.preflight.maximumOutputTokens,
+      costStatus: input.preflight.costStatus,
+      estimate:
+        input.preflight.estimate === null
+          ? null
+          : {
+              micros: input.preflight.estimate.micros.toString(),
+              currency: input.preflight.estimate.currency,
+              pricingVersion: input.preflight.estimate.pricingVersion,
+              priceUpdatedAt: input.preflight.estimate.priceUpdatedAt,
+            },
+    },
+    privacyFingerprint: input.privacyFingerprint,
+    dataDestination: input.dataDestination,
+    messages: input.messages.map(({ role, content }) => ({ role, content })),
+  });
+  const fingerprint = await runtime.hasher.sha256(canonical);
+  if (!fingerprint.ok) throw fingerprint.error;
+  return fingerprint.value;
 }
 
 async function cancelStaleGenerationTask(
@@ -3356,7 +3429,10 @@ export async function prepareGenerationPlan(
       );
       messages =
         purpose === "continuation_directions"
-          ? buildContinuationDirectionMessages(preparedContext.messages)
+          ? buildContinuationDirectionMessages(
+              preparedContext.messages,
+              input.customDestinationInstruction,
+            )
           : preparedContext.messages;
       contextCompilation = preparedContext.contextCompilation;
       novelSkillPreparation = preparedContext.novelSkillPreparation;
@@ -3410,7 +3486,17 @@ export async function prepareGenerationPlan(
           cause instanceof ModelHubExecutionError ? cause.retryable : true,
         );
       }
-      maximumOutputTokens = modelHubInspection.maximumOutputTokens;
+      // The full-message inspection can legitimately select a different route
+      // than the metadata-only inspection (for example a verified fallback).
+      // Rebind the visible output contract to that final authority so the
+      // disclosure, request fingerprint and advanced diagnostics describe the
+      // same output ceiling that will be sent to the provider.
+      outputContract = resolvePreparedGenerationOutputContract(
+        input,
+        purpose,
+        modelHubInspection.maximumOutputTokens,
+      );
+      maximumOutputTokens = outputContract.requestedMaxOutputTokens;
       providerId = modelHubInspection.connectionId;
       modelId = modelHubInspection.modelId;
       routeResolved = true;
@@ -3502,10 +3588,11 @@ export async function prepareGenerationPlan(
     pricing,
     budgets,
   });
-  const preflight: GenerationPreflightSnapshot = Object.freeze({
+  const preflightWithoutRequestFingerprint: GenerationPreflightSnapshot = Object.freeze({
     ...basePreflight,
     generationBudget: Object.freeze({
       outputProfile: outputContract.profile,
+      advancedTargetVisibleCharacters: outputContract.advancedTargetVisibleCharacters,
       targetVisibleCharacters: outputContract.targetVisibleCharacters,
       minimumVisibleCharacters: outputContract.minimumVisibleCharacters,
       maximumVisibleCharacters: outputContract.maximumVisibleCharacters,
@@ -3519,6 +3606,31 @@ export async function prepareGenerationPlan(
       contextCompilation,
       contextBudget.effectiveInputBudget,
     ),
+  });
+  const baseVersionId = chapter?.currentVersionId ?? null;
+  const requestFingerprint = await generationRequestFingerprint(runtime, {
+    purpose,
+    modelTask: generationIdentity.modelTask,
+    chapterId,
+    baseVersionId,
+    applicationCursorUtf16,
+    providerId,
+    modelId,
+    modelRole,
+    routeReason,
+    routeFallback,
+    outputContract,
+    contextBudget,
+    preflight: preflightWithoutRequestFingerprint,
+    privacyFingerprint: privacyPreview?.fingerprint ?? null,
+    dataDestination:
+      modelHubInspection?.dataDestination ??
+      (isVerifiedLocalGatewayConfig(legacyGatewayConfig) ? "local" : null),
+    messages,
+  });
+  const preflight: GenerationPreflightSnapshot = Object.freeze({
+    ...preflightWithoutRequestFingerprint,
+    requestFingerprint,
   });
   recordSafeGenerationPreflightDiagnostic(runtime, {
     taskType: generationIdentity.modelTask,
@@ -3534,7 +3646,6 @@ export async function prepareGenerationPlan(
     snapshot: preflight,
     scope: generationPreflightScope,
   });
-  const baseVersionId = chapter?.currentVersionId ?? null;
   let deferredRequest = waitingDeferred;
   if (
     deferredRequest !== null &&
@@ -3550,6 +3661,7 @@ export async function prepareGenerationPlan(
       idempotencyKey: deferredRequest.idempotencyKey,
       taskType: "ai.generate.deferred",
       modelTask: generationIdentity.modelTask,
+      requestFingerprint,
     });
     if (!identityMatches) {
       await blockStaleDeferredGenerationRequest(runtime, deferredRequest);
@@ -3574,6 +3686,7 @@ export async function prepareGenerationPlan(
       idempotencyKey: retryableRunCandidate.idempotencyKey,
       taskType: "ai.generate",
       modelTask: generationIdentity.modelTask,
+      requestFingerprint,
     });
     if (identityMatches) {
       retryableRun = retryableRunCandidate;
@@ -3594,6 +3707,7 @@ export async function prepareGenerationPlan(
         idempotencyKey: deferredResumeRunCandidate.idempotencyKey,
         taskType: "ai.generate",
         modelTask: generationIdentity.modelTask,
+        requestFingerprint,
       });
       if (identityMatches) {
         deferredResumeRun = deferredResumeRunCandidate;
@@ -3628,6 +3742,7 @@ export async function prepareGenerationPlan(
     actionLabel: generationIdentity.actionLabel,
     leaseToken: runtime.ids.next(),
     idempotencyKey,
+    requestFingerprint,
     projectId: chapter?.projectId ?? null,
     chapterId,
     baseVersionId,
@@ -3669,10 +3784,14 @@ function resolvePreparedGenerationOutputContract(
   providerOutputLimit?: number,
 ): ContinuationOutputContract {
   if (purpose === "continuation_directions") {
+    const authorRequirement = input.customDestinationInstruction?.normalize("NFKC").trim() ?? "";
     return resolveContinuationOutputContract({
       profile: "custom",
       customTargetVisibleCharacters: 600,
-      destination: "next_segment",
+      destination: authorRequirement.length === 0 ? "next_segment" : "custom_instruction",
+      ...(authorRequirement.length === 0
+        ? {}
+        : { customDestinationInstruction: authorRequirement }),
       ...(providerOutputLimit === undefined ? {} : { providerOutputLimit }),
     });
   }
@@ -3691,8 +3810,12 @@ function resolvePreparedGenerationOutputContract(
 
 function buildContinuationDirectionMessages(
   contextualMessages: readonly NativeModelMessage[],
+  authorRequirement: string | null | undefined,
 ): readonly NativeModelMessage[] {
   const contextMessages = contextualMessages.slice(1, -1);
+  const normalizedRequirement = authorRequirement?.normalize("NFKC").trim() ?? "";
+  const requirementInstruction =
+    normalizedRequirement.length === 0 ? "" : "\n\n请同时遵守以上资料中的作者本次要求。";
   return Object.freeze([
     Object.freeze({
       role: "system" as const,
@@ -3701,7 +3824,7 @@ function buildContinuationDirectionMessages(
     ...contextMessages,
     Object.freeze({
       role: "user" as const,
-      content: `请严格依据以上资料生成三个与当前正文紧密相关且彼此不同的后续走向。\n\n${CONTINUATION_DIRECTIONS_FORMAT_INSTRUCTION}`,
+      content: `请严格依据以上资料生成三个与当前正文紧密相关且彼此不同的后续走向。${requirementInstruction}\n\n${CONTINUATION_DIRECTIONS_FORMAT_INSTRUCTION}`,
     }),
   ]);
 }
@@ -3883,7 +4006,7 @@ export async function saveDeferredGenerationPlan(
   }
   const requestId = runtime.ids.next();
   const taskId = runtime.ids.next();
-  const idempotencyKey = `ai.generate.deferred:${plan.modelTask}:${plan.chapterId}:${plan.baseVersionId}:${plan.modelRole}`;
+  const idempotencyKey = `ai.generate.deferred:${plan.modelTask}:${plan.chapterId}:${plan.baseVersionId}:${plan.modelRole}:${plan.requestFingerprint}`;
   const enqueued = await runtime.taskCenter.enqueueTask({
     id: taskId,
     type: "ai.generate.deferred",
@@ -3895,6 +4018,14 @@ export async function saveDeferredGenerationPlan(
       providerId: plan.providerId,
       modelRole: plan.modelRole,
       modelTask: plan.modelTask,
+      requestFingerprint: plan.requestFingerprint,
+      outputProfile: plan.outputContract.profile,
+      advancedTargetVisibleCharacters: plan.outputContract.advancedTargetVisibleCharacters,
+      targetVisibleCharacters: plan.outputContract.targetVisibleCharacters,
+      minimumVisibleCharacters: plan.outputContract.minimumVisibleCharacters,
+      maximumVisibleCharacters: plan.outputContract.maximumVisibleCharacters,
+      maximumOutputTokens: plan.maximumOutputTokens,
+      approvedInputTokens: plan.preflight.inputTokens,
       operation: "wait_for_network",
     },
     priority: 70,
@@ -3956,6 +4087,46 @@ export async function executeGenerationPlan(
       }),
     );
   }
+  if (plan.deferredRequest !== null) {
+    const deferredIdentityStillCurrent = await generationTaskHasModelIdentity(runtime, {
+      taskId: plan.deferredRequest.taskId,
+      idempotencyKey: plan.deferredRequest.idempotencyKey,
+      taskType: "ai.generate.deferred",
+      modelTask: plan.modelTask,
+      requestFingerprint: plan.requestFingerprint,
+    });
+    if (!deferredIdentityStillCurrent) {
+      await blockStaleDeferredGenerationRequest(runtime, plan.deferredRequest).catch(
+        () => undefined,
+      );
+      return err(
+        new GenerationGovernanceError(
+          "AI_DEFERRED_IDENTITY_CHANGED",
+          "The deferred generation request changed before execution.",
+        ),
+      );
+    }
+  }
+  const existingGenerationTask = await runtime.taskCenter.findTaskByIdempotencyKey(
+    plan.idempotencyKey,
+  );
+  if (
+    existingGenerationTask !== null &&
+    !(await generationTaskHasModelIdentity(runtime, {
+      taskId: plan.taskId,
+      idempotencyKey: plan.idempotencyKey,
+      taskType: "ai.generate",
+      modelTask: plan.modelTask,
+      requestFingerprint: plan.requestFingerprint,
+    }))
+  ) {
+    return err(
+      new GenerationGovernanceError(
+        "AI_GENERATION_IDENTITY_CHANGED",
+        "The generation request identity changed before execution.",
+      ),
+    );
+  }
   try {
     await assertGenerationProjectActive(runtime, plan.projectId);
   } catch (cause: unknown) {
@@ -3999,6 +4170,14 @@ export async function executeGenerationPlan(
         baseVersionId: plan.baseVersionId,
         providerId: plan.providerId,
         modelTask: plan.modelTask,
+        requestFingerprint: plan.requestFingerprint,
+        outputProfile: plan.outputContract.profile,
+        advancedTargetVisibleCharacters: plan.outputContract.advancedTargetVisibleCharacters,
+        targetVisibleCharacters: plan.outputContract.targetVisibleCharacters,
+        minimumVisibleCharacters: plan.outputContract.minimumVisibleCharacters,
+        maximumVisibleCharacters: plan.outputContract.maximumVisibleCharacters,
+        maximumOutputTokens: plan.maximumOutputTokens,
+        approvedInputTokens: plan.preflight.inputTokens,
         operation: "generate",
       },
       priority: 80,
@@ -4329,6 +4508,10 @@ export async function executeGenerationPlan(
           plan.partialCandidateContent ?? "",
           generated.text,
         );
+        assertGeneratedVisibleProse(
+          completeVisibleText,
+          plan.outputContract.maximumVisibleCharacters,
+        );
         const built = await buildGeneratedCandidate(
           runtime,
           currentChapter,
@@ -4354,12 +4537,16 @@ export async function executeGenerationPlan(
         normalized.code !== "MODEL_GENERATION_CANCELLED" &&
         normalized.code !== "CONTEXT_TRACE_UNAVAILABLE"
       ) {
-        const visible = recoverVisiblePartialOutput(accumulated);
-        if (visible.preserved) {
+        const visibleText = recoverAcceptableVisiblePartialText(
+          accumulated,
+          plan.partialCandidateContent,
+          plan.outputContract.maximumVisibleCharacters,
+        );
+        if (visibleText !== null) {
           const built = await buildGeneratedCandidate(
             runtime,
             chapter,
-            combineContinuationFragments(plan.partialCandidateContent ?? "", visible.text),
+            visibleText,
             true,
             plan.applicationCursorUtf16,
             plan.purpose,
@@ -4379,12 +4566,16 @@ export async function executeGenerationPlan(
       if (normalized.code === "MODEL_GENERATION_CANCELLED") {
         let partialCandidate: AiCandidate | null = null;
         let partialPersistenceFailure: GovernedGenerationError | null = null;
-        const visible = recoverVisiblePartialOutput(accumulated);
-        if (visible.preserved) {
+        const visibleText = recoverAcceptableVisiblePartialText(
+          accumulated,
+          plan.partialCandidateContent,
+          plan.outputContract.maximumVisibleCharacters,
+        );
+        if (visibleText !== null) {
           const built = await buildGeneratedCandidate(
             runtime,
             chapter,
-            combineContinuationFragments(plan.partialCandidateContent ?? "", visible.text),
+            visibleText,
             true,
             plan.applicationCursorUtf16,
             plan.purpose,
@@ -5554,10 +5745,13 @@ function buildGenerationMessages(
   return [
     {
       role: "system",
-      content:
-        generationIdentity.modelTask === "prose_generation"
-          ? "你是长篇小说开头创作助手。只输出可直接写入空白章节的开头正文，不要解释、标题、Markdown 代码围栏或元评论。建立明确场景、人物动作或悬念，不得假装承接不存在的前文，也不得把建议直接当成正式设定。"
-          : "你是长篇小说续写助手。只输出可直接追加到章节末尾的新正文，不要解释、标题、Markdown 代码围栏或元评论。保持既有人称、时态、语气和事实连续性；不要把建议直接当成正式设定。",
+      content: buildVisibleProseSystemInstruction({
+        taskInstruction:
+          generationIdentity.modelTask === "prose_generation"
+            ? "你是长篇小说开头创作助手。建立明确场景、人物动作或悬念，不得假装承接不存在的前文，也不得把建议直接当成正式设定。"
+            : "你是长篇小说续写助手。保持既有人称、时态、语气、事实连续性和人物知识边界，不得把建议直接当成正式设定。",
+        naturalStopInstruction: naturalProseStopInstruction("standard"),
+      }),
     },
     {
       role: "user",
@@ -5577,6 +5771,8 @@ interface ContextualContinuationMessages {
 
 export interface ChapterStoryContextCompilationInput {
   readonly currentTask: ContextCandidateDraft;
+  /** Additional explicit author requirements for this one action. */
+  readonly currentTaskSupplements?: readonly ContextCandidateDraft[];
   readonly taskType?: PreparedGenerationModelTask;
   readonly retrievalQuery?: string;
   readonly maximumContextTokens?: number;
@@ -5662,7 +5858,10 @@ export async function compileChapterStoryContext(
     projectId: chapter.projectId,
     currentBranchId,
     currentTask: input.currentTask,
-    currentTaskSupplements: preferenceCandidates,
+    ...(input.currentTaskSupplements === undefined
+      ? {}
+      : { currentTaskSupplements: input.currentTaskSupplements }),
+    supplementalCandidates: preferenceCandidates,
     creationSeedCandidates,
     currentChapter: {
       chapterId: chapter.id,
@@ -5719,7 +5918,7 @@ async function buildContextualContinuationMessages(
         taskType: generationIdentity.modelTask,
       })
     : 0;
-  const contextCompilation = await compileChapterStoryContext(runtime, chapter, {
+  let contextCompilation = await compileChapterStoryContext(runtime, chapter, {
     currentTask: {
       id: `${generationIdentity.modelTask}-task:${chapter.id}:${chapter.currentVersionId}`,
       content:
@@ -5744,7 +5943,8 @@ async function buildContextualContinuationMessages(
       ],
       priority: 1_000,
     },
-    maximumContextTokens: Math.max(1, maximumContextTokens - reservedSkillTokens),
+    currentTaskSupplements: authorRequestContextCandidates(chapter, outputContract),
+    maximumContextTokens,
     taskType: generationIdentity.modelTask,
     // One disclosed generation action authorizes exactly the selected request.
     // Remote reranking would be a second Provider dispatch, so the
@@ -5752,36 +5952,55 @@ async function buildContextualContinuationMessages(
     // disclosed action opts in explicitly.
     allowRemoteRerank: false,
   });
-  const novelSkillPreparation = applyNovelSkills
+  const availableContextLayers = Object.freeze([
+    ...new Set(
+      contextCompilation.compiled.entries
+        .filter(({ included }) => included)
+        .map(({ layer }) => layer),
+    ),
+  ]);
+  let novelSkillPreparation = applyNovelSkills
     ? await runtime.novelSkills.prepareInvocation({
         projectId: chapter.projectId,
         taskType: generationIdentity.modelTask,
         invocationMode: "draft",
         maximumSkillTokens: Math.min(
           reservedSkillTokens === 0 ? DEFAULT_NOVEL_SKILL_TOKEN_BUDGET : reservedSkillTokens,
-          Math.max(0, maximumContextTokens - contextCompilation.compiled.trace.usedTokens),
+          maximumContextTokens,
         ),
-        availableContextLayers: Object.freeze([
-          ...new Set(
-            contextCompilation.compiled.entries
-              .filter(({ included }) => included)
-              .map(({ layer }) => layer),
-          ),
-        ]),
+        availableContextLayers,
       })
     : runtime.novelSkills.describeNotApplied("legacy_route_untraceable");
-  const baseSystemMessage =
-    generationIdentity.modelTask === "prose_generation"
-      ? "你是长篇小说开头创作助手。只输出可直接写入空白章节的开头正文，不输出思考过程、解释、标题、Markdown 代码围栏或元评论。建立明确场景、人物动作或悬念，不得假装承接不存在的前文；不得把推测或 AI 建议直接写成正式设定。"
-      : "你是长篇小说续写助手。只输出可直接追加到章节中的新正文，不输出思考过程、解释、标题、Markdown 代码围栏或元评论。保持既有人称、时态、语气和事实连续性；不得把推测或 AI 建议直接写成正式设定。";
-  const systemMessage =
-    novelSkillPreparation.promptSection === null
-      ? baseSystemMessage
-      : `${baseSystemMessage}\n\n以下是作者明确开启的实验性写作方法，只用于辅助完成本次任务。若方法与作者当前要求、已确认并锁定的故事规则、人物知识边界或已保存正文冲突，必须忽略冲突的方法规则并遵守更高优先级资料。不要向作者解释这些方法。\n${novelSkillPreparation.promptSection}`;
+  const novelSkillCandidates = preparedNovelSkillContextCandidates(novelSkillPreparation);
+  if (novelSkillCandidates.length > 0) {
+    const compilationWithSkills = recompileStoryContextWithAdditionalCandidates(
+      contextCompilation,
+      novelSkillCandidates,
+      maximumContextTokens,
+    );
+    if (allPreferredCandidatesRepresented(compilationWithSkills, novelSkillCandidates)) {
+      contextCompilation = compilationWithSkills;
+    } else {
+      novelSkillPreparation = await runtime.novelSkills.prepareInvocation({
+        projectId: chapter.projectId,
+        taskType: generationIdentity.modelTask,
+        invocationMode: "draft",
+        maximumSkillTokens: 0,
+        availableContextLayers,
+      });
+    }
+  }
+  const baseSystemMessage = buildVisibleProseSystemInstruction({
+    taskInstruction:
+      generationIdentity.modelTask === "prose_generation"
+        ? "你是长篇小说开头创作助手。建立明确场景、人物动作或悬念，不得假装承接不存在的前文；不得把推测或 AI 建议直接写成正式设定。"
+        : "你是长篇小说续写助手。保持既有人称、时态、语气、事实连续性和人物知识边界；不得把推测或 AI 建议直接写成正式设定。",
+    naturalStopInstruction: naturalProseStopInstruction(outputContract.profile),
+  });
   const messages: NativeModelMessage[] = [
     {
       role: "system",
-      content: systemMessage,
+      content: baseSystemMessage,
     },
     { role: "user", content: formatStoryContextPrompt(contextCompilation) },
   ];
@@ -5792,10 +6011,10 @@ async function buildContextualContinuationMessages(
     role: "user",
     content:
       partialCandidateContent !== null
-        ? `从上次可见正文的结尾自然继续，完成当前场景；本次新补全部分目标约 ${String(outputContract.targetVisibleCharacters)} 字。不要复述、解释或重复已有片段，只输出新补全部分。`
+        ? "从上次可见正文的结尾自然继续，完成本次尚未结束的推进。不要复述、解释或重复已有片段，只输出新补全部分。"
         : generationIdentity.modelTask === "prose_generation"
-          ? `请依据以上资料创作本章开头，目标约 ${String(outputContract.targetVisibleCharacters)} 字（可在 ${String(outputContract.minimumVisibleCharacters)}–${String(outputContract.maximumVisibleCharacters)} 字内自然收束）。从明确场景、人物动作或悬念开始，不得假装承接不存在的前文。若资料存在未确认或无法消解的冲突，优先遵守已确认并锁定的规则。只输出开头正文。`
-          : `请依据以上资料续写下一段情节，${continuationDestinationPrompt(outputContract)}目标约 ${String(outputContract.targetVisibleCharacters)} 字（可在 ${String(outputContract.minimumVisibleCharacters)}–${String(outputContract.maximumVisibleCharacters)} 字内自然收束）。若资料存在未确认或无法消解的冲突，优先遵守已确认并锁定的规则。只输出新增正文。`,
+          ? `请依据以上资料创作本章开头。${advancedVisibleCharacterTargetPrompt(outputContract)}从明确场景、人物动作或悬念开始，不得假装承接不存在的前文。若资料存在未确认或无法消解的冲突，优先遵守已确认并锁定的规则。只输出开头正文。`
+          : `请依据以上资料续写下一段情节，${continuationDestinationPrompt(outputContract)}${advancedVisibleCharacterTargetPrompt(outputContract)}若资料存在未确认或无法消解的冲突，优先遵守已确认并锁定的规则。只输出新增正文。`,
   });
   return Object.freeze({
     contextCompilation,
@@ -5804,10 +6023,115 @@ async function buildContextualContinuationMessages(
   });
 }
 
+function authorRequestContextCandidates(
+  chapter: Chapter,
+  contract: ContinuationOutputContract,
+): readonly ContextCandidateDraft[] {
+  if (contract.destination !== "custom_instruction") return Object.freeze([]);
+  const content = contract.customDestinationInstruction?.normalize("NFKC").trim() ?? "";
+  if (content.length === 0) return Object.freeze([]);
+  return Object.freeze([
+    Object.freeze({
+      id: `author-request:${chapter.id}:${chapter.currentVersionId}`,
+      content,
+      selectionReason: "The author explicitly supplied this requirement for the current action.",
+      evidence: Object.freeze([
+        Object.freeze({
+          sourceType: "user_input" as const,
+          sourceId: `author-request:${chapter.id}`,
+          sourceVersionId: chapter.currentVersionId,
+          locator: "custom_destination",
+          contentHash: null,
+          excerpt: null,
+        }),
+      ]),
+      priority: 999,
+    }),
+  ]);
+}
+
+function preparedNovelSkillContextCandidates(
+  preparation: PreparedNovelSkillInvocation,
+): readonly ContextCandidate[] {
+  const compiled = preparation.compiled;
+  if (compiled === null) return Object.freeze([]);
+  const candidates: ContextCandidate[] = [];
+  for (const rule of compiled.instructionRules) {
+    candidates.push(novelSkillRuleCandidate("instruction", rule, rule.text));
+  }
+  for (const rule of compiled.outputRules) {
+    candidates.push(novelSkillRuleCandidate("output", rule, rule.text));
+  }
+  for (const rule of compiled.validationRules) {
+    candidates.push(
+      novelSkillRuleCandidate(
+        "validation",
+        rule,
+        rule.evidenceRequired ? `${rule.text}\n需要提供准确依据。` : rule.text,
+      ),
+    );
+  }
+  return Object.freeze(candidates);
+}
+
+function novelSkillRuleCandidate(
+  category: "instruction" | "output" | "validation",
+  rule: Readonly<{
+    ruleId: string;
+    sourceSkillId: string;
+    sourceSkillVersion: string;
+    precedence: number;
+  }>,
+  content: string,
+): ContextCandidate {
+  return Object.freeze({
+    id: `novel-skill:${rule.sourceSkillId}:${rule.sourceSkillVersion}:${category}:${rule.ruleId}`,
+    layer: "rerank_supplement",
+    content,
+    selectionReason:
+      "The author enabled this writing method for the current task; its exact rule remains traceable and subordinate to story authority.",
+    evidence: Object.freeze([
+      Object.freeze({
+        sourceType: "other" as const,
+        sourceId: `novel-skill:${rule.sourceSkillId}`,
+        sourceVersionId: rule.sourceSkillVersion,
+        locator: `${category}:${rule.ruleId}`,
+        contentHash: null,
+        excerpt: null,
+      }),
+    ]),
+    priority: Math.max(-199, Math.min(1_000, rule.precedence)),
+    budgetRetention: "preferred",
+  });
+}
+
+function allPreferredCandidatesRepresented(
+  receipt: ChapterStoryContextCompilationReceipt,
+  candidates: readonly ContextCandidate[],
+): boolean {
+  return candidates.every((candidate) => {
+    const ownEntry = receipt.compiled.entries.find(({ id }) => id === candidate.id);
+    if (ownEntry?.included === true) return true;
+    if (ownEntry?.discardedReason !== "duplicate_source") return false;
+    return receipt.compiled.entries.some(
+      (entry) =>
+        entry.included &&
+        candidate.evidence.every((expected) =>
+          entry.evidence.some(
+            (actual) =>
+              actual.sourceId === expected.sourceId &&
+              actual.sourceVersionId === expected.sourceVersionId &&
+              actual.locator === expected.locator,
+          ),
+        ),
+    );
+  });
+}
+
 function continuationDestinationTaskLabel(contract: ContinuationOutputContract): string {
   if (contract.destination === "next_segment") return "只推进下一小段";
   if (contract.destination === "custom_instruction") {
-    return `按作者要求推进到“${contract.customDestinationInstruction ?? "指定位置"}”`;
+    return "按作者本次要求推进，并在要求达成后自然收束";
   }
   return "推进一个完整场景";
 }
@@ -5817,9 +6141,14 @@ function continuationDestinationPrompt(contract: ContinuationOutputContract): st
     return "只写紧接当前正文的下一小段，不必强行完成整个场景；";
   }
   if (contract.destination === "custom_instruction") {
-    return `写到以下作者指定位置即自然收束：${contract.customDestinationInstruction ?? ""}；`;
+    return "遵守以上作者本次要求，并在要求达成后自然收束；";
   }
   return "推进并自然完成一个完整场景；";
+}
+
+function advancedVisibleCharacterTargetPrompt(contract: ContinuationOutputContract): string {
+  if (contract.advancedTargetVisibleCharacters === null) return "";
+  return `作者在高级设置中给出的目标约为 ${String(contract.targetVisibleCharacters)} 字；允许在 ${String(contract.minimumVisibleCharacters)}–${String(contract.maximumVisibleCharacters)} 字之间自然浮动，不得为接近数字而重复内容。`;
 }
 
 interface VerifiedCurrentChapterAuthority {
@@ -6645,6 +6974,35 @@ async function buildGeneratedCandidate(
     return ready;
   }
   return ok(ready.value);
+}
+
+function assertGeneratedVisibleProse(text: string, maximumVisibleCharacters: number): void {
+  try {
+    assertVisibleProseOutput(text, { maximumVisibleCharacters });
+  } catch (cause: unknown) {
+    if (cause instanceof VisibleProseOutputError) {
+      throw new ModelCenterError(cause.code, cause.message, false);
+    }
+    throw cause;
+  }
+}
+
+function recoverAcceptableVisiblePartialText(
+  streamedText: string,
+  priorPartialText: string | null,
+  maximumVisibleCharacters: number,
+): string | null {
+  const visible = recoverVisiblePartialOutput(streamedText);
+  if (!visible.preserved) return null;
+  const combined = combineContinuationFragments(priorPartialText ?? "", visible.text);
+  try {
+    assertGeneratedVisibleProse(combined, maximumVisibleCharacters);
+    return combined;
+  } catch {
+    // Invalid model text remains accounted for by the failed/cancelled run but
+    // never becomes a ready Candidate that an author could accept into 正文.
+    return null;
+  }
 }
 
 async function evaluateCandidateAgainstLocalGate(

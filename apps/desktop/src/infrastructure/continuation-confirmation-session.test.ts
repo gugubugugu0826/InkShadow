@@ -33,6 +33,18 @@ describe("continuation confirmation session", () => {
     expect(window.sessionStorage.length).toBe(1);
   });
 
+  it("keeps an opening confirmation distinct from a continuation confirmation", () => {
+    const openingScope = Object.freeze({
+      ...SCOPE,
+      taskType: "prose_generation",
+    }) as unknown as ContinuationConfirmationScope;
+
+    rememberContinuationConfirmation(window.sessionStorage, openingScope);
+
+    expect(continuationConfirmationRemembered(window.sessionStorage, openingScope)).toBe(true);
+    expect(continuationConfirmationRemembered(window.sessionStorage, SCOPE)).toBe(false);
+  });
+
   it.each([
     ["projectId", "019f9f4a-b3c7-7350-9226-000000000011"],
     ["chapterId", "019f9f4a-b3c7-7350-9226-000000000012"],

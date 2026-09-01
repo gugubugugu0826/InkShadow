@@ -862,7 +862,19 @@ function ConclusionList({
 function CandidatePreview({ payloadJson }: { readonly payloadJson: string }) {
   const payload = parseCandidatePreviewPayload(payloadJson);
   if (payload === null) {
-    return <InlineAlert tone="error" title="候选数据损坏" />;
+    return (
+      <div>
+        <InlineAlert
+          tone="error"
+          title="这份审稿建议暂时无法读取"
+          description="原始内容仍保留在本机，没有写入正文或大纲。你可以放弃这份建议后重新开始审查。"
+        />
+        <details>
+          <summary>高级诊断详情</summary>
+          <pre>{payloadJson}</pre>
+        </details>
+      </div>
+    );
   }
   if (payload.kind === "chapter_content") {
     return <pre>{payload.content}</pre>;
@@ -871,8 +883,12 @@ function CandidatePreview({ payloadJson }: { readonly payloadJson: string }) {
     <ul>
       {payload.changes.map((change) => (
         <li key={change.nodeId}>
-          <strong>{change.title ?? change.nodeId}</strong>
+          <strong>{change.title ?? "未命名的大纲调整"}</strong>
           {change.synopsis !== null && <p>{change.synopsis}</p>}
+          <details>
+            <summary>高级诊断详情</summary>
+            <p>大纲节点编号：{change.nodeId}</p>
+          </details>
         </li>
       ))}
     </ul>

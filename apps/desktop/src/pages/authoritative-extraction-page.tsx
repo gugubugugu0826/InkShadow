@@ -337,7 +337,7 @@ export function AuthoritativeExtractionPage({
         <div className="authoritative-extraction-section-heading">
           <div>
             <h2 id="extraction-candidates-title">待确认设定</h2>
-            <p>只有你点击使用或修改后使用，内容才会写入正式设定。</p>
+            <p>只有你点击使用或完成高级修改，内容才会写入正式设定。</p>
           </div>
           {phase === "loading" && <Badge tone="neutral">加载中</Badge>}
         </div>
@@ -538,28 +538,31 @@ function CandidateCard(props: CandidateCardProps) {
         <div className="authoritative-extraction-diff">
           <div>
             <strong>当前正式设定</strong>
-            <pre>{formatJson(candidate.originalValue)}</pre>
+            <p>{formatOrdinarySettingValue(candidate.originalValue)}</p>
           </div>
           <div>
             <strong>建议设定</strong>
-            <pre>{formatJson(candidate.suggestedValue)}</pre>
+            <p>{formatOrdinarySettingValue(candidate.suggestedValue)}</p>
           </div>
         </div>
 
         {props.editing && (
-          <div className="authoritative-extraction-modify">
-            <label htmlFor={`modify-${identity}`}>修改后保存的设定内容</label>
-            <Textarea
-              id={`modify-${identity}`}
-              ref={fitCandidateDecisionTextarea}
-              value={props.modifiedJson}
-              onInput={(event) => fitCandidateDecisionTextarea(event.currentTarget)}
-              onChange={(event) => props.onModifiedJsonChange(event.currentTarget.value)}
-              rows={7}
-              spellCheck={false}
-            />
-            <p>只有点击“确认修改并使用”才会写入正式设定。</p>
-          </div>
+          <details className="authoritative-extraction-modify">
+            <summary>高级：按原始结构修改</summary>
+            <div>
+              <label htmlFor={`modify-${identity}`}>修改后保存的设定内容</label>
+              <Textarea
+                id={`modify-${identity}`}
+                ref={fitCandidateDecisionTextarea}
+                value={props.modifiedJson}
+                onInput={(event) => fitCandidateDecisionTextarea(event.currentTarget)}
+                onChange={(event) => props.onModifiedJsonChange(event.currentTarget.value)}
+                rows={7}
+                spellCheck={false}
+              />
+              <p>只有点击“确认修改并使用”才会写入正式设定。</p>
+            </div>
+          </details>
         )}
       </CardContent>
       <CardFooter className="candidate-decision-actions">
@@ -592,7 +595,7 @@ function CandidateCard(props: CandidateCardProps) {
               disabled={props.busyKey !== null}
               onClick={props.onStartModify}
             >
-              修改后使用
+              高级修改
             </Button>
             <Button
               size="lg"
@@ -826,8 +829,31 @@ function candidateIdentity(candidate: AuthoritativeExtractionDashboardCandidate)
   return `${candidate.extraction.jobId}:${candidate.extraction.candidate.key}`;
 }
 
-function formatJson(value: unknown): string {
-  return JSON.stringify(value, null, 2);
+function formatOrdinarySettingValue(value: unknown): string {
+  const parts = collectOrdinarySettingValues(value);
+  return parts.length > 0 ? [...new Set(parts)].join("；") : "未填写";
+}
+
+function collectOrdinarySettingValues(value: unknown): readonly string[] {
+  if (typeof value === "string") {
+    const normalized = value.trim();
+    return normalized.length > 0 ? [normalized] : [];
+  }
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return [value.toLocaleString("zh-CN")];
+  }
+  if (typeof value === "boolean") {
+    return [value ? "是" : "否"];
+  }
+  if (Array.isArray(value)) {
+    return value.flatMap((entry) => collectOrdinarySettingValues(entry));
+  }
+  if (value !== null && typeof value === "object") {
+    return Object.values(value as Readonly<Record<string, unknown>>).flatMap((entry) =>
+      collectOrdinarySettingValues(entry),
+    );
+  }
+  return [];
 }
 
 function graphFreshnessLabel(

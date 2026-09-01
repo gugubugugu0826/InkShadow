@@ -46,9 +46,10 @@ describe("writing preference context adapter", () => {
 
     expect(candidates).toHaveLength(1);
     expect(candidates[0]).toMatchObject({
-      layer: "current_task",
-      required: false,
+      layer: "rerank_supplement",
+      content: "增加自然对话。",
     });
+    expect(candidates[0]).not.toHaveProperty("budgetRetention");
     expect(candidates[0]?.content).toContain("增加自然对话");
     expect(candidates[0]?.evidence[0]).toMatchObject({
       sourceType: "user_input",

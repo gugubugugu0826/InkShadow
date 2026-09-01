@@ -209,6 +209,10 @@ export {
   CONTINUATION_DESTINATION_IDS,
   CONTINUATION_OUTPUT_PROFILE_IDS,
   CONTINUATION_OUTPUT_PROFILE_PRESETS,
+  MAXIMUM_ADVANCED_RESULT_VISIBLE_CHARACTERS,
+  MAXIMUM_ADVANCED_TARGET_VISIBLE_CHARACTERS,
+  MINIMUM_ADVANCED_RESULT_VISIBLE_CHARACTERS,
+  MINIMUM_ADVANCED_TARGET_VISIBLE_CHARACTERS,
   TASK_OUTPUT_PROFILE_REGISTRY,
   TASK_OUTPUT_PROFILE_TASKS,
   resolveContinuationOutputContract,
@@ -231,6 +235,19 @@ export {
   recoverVisiblePartialOutput,
   type RecoveredVisiblePartial,
 } from "./continuation-recovery.js";
+export {
+  VISIBLE_PROSE_INSTRUCTION_PRIORITY,
+  buildVisibleProseSystemInstruction,
+  naturalProseStopInstruction,
+  type VisibleProseSystemInstructionInput,
+} from "./prose-prompt-policy.js";
+export {
+  VisibleProseOutputError,
+  assertVisibleProseOutput,
+  type VisibleProseOutputErrorCode,
+  type VisibleProseOutputInspection,
+  type VisibleProseOutputOptions,
+} from "./visible-prose-output.js";
 export {
   PROMPT_TASKS,
   PromptRegistryError,

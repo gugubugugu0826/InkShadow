@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { MultiAgentReviewSession } from "@inkshadow/data";
 import { describe, expect, it, vi } from "vitest";
@@ -138,6 +138,76 @@ describe("MultiAgentReviewPage", () => {
       expect(runtime.rejectCandidate).toHaveBeenCalledWith(candidate.id, candidate.revision),
     );
     expect(listHistory).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps internal outline node identifiers inside explicitly opened diagnostics", async () => {
+    const user = userEvent.setup();
+    const hiddenNodeId = "internal-node-018f9f4a";
+    const session = candidateReadySession();
+    const runtime = fakeRuntime({
+      listHistory: vi.fn(() =>
+        Promise.resolve([
+          {
+            ...session,
+            candidate:
+              session.candidate === null
+                ? null
+                : {
+                    ...session.candidate,
+                    payloadJson: JSON.stringify({
+                      kind: "outline_patch",
+                      changes: [
+                        {
+                          nodeId: hiddenNodeId,
+                          expectedNodeRevision: 1,
+                          title: null,
+                          synopsis: "把冲突提前到本幕结尾。",
+                        },
+                      ],
+                    }),
+                  },
+          },
+        ]),
+      ),
+    });
+
+    render(<MultiAgentReviewPage runtime={runtime} projectId={session.projectId} featureEnabled />);
+
+    expect(await screen.findByText("未命名的大纲调整")).toBeVisible();
+    const identifier = screen.getByText(new RegExp(hiddenNodeId));
+    const details = identifier.closest("details");
+    expect(details).not.toBeNull();
+    expect(identifier).not.toBeVisible();
+    await user.click(within(details as HTMLElement).getByText("高级诊断详情"));
+    expect(identifier).toBeVisible();
+  });
+
+  it("keeps an unreadable candidate payload inside advanced diagnostics", async () => {
+    const user = userEvent.setup();
+    const session = candidateReadySession();
+    const runtime = fakeRuntime({
+      listHistory: vi.fn(() =>
+        Promise.resolve([
+          {
+            ...session,
+            candidate:
+              session.candidate === null
+                ? null
+                : { ...session.candidate, payloadJson: "{broken-private-payload" },
+          },
+        ]),
+      ),
+    });
+
+    render(<MultiAgentReviewPage runtime={runtime} projectId={session.projectId} featureEnabled />);
+
+    expect(await screen.findByText("这份审稿建议暂时无法读取")).toBeVisible();
+    const payload = screen.getByText("{broken-private-payload");
+    const details = payload.closest("details");
+    expect(details).not.toBeNull();
+    expect(payload).not.toBeVisible();
+    await user.click(within(details as HTMLElement).getByText("高级诊断详情"));
+    expect(payload).toBeVisible();
   });
 });
 

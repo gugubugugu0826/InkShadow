@@ -72,11 +72,11 @@ describe("context history panel", () => {
     view.rerender(
       <ContextHistoryPanel projectId={NEXT_PROJECT_ID} store={store} novelSkills={novelSkills} />,
     );
-    expect(await screen.findByText("还没有上下文记录")).toBeTruthy();
+    expect(await screen.findByText("还没有本次参考记录")).toBeTruthy();
 
     resolvePrevious(previousTrace);
     await waitFor(() => expect(screen.queryByText("本次资料选择明细")).toBeNull());
-    expect(screen.getByText("还没有上下文记录")).toBeTruthy();
+    expect(screen.getByText("还没有本次参考记录")).toBeTruthy();
   });
 
   it("shows content-free selection history and loads the exact trace on demand", async () => {
@@ -308,7 +308,8 @@ describe("context history panel", () => {
       />,
     );
 
-    expect(await screen.findByText("还没有上下文记录")).toBeTruthy();
+    expect(await screen.findByText("还没有本次参考记录")).toBeTruthy();
+    expect(document.body).not.toHaveTextContent("上下文记录");
     expect(screen.getByText(/第一次使用“继续创作”/u)).toBeTruthy();
   });
 

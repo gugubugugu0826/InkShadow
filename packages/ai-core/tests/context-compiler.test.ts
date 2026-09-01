@@ -273,23 +273,84 @@ describe("layered context compiler", () => {
     ).toHaveLength(1);
   });
 
-  it("never removes the current task when another source repeats its wording", () => {
+  it("keeps the task skeleton while merging a repeated author requirement into the higher authority", () => {
     const sharedContent = "继续写出雨夜重逢后的第一场对话。";
     const compiled = compileContext({
       maximumContextTokens: 10,
       candidates: [
-        sourceCandidate("current_task", "task", sharedContent, "generation_task", "task-1", "v1"),
+        sourceCandidate(
+          "current_task",
+          "task-skeleton",
+          "续写当前已保存章节，并保持事实连续。",
+          "generation_task",
+          "task-1",
+          "v1",
+        ),
+        sourceCandidate(
+          "current_task",
+          "author-requirement",
+          sharedContent,
+          "user_input",
+          "request-1",
+          "v1",
+        ),
         sourceCandidate("locked_hard_rules", "rule", sharedContent, "story_rule", "rule-1", "v1"),
       ],
       tokenEstimator: { source: "custom", estimateTokens: () => 1 },
     });
 
-    expect(compiled.entries.find(({ id }) => id === "task")).toMatchObject({
+    expect(compiled.entries.find(({ id }) => id === "task-skeleton")).toMatchObject({
       included: true,
       required: true,
       discardedReason: null,
     });
     expect(compiled.entries.find(({ id }) => id === "rule")).toMatchObject({
+      included: true,
+      required: true,
+      discardedReason: null,
+      evidence: expect.arrayContaining([
+        expect.objectContaining({ sourceType: "story_rule" }),
+        expect.objectContaining({ sourceType: "user_input" }),
+      ]),
+    });
+    expect(compiled.entries.find(({ id }) => id === "author-requirement")).toMatchObject({
+      included: false,
+      required: false,
+      discardedReason: "duplicate_source",
+    });
+  });
+
+  it("never removes the structural generation task when a story source repeats it", () => {
+    const sharedContent = "续写当前已保存章节，并保持事实连续。";
+    const compiled = compileContext({
+      maximumContextTokens: 10,
+      candidates: [
+        sourceCandidate(
+          "current_task",
+          "task-skeleton",
+          sharedContent,
+          "generation_task",
+          "task-1",
+          "v1",
+        ),
+        sourceCandidate(
+          "locked_hard_rules",
+          "coincidental-rule",
+          sharedContent,
+          "story_rule",
+          "rule-1",
+          "v1",
+        ),
+      ],
+      tokenEstimator: { source: "custom", estimateTokens: () => 1 },
+    });
+
+    expect(compiled.entries.find(({ id }) => id === "task-skeleton")).toMatchObject({
+      included: true,
+      required: true,
+      discardedReason: null,
+    });
+    expect(compiled.entries.find(({ id }) => id === "coincidental-rule")).toMatchObject({
       included: true,
       required: true,
       discardedReason: null,
@@ -344,6 +405,175 @@ describe("layered context compiler", () => {
         .filter(({ id }) => id.startsWith("revision-"))
         .every(({ included }) => included),
     ).toBe(true);
+  });
+
+  it("deduplicates one source revision and content fingerprint across adapter source types", () => {
+    const sharedHash = "a".repeat(64);
+    const compiled = compileContext({
+      maximumContextTokens: 10,
+      candidates: [
+        candidate("current_task", "task", 1),
+        hashedSourceCandidate(
+          "recent_events",
+          "accepted-chapter",
+          "[当前章节]\n钟声在雨里停了。",
+          "chapter",
+          "chapter-1",
+          "version-7",
+          sharedHash,
+        ),
+        hashedSourceCandidate(
+          "semantic_retrieval",
+          "retrieved-chapter",
+          "[检索命中]\n钟声在雨里停了。",
+          "search_document",
+          "chapter-1",
+          "version-7",
+          sharedHash,
+        ),
+      ],
+      tokenEstimator: { source: "custom", estimateTokens: () => 1 },
+    });
+
+    expect(compiled.entries.find(({ id }) => id === "accepted-chapter")).toMatchObject({
+      included: true,
+      evidence: expect.arrayContaining([
+        expect.objectContaining({ sourceType: "chapter" }),
+        expect.objectContaining({ sourceType: "search_document" }),
+      ]),
+    });
+    expect(compiled.entries.find(({ id }) => id === "retrieved-chapter")).toMatchObject({
+      included: false,
+      discardedReason: "duplicate_source",
+    });
+  });
+
+  it("fails closed on conflicting content fingerprints for the same source revision", () => {
+    expect(() =>
+      compileContext({
+        maximumContextTokens: 10,
+        candidates: [
+          candidate("current_task", "task", 1),
+          hashedSourceCandidate(
+            "recent_events",
+            "source-a",
+            "同一显示文字",
+            "chapter",
+            "chapter-1",
+            "version-7",
+            "a".repeat(64),
+          ),
+          hashedSourceCandidate(
+            "semantic_retrieval",
+            "source-b",
+            "同一显示文字",
+            "search_document",
+            "chapter-1",
+            "version-7",
+            "b".repeat(64),
+          ),
+        ],
+        tokenEstimator: { source: "custom", estimateTokens: () => 1 },
+      }),
+    ).toThrow(
+      expect.objectContaining({
+        code: "CONTEXT_SOURCE_FINGERPRINT_CONFLICT",
+        details: { conflictingEntryIds: ["source-a", "source-b"] },
+      }),
+    );
+  });
+
+  it("keeps separately located spans from one source revision independently traceable", () => {
+    const compiled = compileContext({
+      maximumContextTokens: 10,
+      candidates: [
+        candidate("current_task", "task", 1),
+        hashedSourceCandidate(
+          "locked_hard_rules",
+          "locked-span",
+          "周望必须守住钟楼。",
+          "story_rule",
+          "chapter-1",
+          "version-7",
+          "a".repeat(64),
+          "utf16:0-9/100",
+        ),
+        hashedSourceCandidate(
+          "recent_events",
+          "latest-tail",
+          "钟摆倒转后，周望奔向塔顶。",
+          "chapter",
+          "chapter-1",
+          "version-7",
+          "b".repeat(64),
+          "utf16:70-100/100",
+        ),
+      ],
+      tokenEstimator: { source: "custom", estimateTokens: () => 1 },
+    });
+
+    expect(compiled.entries.find(({ id }) => id === "locked-span")?.included).toBe(true);
+    expect(compiled.entries.find(({ id }) => id === "latest-tail")?.included).toBe(true);
+  });
+
+  it("reserves budget for explicitly protected authoritative prose before optional material", () => {
+    const compiled = compileContext({
+      maximumContextTokens: 6,
+      candidates: [
+        candidate("current_task", "task", 1),
+        candidate("scene_goal", "optional-scene", 4),
+        {
+          ...candidate("recent_events", "latest-prose", 3),
+          budgetRetention: "required" as const,
+        },
+        candidate("semantic_retrieval", "old-summary", 1),
+      ],
+      tokenEstimator: EXACT_ESTIMATOR,
+    });
+
+    expect(compiled.entries.find(({ id }) => id === "latest-prose")).toMatchObject({
+      included: true,
+      required: true,
+      discardedReason: null,
+    });
+    expect(compiled.entries.find(({ id }) => id === "optional-scene")).toMatchObject({
+      included: false,
+      discardedReason: "token_budget_exhausted",
+    });
+    expect(compiled.trace).toMatchObject({ requiredTokens: 4, usedTokens: 5 });
+  });
+
+  it("places a preferred writing method after confirmed story context but before low-priority retrieval and preferences", () => {
+    const compiled = compileContext({
+      maximumContextTokens: 4,
+      candidates: [
+        candidate("current_task", "task", 1),
+        candidate("recent_events", "latest-prose", 1),
+        {
+          ...candidate("rerank_supplement", "writing-method", 1),
+          budgetRetention: "preferred" as const,
+        },
+        candidate("semantic_retrieval", "old-summary", 2),
+        candidate("rerank_supplement", "writing-preference", 1),
+      ],
+      tokenEstimator: EXACT_ESTIMATOR,
+    });
+
+    expect(compiled.entries.map(({ id }) => id)).toEqual([
+      "task",
+      "latest-prose",
+      "writing-method",
+      "old-summary",
+      "writing-preference",
+    ]);
+    expect(compiled.entries.find(({ id }) => id === "writing-method")).toMatchObject({
+      included: true,
+      required: false,
+    });
+    expect(compiled.entries.find(({ id }) => id === "old-summary")).toMatchObject({
+      included: false,
+      discardedReason: "token_budget_exhausted",
+    });
   });
 
   it("falls back to canonical content when source hashes are unavailable", () => {
@@ -520,6 +750,31 @@ function sourceCandidate(
         sourceVersionId,
         locator: null,
         contentHash: null,
+        excerpt: null,
+      },
+    ],
+  };
+}
+
+function hashedSourceCandidate(
+  layer: ContextLayer,
+  id: string,
+  content: string,
+  sourceType: ContextCandidate["evidence"][number]["sourceType"],
+  sourceId: string,
+  sourceVersionId: string | null,
+  contentHash: string,
+  locator: string | null = null,
+): ContextCandidate {
+  return {
+    ...sourceCandidate(layer, id, content, sourceType, sourceId, sourceVersionId),
+    evidence: [
+      {
+        sourceType,
+        sourceId,
+        sourceVersionId,
+        locator,
+        contentHash,
         excerpt: null,
       },
     ],

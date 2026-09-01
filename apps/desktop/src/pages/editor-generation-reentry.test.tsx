@@ -20,7 +20,7 @@ import { ModelCenterError } from "../infrastructure/model-center-store";
 import { RuntimeProvider } from "../runtime-context";
 
 describe("editor generation reentry", () => {
-  it("keeps one continuation disclosure open when the generate action is clicked twice", async () => {
+  it("dispatches once after confirmation without a pre-provider validator conflict or duplicate disclosure", async () => {
     window.localStorage.clear();
     const runtime = createDevelopmentRuntime(window.localStorage);
     const preference = await runtime.writingExperience.getOrInitialize();
@@ -74,6 +74,7 @@ describe("editor generation reentry", () => {
     fireEvent.click(generateButton);
 
     expect(preflight).toBeVisible();
+    fireEvent.click(within(preflight).getByText("查看详情"));
     expect(
       within(preflight).getByRole("heading", { name: "本次必须遵守的创作约束" }),
     ).toBeVisible();
@@ -83,7 +84,7 @@ describe("editor generation reentry", () => {
     expect(recoverExpiredTasks).toHaveBeenCalledTimes(1);
     expect(generate).not.toHaveBeenCalled();
 
-    fireEvent.click(within(preflight).getByRole("button", { name: "暂不生成" }));
+    fireEvent.click(within(preflight).getByRole("button", { name: "取消" }));
     await waitFor(() =>
       expect(screen.queryByRole("dialog", { name: "生成续写建议前检查" })).not.toBeInTheDocument(),
     );
@@ -94,7 +95,7 @@ describe("editor generation reentry", () => {
     expect(recoverExpiredTasks).toHaveBeenCalledTimes(2);
 
     const confirm = within(reopenedPreflight).getByRole("button", {
-      name: /确认并生成续写建议|使用安全默认值并生成续写建议/u,
+      name: "确认生成",
     });
     fireEvent.click(confirm);
     fireEvent.click(confirm);
@@ -151,9 +152,9 @@ describe("editor generation reentry", () => {
       });
 
     const confirm = within(preflight).getByRole("button", {
-      name: /确认并生成续写建议|使用安全默认值并生成续写建议/u,
+      name: "确认生成",
     });
-    const cancel = within(preflight).getByRole("button", { name: "暂不生成" });
+    const cancel = within(preflight).getByRole("button", { name: "取消" });
     act(() => {
       confirm.click();
       cancel.click();
@@ -182,12 +183,12 @@ describe("editor generation reentry", () => {
       return originalFindTaskRoute(task);
     });
     const secondConfirm = within(reopened).getByRole("button", {
-      name: /确认并生成续写建议|使用安全默认值并生成续写建议/u,
+      name: "确认生成",
     });
     expect(secondConfirm).toBeEnabled();
     fireEvent.click(secondConfirm);
     await secondDisclosureStart;
-    const secondCancel = within(reopened).getByRole("button", { name: "暂不生成" });
+    const secondCancel = within(reopened).getByRole("button", { name: "取消" });
     expect(secondCancel).toBeDisabled();
     fireEvent.keyDown(document, { key: "Escape" });
     expect(reopened).toBeVisible();
@@ -352,7 +353,7 @@ describe("editor generation reentry", () => {
     const preflight = await screen.findByRole("dialog", { name: "生成续写建议前检查" });
     fireEvent.click(
       within(preflight).getByRole("button", {
-        name: /确认并生成续写建议|使用安全默认值并生成续写建议/u,
+        name: "确认生成",
       }),
     );
     await waitFor(() => expect(generate).toHaveBeenCalledTimes(1));
@@ -446,7 +447,7 @@ describe("editor generation reentry", () => {
     const router = renderEditorWithNavigationBoundary(runtime, project, chapter);
 
     fireEvent.click(await screen.findByRole("button", { name: "选择方向" }));
-    fireEvent.click(await screen.findByRole("button", { name: "确认并生成三个方向" }));
+    fireEvent.click(await screen.findByRole("button", { name: "确认生成" }));
     await waitFor(() => expect(generate).toHaveBeenCalledOnce());
     fireEvent.click(screen.getByRole("link", { name: "作品库" }));
 
@@ -506,8 +507,9 @@ describe("editor generation reentry", () => {
     editor.setSelectionRange(0, 2);
     fireEvent.select(editor);
     fireEvent.click(screen.getByRole("button", { name: "改写" }));
+    fireEvent.click(screen.getByRole("button", { name: "查看改写发送前说明" }));
     expect(await screen.findByText("确认本次改写")).toBeVisible();
-    fireEvent.click(screen.getByRole("button", { name: "确认并生成改写结果" }));
+    fireEvent.click(screen.getByRole("button", { name: "确认生成" }));
     await waitFor(() => expect(generate).toHaveBeenCalledOnce());
 
     fireEvent.click(screen.getByRole("link", { name: "作品库" }));
@@ -570,11 +572,18 @@ describe("editor generation reentry", () => {
     editor.setSelectionRange(0, 2);
     fireEvent.select(editor);
     fireEvent.click(screen.getByRole("button", { name: "扩写" }));
+    const requirement = screen.getByRole<HTMLTextAreaElement>("textbox", {
+      name: /^本次要求（可选）/u,
+    });
+    fireEvent.change(requirement, { target: { value: "保留这条可恢复的扩写要求" } });
+    fireEvent.click(screen.getByRole("button", { name: "查看扩写发送前说明" }));
     expect(await screen.findByText("确认本次扩写")).toBeVisible();
-    fireEvent.click(screen.getByRole("button", { name: "确认并生成扩写结果" }));
+    fireEvent.click(screen.getByRole("button", { name: "确认生成" }));
 
     expect(await screen.findByText(/发生了未预期的本地错误/u)).toBeVisible();
     expect(screen.getByText("本机保存失败后的扩写片段")).toBeVisible();
+    expect(requirement).toHaveValue("保留这条可恢复的扩写要求");
+    expect(savedWritingRequirements()).toContain("保留这条可恢复的扩写要求");
     expect(generate).toHaveBeenCalledOnce();
     expect(cancelGeneration).not.toHaveBeenCalled();
 
@@ -601,6 +610,94 @@ describe("editor generation reentry", () => {
     if (!candidates.ok) throw candidates.error;
     expect(candidates.value).toHaveLength(0);
     expect(generate).toHaveBeenCalledOnce();
+  });
+
+  it("clears the exact continuation requirement after a generated Candidate is safely persisted", async () => {
+    window.localStorage.clear();
+    const runtime = createDevelopmentRuntime(window.localStorage);
+    const preference = await runtime.writingExperience.getOrInitialize();
+    await runtime.writingExperience.switchMode("professional", preference.revision);
+    await seedRemoteContinuationRoute(runtime);
+    const generate = vi.fn<NativeModelGatewayClient["generate"]>(() =>
+      Promise.resolve({
+        text: "钟声停下后，林晚在长椅下发现了一封未署名的信。",
+        usage: { inputTokens: 80, outputTokens: 40, cachedInputTokens: null },
+      }),
+    );
+    installTauriGateway(runtime, generate);
+    const { chapter, project } = await seedChapter(runtime);
+    renderEditor(runtime, project, chapter);
+    const requirement = await screen.findByRole<HTMLTextAreaElement>("textbox", {
+      name: /^本次要求（可选）/u,
+    });
+    fireEvent.change(requirement, { target: { value: "写到发现未署名的信为止" } });
+
+    fireEvent.click(screen.getByRole("button", { name: "生成续写建议" }));
+    const preflight = await screen.findByRole("dialog", { name: "生成续写建议前检查" });
+    fireEvent.click(within(preflight).getByRole("button", { name: "确认生成" }));
+
+    await waitFor(() => expect(generate).toHaveBeenCalledOnce());
+    expect(
+      await screen.findByText("建议已生成并保持隔离；正文和版本没有改变，请查看后决定是否使用。"),
+    ).toBeVisible();
+    await waitFor(() => expect(savedWritingRequirements()).not.toContain("写到发现未署名的信为止"));
+    fireEvent.click(screen.getByRole("button", { name: "放弃" }));
+    expect(
+      await screen.findByRole<HTMLTextAreaElement>("textbox", {
+        name: /^本次要求（可选）/u,
+      }),
+    ).toHaveValue("");
+  });
+
+  it("keeps the exact requirement recoverable after a definitive provider failure", async () => {
+    window.localStorage.clear();
+    const runtime = createDevelopmentRuntime(window.localStorage);
+    const preference = await runtime.writingExperience.getOrInitialize();
+    await runtime.writingExperience.switchMode("professional", preference.revision);
+    await seedRemoteContinuationRoute(runtime);
+    const generate = vi.fn<NativeModelGatewayClient["generate"]>(() =>
+      Promise.reject(new ModelCenterError("MODEL_HTTP_REJECTED", "provider rejected request")),
+    );
+    installTauriGateway(runtime, generate);
+    const { chapter, project } = await seedChapter(runtime);
+    renderEditor(runtime, project, chapter);
+    const requirement = await screen.findByRole<HTMLTextAreaElement>("textbox", {
+      name: /^本次要求（可选）/u,
+    });
+    fireEvent.change(requirement, { target: { value: "明确失败后不再沿用这条要求" } });
+
+    fireEvent.click(screen.getByRole("button", { name: "生成续写建议" }));
+    const preflight = await screen.findByRole("dialog", { name: "生成续写建议前检查" });
+    fireEvent.click(within(preflight).getByRole("button", { name: "确认生成" }));
+
+    await waitFor(() => expect(generate).toHaveBeenCalledOnce());
+    await waitFor(() => expect(requirement).toHaveValue("明确失败后不再沿用这条要求"));
+    expect(savedWritingRequirements()).toContain("明确失败后不再沿用这条要求");
+  });
+
+  it("clears the exact requirement after the author cancels before dispatch", async () => {
+    window.localStorage.clear();
+    const runtime = createDevelopmentRuntime(window.localStorage);
+    const preference = await runtime.writingExperience.getOrInitialize();
+    await runtime.writingExperience.switchMode("professional", preference.revision);
+    await seedRemoteContinuationRoute(runtime);
+    const generate = vi.fn<NativeModelGatewayClient["generate"]>();
+    installTauriGateway(runtime, generate);
+    const { chapter, project } = await seedChapter(runtime);
+    renderEditor(runtime, project, chapter);
+    const requirement = await screen.findByRole<HTMLTextAreaElement>("textbox", {
+      name: /^本次要求（可选）/u,
+    });
+    fireEvent.change(requirement, { target: { value: "确认前取消后清理这条要求" } });
+
+    fireEvent.click(screen.getByRole("button", { name: "生成续写建议" }));
+    const preflight = await screen.findByRole("dialog", { name: "生成续写建议前检查" });
+    fireEvent.click(within(preflight).getByRole("button", { name: "取消" }));
+
+    await waitFor(() => expect(preflight).not.toBeInTheDocument());
+    expect(generate).not.toHaveBeenCalled();
+    expect(requirement).toHaveValue("");
+    expect(savedWritingRequirements()).not.toContain("确认前取消后清理这条要求");
   });
 });
 
@@ -741,4 +838,30 @@ async function seedRemoteContinuationRoute(runtime: DesktopRuntime): Promise<voi
     routeOrigin: "user",
     expectedRevision: null,
   });
+}
+
+function installTauriGateway(
+  runtime: DesktopRuntime,
+  generate: NativeModelGatewayClient["generate"],
+): void {
+  Object.assign(runtime, {
+    mode: "tauri" as const,
+    modelGateway: {
+      available: true,
+      listModels: () => Promise.resolve({ provider: "open_ai_compatible" as const, models: [] }),
+      checkConnection: () => Promise.reject(new Error("not used")),
+      embed: () => Promise.reject(new Error("not used")),
+      generate,
+      cancelGeneration: () => Promise.resolve(true),
+    } satisfies NativeModelGatewayClient,
+  });
+}
+
+function savedWritingRequirements(): readonly string[] {
+  return Object.keys(window.localStorage)
+    .filter((key) => key.startsWith("inkshadow.editor-writing-task-draft.v1:"))
+    .map((key) => window.localStorage.getItem(key))
+    .filter((value): value is string => value !== null)
+    .map((value) => JSON.parse(value) as { readonly requirement?: unknown })
+    .flatMap((value) => (typeof value.requirement === "string" ? [value.requirement] : []));
 }

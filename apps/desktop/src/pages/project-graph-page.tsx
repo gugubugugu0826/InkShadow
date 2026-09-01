@@ -913,6 +913,7 @@ function graphKindLabel(kind: string): string {
       organization_faction: "组织与阵营",
       pacing_metric: "节奏指标",
       relationship_change: "关系变化",
+      recalled_memory: "人物回忆",
       scene_tag: "场景标签",
       search_index_marker: "检索索引标记",
       story_conflict: "故事冲突",

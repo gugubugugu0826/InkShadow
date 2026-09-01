@@ -35,6 +35,7 @@ import {
 } from "../infrastructure/editor-preferences-store";
 import { editorCandidateStatusLabel } from "../infrastructure/editor-candidate-status";
 import { readSafeOperationIncidents } from "../infrastructure/safe-operation-diagnostics";
+import type { PreparedNovelSkillInvocation } from "../infrastructure/novel-skill-runtime";
 import {
   forgetUiRouteDiagnosticsMemoryForTests,
   readSafeUiRouteIncidents,
@@ -684,19 +685,18 @@ describe("editor candidate route selection", () => {
 
     await user.click(await screen.findByRole("button", { name: "生成续写建议" }));
     const preflight = await screen.findByRole("dialog", { name: "生成续写建议前检查" });
-    expect(
-      await within(preflight).findByText(
-        /模型：Direct writing remote · direct-writer.*预计发送 1 次/u,
-      ),
-    ).toBeVisible();
+    const continuationSummary = await within(preflight).findByText(
+      /模型：Direct writing remote · direct-writer.*预计发送 1 次/u,
+    );
+    expectConciseFiveItemSummary(continuationSummary);
     expect(generate).not.toHaveBeenCalled();
-    await user.click(within(preflight).getByText("查看详细信息"));
+    await user.click(within(preflight).getByText("查看详情"));
     expect(
       within(preflight).getByText(/本次最多向模型服务发送 1 次，自动重试 0 次/u),
     ).toBeVisible();
-    await user.click(
-      screen.getByRole("button", { name: /确认并生成续写建议|使用安全默认值并生成续写建议/u }),
-    );
+    expect(within(preflight).getByText(/作品《候选路由测试项目》 · 章节《第一章》/u)).toBeVisible();
+    expect(within(preflight).getByText(/完整结果只会保存为隔离/u)).toBeVisible();
+    await user.click(screen.getByRole("button", { name: "确认生成" }));
     await waitFor(() => expect(generate).toHaveBeenCalledTimes(1));
     resolveGeneration({
       text: generatedText,
@@ -785,7 +785,7 @@ describe("editor candidate route selection", () => {
         /模型：Direct writing remote · direct-writer.*预计发送 1 次/u,
       ),
     ).toBeVisible();
-    await user.click(within(preflight).getByText("查看详细信息"));
+    await user.click(within(preflight).getByText("查看详情"));
     expect(
       within(preflight).getByText(/本次最多向模型服务发送 1 次，自动重试 0 次/u),
     ).toBeVisible();
@@ -796,7 +796,7 @@ describe("editor candidate route selection", () => {
       ({ normalizedErrorCode }) => normalizedErrorCode === "USER_CANCELLED_BEFORE_DISPATCH",
     ).length;
 
-    await user.click(within(preflight).getByRole("button", { name: "暂不生成" }));
+    await user.click(within(preflight).getByRole("button", { name: "取消" }));
     expect(generate).not.toHaveBeenCalled();
     expect(
       await screen.findByText(/已取消，本次没有调用 AI。问题编号（联系支持时提供）：墨影-/u),
@@ -824,7 +824,7 @@ describe("editor candidate route selection", () => {
     const confirmedPreflight = await screen.findByRole("dialog", { name: "生成续写建议前检查" });
     await user.click(
       within(confirmedPreflight).getByRole("button", {
-        name: /确认并生成续写建议|使用安全默认值并生成续写建议/u,
+        name: "确认生成",
       }),
     );
     await waitFor(() => expect(generate).toHaveBeenCalledTimes(1));
@@ -871,6 +871,7 @@ describe("editor candidate route selection", () => {
     const rewriteButton = screen.getByRole("button", { name: "改写" });
     await waitFor(() => expect(rewriteButton).toBeEnabled(), { timeout: 5_000 });
     await user.click(rewriteButton);
+    await user.click(screen.getByRole("button", { name: "查看改写发送前说明" }));
     const disclosureTitle = await screen.findByText("确认本次改写", undefined, {
       timeout: 5_000,
     });
@@ -880,7 +881,7 @@ describe("editor candidate route selection", () => {
     if (!(disclosureAlert instanceof HTMLElement)) {
       throw new Error("没有找到选区改写发送信息提示。");
     }
-    const detailsSummary = screen.getByText("查看详细信息");
+    const detailsSummary = screen.getByText("查看详情");
     expect(detailsSummary).toBeVisible();
     const details = detailsSummary.closest("details");
     if (!(details instanceof HTMLElement)) {
@@ -965,6 +966,7 @@ describe("editor candidate route selection", () => {
     const rewriteButton = screen.getByRole("button", { name: "改写" });
     await waitFor(() => expect(rewriteButton).toBeEnabled(), { timeout: 5_000 });
     fireEvent.click(rewriteButton);
+    fireEvent.click(screen.getByRole("button", { name: "查看改写发送前说明" }));
     expect(await screen.findByText("确认本次改写")).toBeVisible();
     expect(generate).not.toHaveBeenCalled();
 
@@ -1020,9 +1022,18 @@ describe("editor candidate route selection", () => {
     const rewriteButton = screen.getByRole("button", { name: "改写" });
     await waitFor(() => expect(rewriteButton).toBeEnabled(), { timeout: 5_000 });
     await user.click(rewriteButton);
-    expect(await screen.findByText("确认本次改写", undefined, { timeout: 5_000 })).toBeVisible();
+    await user.click(screen.getByRole("button", { name: "查看改写发送前说明" }));
+    const selectionTitle = await screen.findByText("确认本次改写", undefined, { timeout: 5_000 });
+    const selectionStatus = selectionTitle.closest('[role="status"]');
+    if (!(selectionStatus instanceof HTMLElement)) throw new Error("找不到选区发送确认摘要");
+    const selectionSummary = selectionStatus.querySelector(".ink-inline-alert__description");
+    if (!(selectionSummary instanceof HTMLElement)) throw new Error("找不到选区五项摘要");
+    expectConciseFiveItemSummary(selectionSummary);
+    const selectionDetails = screen.getByText("查看详情");
+    await user.click(selectionDetails);
+    expect(selectionDetails.closest("details")).toHaveTextContent(/完整结果会先保持隔离/u);
     expect(generate).not.toHaveBeenCalled();
-    await user.click(screen.getByRole("button", { name: "取消，不发送" }));
+    await user.click(screen.getByRole("button", { name: "取消" }));
     expect(generate).not.toHaveBeenCalled();
     expect(
       readSafeOperationIncidents().filter(
@@ -1030,6 +1041,110 @@ describe("editor candidate route selection", () => {
       ),
     ).toHaveLength(cancellationCountBefore + 1);
   }, 12_000);
+
+  it("keeps a 2000-character selection requirement out of the concise confirmation and inside folded details", async () => {
+    window.localStorage.clear();
+    const runtime = createDevelopmentRuntime(window.localStorage);
+    const preference = await runtime.writingExperience.getOrInitialize();
+    await runtime.writingExperience.switchMode("professional", preference.revision);
+    await seedRemoteContinuationRoute(runtime, "rewrite");
+    installRemoteTextGenerator(runtime, ["确认前不应发送"]);
+    const { chapter, project } = await seedChapter(runtime, "稳定正文等待局部改写");
+    const longRequirement = "请".repeat(2_000);
+    const user = userEvent.setup();
+    renderEditor(runtime, project, chapter);
+    const editor = await screen.findByRole<HTMLTextAreaElement>("textbox", {
+      name: "章节正文",
+    });
+    editor.focus();
+    editor.setSelectionRange(0, 4);
+    fireEvent.select(editor);
+
+    const rewriteButton = await screen.findByRole("button", { name: "改写" });
+    await waitFor(() => expect(rewriteButton).toBeEnabled(), { timeout: 5_000 });
+    await user.click(rewriteButton);
+    fireEvent.change(screen.getByRole("textbox", { name: "本次要求（可选）" }), {
+      target: { value: longRequirement },
+    });
+    await user.click(screen.getByRole("button", { name: "查看改写发送前说明" }));
+
+    const title = await screen.findByText("确认本次改写", undefined, { timeout: 5_000 });
+    const status = title.closest('[role="status"]');
+    if (!(status instanceof HTMLElement)) throw new Error("找不到选区发送确认摘要");
+    const summary = status.querySelector(".ink-inline-alert__description");
+    if (!(summary instanceof HTMLElement)) throw new Error("找不到选区五项摘要");
+    expectBoundedRequirementSummary(summary, longRequirement);
+    const detailsSummary = screen.getByText("查看详情");
+    const details = detailsSummary.closest("details");
+    if (!(details instanceof HTMLDetailsElement)) throw new Error("找不到选区折叠详情");
+    expect(details).not.toHaveAttribute("open");
+    await user.click(detailsSummary);
+    expect(details).toHaveAttribute("open");
+    expect(details).toHaveTextContent(longRequirement);
+  }, 12_000);
+
+  it("keeps a 2000-character direction requirement out of the concise confirmation and inside folded details", async () => {
+    window.localStorage.clear();
+    const runtime = createDevelopmentRuntime(window.localStorage);
+    await runtime.writingExperience.authorizeDirectMode(1);
+    await seedRemoteContinuationRoute(runtime);
+    installRemoteTextGenerator(runtime, ["确认前不应发送"]);
+    const { chapter, project } = await seedChapter(runtime);
+    const longRequirement = "请".repeat(2_000);
+    const user = userEvent.setup();
+    renderEditor(runtime, project, chapter);
+
+    fireEvent.change(await screen.findByRole("textbox", { name: "本次要求（可选）" }), {
+      target: { value: longRequirement },
+    });
+    await user.click(screen.getByRole("button", { name: "选择方向" }));
+
+    const title = await screen.findByText("确认本次方向生成");
+    const status = title.closest('[role="status"]');
+    if (!(status instanceof HTMLElement)) throw new Error("找不到方向发送确认摘要");
+    const summary = status.querySelector(".ink-inline-alert__description");
+    if (!(summary instanceof HTMLElement)) throw new Error("找不到方向五项摘要");
+    expectBoundedRequirementSummary(summary, longRequirement);
+    const detailsSummary = screen.getByText("查看详情");
+    const details = detailsSummary.closest("details");
+    if (!(details instanceof HTMLDetailsElement)) throw new Error("找不到方向折叠详情");
+    expect(details).not.toHaveAttribute("open");
+    await user.click(detailsSummary);
+    expect(details).toHaveAttribute("open");
+    expect(details).toHaveTextContent(longRequirement);
+  }, 12_000);
+
+  it("keeps a 2000-character continuation requirement out of the concise confirmation and inside folded details", async () => {
+    window.localStorage.clear();
+    const runtime = createDevelopmentRuntime(window.localStorage);
+    await runtime.writingExperience.authorizeDirectMode(1);
+    await seedRemoteContinuationRoute(runtime);
+    installRemoteTextGenerator(runtime, ["确认前不应发送"]);
+    const { chapter, project } = await seedChapter(runtime);
+    const longRequirement = "请".repeat(2_000);
+    const user = userEvent.setup();
+    renderEditor(runtime, project, chapter);
+
+    fireEvent.change(await screen.findByRole("textbox", { name: "本次要求（可选）" }), {
+      target: { value: longRequirement },
+    });
+    await user.click(screen.getByRole("button", { name: "生成续写建议" }));
+
+    const preflight = await screen.findByRole("dialog", { name: "生成续写建议前检查" });
+    const status = within(preflight).getByText("发送确认摘要").closest('[role="status"]');
+    if (!(status instanceof HTMLElement)) throw new Error("找不到续写发送确认摘要");
+    const summary = status.querySelector(".ink-inline-alert__description");
+    if (!(summary instanceof HTMLElement)) throw new Error("找不到续写五项摘要");
+    expectBoundedRequirementSummary(summary, longRequirement);
+    const detailsSummary = within(preflight).getByText("查看详情");
+    const details = detailsSummary.closest("details");
+    if (!(details instanceof HTMLDetailsElement)) throw new Error("找不到续写折叠详情");
+    expect(details).not.toHaveAttribute("open");
+    await user.click(detailsSummary);
+    expect(details).toHaveAttribute("open");
+    expect(details).toHaveTextContent(longRequirement);
+  }, 12_000);
+
   it("reuses only an explicit exact continuation confirmation and still requires a summary click", async () => {
     window.localStorage.clear();
     window.sessionStorage.clear();
@@ -1065,13 +1180,13 @@ describe("editor candidate route selection", () => {
     await user.click(await screen.findByRole("button", { name: "生成续写建议" }));
     const firstPreflight = await screen.findByRole("dialog", { name: "生成续写建议前检查" });
     expect(within(firstPreflight).getByText("发送确认摘要")).toBeVisible();
-    expect(within(firstPreflight).getByText("查看详细信息")).toBeVisible();
+    expect(within(firstPreflight).getByText("查看详情")).toBeVisible();
     expect(
       within(firstPreflight).getByRole("checkbox", {
         name: "在当前会话记住本次确认",
       }),
     ).not.toBeVisible();
-    await user.click(within(firstPreflight).getByText("查看详细信息"));
+    await user.click(within(firstPreflight).getByText("查看详情"));
     await user.click(
       within(firstPreflight).getByRole("checkbox", {
         name: "在当前会话记住本次确认",
@@ -1079,7 +1194,7 @@ describe("editor candidate route selection", () => {
     );
     await user.click(
       within(firstPreflight).getByRole("button", {
-        name: /确认并生成续写建议|使用安全默认值并生成续写建议/u,
+        name: "确认生成",
       }),
     );
     await waitFor(() => expect(generate).toHaveBeenCalledTimes(1));
@@ -1095,9 +1210,7 @@ describe("editor candidate route selection", () => {
     ).not.toBeInTheDocument();
     expect(generate).toHaveBeenCalledTimes(1);
 
-    await user.click(
-      within(rememberedPreflight).getByRole("button", { name: "按本次摘要生成续写建议" }),
-    );
+    await user.click(within(rememberedPreflight).getByRole("button", { name: "确认生成" }));
     await waitFor(() => expect(generate).toHaveBeenCalledTimes(2));
   });
 
@@ -1133,9 +1246,9 @@ describe("editor candidate route selection", () => {
       within(preflight).queryByText("该模型尚未填写价格，暂时无法估算费用"),
     ).not.toBeInTheDocument();
     expect(
-      within(preflight).getByText("服务商没有提供可计算的单价，实际费用请以服务商账单为准。"),
-    ).toBeVisible();
-    expect(within(preflight).getByRole("link", { name: "填写费用信息" })).toBeVisible();
+      within(preflight).getAllByText(/服务商未提供费用信息，本次费用暂无法估算。/u),
+    ).toHaveLength(1);
+    expect(within(preflight).queryByRole("link", { name: "填写费用信息" })).not.toBeInTheDocument();
   });
 
   it("stops a professional continuation before dispatch when the disclosed price changes", async () => {
@@ -1188,7 +1301,7 @@ describe("editor candidate route selection", () => {
 
     await user.click(
       within(preflight).getByRole("button", {
-        name: /确认并生成续写建议|使用安全默认值并生成续写建议/u,
+        name: "确认生成",
       }),
     );
     expect(await screen.findByText("正文和已保存版本没有变化，你可以继续写作。")).toBeVisible();
@@ -1230,7 +1343,7 @@ describe("editor candidate route selection", () => {
     window.dispatchEvent(new Event(WRITING_EXPERIENCE_CHANGED_EVENT));
     await user.click(
       within(preflight).getByRole("button", {
-        name: /确认并生成续写建议|使用安全默认值并生成续写建议/u,
+        name: "确认生成",
       }),
     );
 
@@ -1286,7 +1399,7 @@ describe("editor candidate route selection", () => {
     const preflight = await screen.findByRole("dialog", { name: "生成续写建议前检查" });
     await user.click(
       within(preflight).getByRole("button", {
-        name: /确认并生成续写建议|使用安全默认值并生成续写建议/u,
+        name: "确认生成",
       }),
     );
     await waitFor(() => expect(generate).toHaveBeenCalledTimes(1));
@@ -1365,7 +1478,7 @@ describe("editor candidate route selection", () => {
 
     await user.click(await screen.findByRole("button", { name: "选择方向" }));
     expect(generate).not.toHaveBeenCalled();
-    await user.click(await screen.findByRole("button", { name: "确认并生成三个方向" }));
+    await user.click(await screen.findByRole("button", { name: "确认生成" }));
     await waitFor(() => expect(generate).toHaveBeenCalledTimes(1));
     const firstOptions = await screen.findByLabelText("三个创作方向");
     expect(within(firstOptions).getAllByRole("button")).toHaveLength(3);
@@ -1385,7 +1498,7 @@ describe("editor candidate route selection", () => {
 
     await user.click(screen.getByRole("button", { name: "换一组" }));
     expect(generate).toHaveBeenCalledTimes(1);
-    await user.click(await screen.findByRole("button", { name: "确认并生成三个方向" }));
+    await user.click(await screen.findByRole("button", { name: "确认生成" }));
     expect(within(firstOptions).getAllByRole("button")).toHaveLength(3);
     await waitFor(() => expect(generate).toHaveBeenCalledTimes(2));
     expect(
@@ -1400,6 +1513,133 @@ describe("editor candidate route selection", () => {
       expect(persisted.ok && persisted.value?.status).toBe("rejected");
     });
     expect(accept).not.toHaveBeenCalled();
+  });
+
+  it("uses the direct long profile and freezes the unified requirement into direction generation", async () => {
+    window.localStorage.clear();
+    const runtime = createDevelopmentRuntime(window.localStorage);
+    await runtime.writingExperience.authorizeDirectMode(1);
+    await seedRemoteContinuationRoute(runtime);
+    const directions = [
+      "方向一：林晚留在旧站台追查寄信人的行踪。",
+      "方向二：林晚登上末班列车寻找日记被改写的原因。",
+      "方向三：林晚联系旧友共同检查候车室后的暗门。",
+    ].join("\n");
+    const generatedProse =
+      "\n林晚把没有署名的信铺在候车室长椅上，逐行核对被雨水晕开的字迹。她在纸角发现一枚旧站台印章，日期正是日记被改写的那天，于是沿着印章指向的寄存柜继续追查。";
+    const generate = installRemoteTextGenerator(runtime, [directions, generatedProse]);
+    const { chapter, project } = await seedChapter(runtime);
+    const user = userEvent.setup();
+    renderEditor(runtime, project, chapter);
+
+    await user.selectOptions(await screen.findByRole("combobox", { name: /篇幅/u }), "long");
+    await user.type(
+      screen.getByRole("textbox", { name: "本次要求（可选）" }),
+      "三个方向都要围绕那封没有署名的信。",
+    );
+    await user.click(screen.getByRole("button", { name: "选择方向" }));
+
+    const directionSummary = await screen.findByText("确认本次方向生成");
+    expect(directionSummary.closest('[role="status"]')).toHaveTextContent("本次要求：已填写要求");
+    const directionStatus = directionSummary.closest('[role="status"]');
+    if (!(directionStatus instanceof HTMLElement)) throw new Error("找不到方向发送确认摘要");
+    const directionDescription = directionStatus.querySelector(".ink-inline-alert__description");
+    if (!(directionDescription instanceof HTMLElement)) throw new Error("找不到方向五项摘要");
+    expectConciseFiveItemSummary(directionDescription);
+    const detailsSummary = screen.getByText("查看详情");
+    await user.click(detailsSummary);
+    expect(detailsSummary.closest("details")).toHaveTextContent(
+      "三个方向都要围绕那封没有署名的信。",
+    );
+    expect(detailsSummary.closest("details")).toHaveTextContent(
+      /本次最多向模型服务发送\s*1\s*次，\s*自动重试\s*0\s*次/u,
+    );
+    expect(detailsSummary.closest("details")).toHaveTextContent(
+      /三个方向只用于作者选择，不会自动写入正文/u,
+    );
+    await user.click(screen.getByRole("button", { name: "确认生成" }));
+
+    await waitFor(() => expect(generate).toHaveBeenCalledOnce());
+    expect(
+      generate.mock.calls[0]?.[0].messages.some(({ content }) =>
+        content.includes("三个方向都要围绕那封没有署名的信。"),
+      ),
+    ).toBe(true);
+    const runs = await runtime.generationGovernance.listRunsByProjectId(project.id);
+    expect(runs[0]?.preflight.generationBudget).toMatchObject({
+      contextProfile: "long",
+      effectiveInputBudget: 64_000,
+    });
+
+    await user.click(
+      await screen.findByRole("button", {
+        name: /方向一：林晚留在旧站台追查寄信人的行踪/u,
+      }),
+    );
+    const continuationPreflight = await screen.findByRole("dialog", {
+      name: "生成续写建议前检查",
+    });
+    expect(
+      within(continuationPreflight).getByText("发送确认摘要").closest('[role="status"]'),
+    ).toHaveTextContent(/任务：生成续写建议.*本次要求：已填写要求/u);
+    const continuationDetailsSummary = within(continuationPreflight).getByText("查看详情");
+    await user.click(continuationDetailsSummary);
+    expect(continuationDetailsSummary.closest("details")).toHaveTextContent(
+      /林晚留在旧站台追查寄信人的行踪.*作者补充要求.*三个方向都要围绕那封没有署名的信/u,
+    );
+    await user.click(within(continuationPreflight).getByRole("button", { name: "确认生成" }));
+    await waitFor(() => expect(generate).toHaveBeenCalledTimes(2));
+    expect(generate.mock.calls[1]?.[0].maxOutputTokens).toBe(6_144);
+    const stable = await runtime.repositories.chapters.findById(chapter.id);
+    expect(stable.ok && stable.value?.content).toBe(chapter.content);
+  });
+
+  it("lets direct mode inspect every writing skill omitted from the prepared invocation", async () => {
+    window.localStorage.clear();
+    const runtime = createDevelopmentRuntime(window.localStorage);
+    await runtime.writingExperience.authorizeDirectMode(1);
+    await seedRemoteContinuationRoute(runtime);
+    installRemoteTextGenerator(runtime, ["不会在发送前调用"]);
+    const preparation: PreparedNovelSkillInvocation = Object.freeze({
+      status: "prepared_none_selected",
+      notAppliedReason: null,
+      availability: Object.freeze({ status: "ready", reason: null }),
+      maximumSkillTokens: 1_200,
+      usedSkillTokens: 0,
+      promptSection: null,
+      compiled: null,
+      methods: Object.freeze([
+        omittedNovelSkill("克制对白", "conflict", "user"),
+        omittedNovelSkill("开头节奏", "task_mismatch"),
+        omittedNovelSkill("氛围描写", "token_budget_exhausted"),
+      ]),
+    });
+    vi.spyOn(runtime.novelSkills, "prepareInvocation").mockResolvedValue(preparation);
+    const { chapter, project } = await seedChapter(runtime);
+    const user = userEvent.setup();
+    renderEditor(runtime, project, chapter);
+
+    await user.click(await screen.findByRole("button", { name: "生成续写建议" }));
+    expect(await screen.findByRole("dialog", { name: "生成续写建议前检查" })).toBeVisible();
+    const preflight = screen.getByRole("dialog", { name: "生成续写建议前检查" });
+    const referenceTrigger = within(preflight).getByRole("button", { name: "查看本次参考" });
+    const detailsSummary = within(preflight).getByText("查看详情");
+    const details = detailsSummary.closest("details");
+    expect(details).not.toHaveAttribute("open");
+    expect(referenceTrigger.closest("details")).toBe(details);
+    await user.click(detailsSummary);
+    await user.click(referenceTrigger);
+    const reference = await screen.findByRole("dialog", { name: "本次参考" });
+    await user.click(
+      within(reference).getByRole("button", {
+        name: /查看本次未采用的写作技能及原因（3）/u,
+      }),
+    );
+    expect(within(reference).getByText("它与本次优先级更高的技能冲突，因此未采用。")).toBeVisible();
+    expect(within(reference).getByText("这项技能不适用于本次任务。")).toBeVisible();
+    expect(
+      within(reference).getByText("本次最多参考的写作技能数量或可参考文字量已用完，因此未采用。"),
+    ).toBeVisible();
   });
 
   it("reuses system and custom directions for continuation, retaining the group after failure", async () => {
@@ -1427,17 +1667,17 @@ describe("editor candidate route selection", () => {
 
     await user.click(await screen.findByRole("button", { name: "选择方向" }));
     expect(generate).not.toHaveBeenCalled();
-    await user.click(await screen.findByRole("button", { name: "确认并生成三个方向" }));
+    await user.click(await screen.findByRole("button", { name: "确认生成" }));
     const systemOption = await screen.findByRole("button", {
       name: /方向一：林晚追上即将离站的列车/u,
     });
-    const customInput = screen.getByRole("textbox", { name: /自定义方向/u });
+    const customInput = screen.getByRole("textbox", { name: "本次要求（可选）" });
     await user.type(customInput, customDirection);
     await user.click(systemOption);
     const systemPreflight = await screen.findByRole("dialog", { name: "生成续写建议前检查" });
     await user.click(
       within(systemPreflight).getByRole("button", {
-        name: /确认并生成续写建议|使用安全默认值并生成续写建议/u,
+        name: "确认生成",
       }),
     );
     await waitFor(() => expect(generate).toHaveBeenCalledTimes(2));
@@ -1451,11 +1691,11 @@ describe("editor candidate route selection", () => {
     expect(customInput).toHaveValue(customDirection);
     expect(accept).not.toHaveBeenCalled();
 
-    await user.click(screen.getByRole("button", { name: "按这个方向写" }));
+    await user.click(screen.getByRole("button", { name: "生成续写建议" }));
     const customPreflight = await screen.findByRole("dialog", { name: "生成续写建议前检查" });
     await user.click(
       within(customPreflight).getByRole("button", {
-        name: /确认并生成续写建议|使用安全默认值并生成续写建议/u,
+        name: "确认生成",
       }),
     );
     await waitFor(() => expect(generate).toHaveBeenCalledTimes(3));
@@ -1499,14 +1739,14 @@ describe("editor candidate route selection", () => {
 
     await user.click(await screen.findByRole("button", { name: "选择方向" }));
     expect(generate).not.toHaveBeenCalled();
-    await user.click(await screen.findByRole("button", { name: "确认并生成三个方向" }));
+    await user.click(await screen.findByRole("button", { name: "确认生成" }));
     expect(await screen.findByText("收到的方向暂时无法使用")).toBeVisible();
     expect(generate).toHaveBeenCalledTimes(1);
-    const customInput = screen.getByRole("textbox", { name: /自定义方向/u });
+    const customInput = screen.getByRole("textbox", { name: "本次要求（可选）" });
     await user.type(customInput, "保留我输入的方向");
     await user.click(screen.getByRole("button", { name: "重试" }));
     expect(generate).toHaveBeenCalledTimes(1);
-    await user.click(await screen.findByRole("button", { name: "确认并生成三个方向" }));
+    await user.click(await screen.findByRole("button", { name: "确认生成" }));
     await waitFor(() => expect(generate).toHaveBeenCalledTimes(2));
     expect(customInput).toHaveValue("保留我输入的方向");
     expect(await screen.findByText("收到的方向暂时无法使用")).toBeVisible();
@@ -1523,7 +1763,7 @@ describe("editor candidate route selection", () => {
     const user = userEvent.setup();
     renderEditor(runtime, project, chapter);
 
-    const customInput = await screen.findByRole("textbox", { name: /自定义方向/u });
+    const customInput = await screen.findByRole("textbox", { name: "本次要求（可选）" });
     await user.type(customInput, "保留这条用户输入的方向");
     const invocationStart = vi.spyOn(runtime.modelHub, "startInvocation");
     const tasksBefore = await runtime.taskCenter.load();
@@ -1577,7 +1817,7 @@ describe("editor candidate route selection", () => {
     renderEditor(runtime, project, chapter);
 
     await user.click(await screen.findByRole("button", { name: "选择方向" }));
-    await user.click(await screen.findByRole("button", { name: "确认并生成三个方向" }));
+    await user.click(await screen.findByRole("button", { name: "确认生成" }));
     expect(await screen.findByLabelText("三个创作方向")).toBeVisible();
     const directions = await runtime.repositories.aiCandidates.listByChapterId(chapter.id);
     if (!directions.ok) throw directions.error;
@@ -2080,7 +2320,7 @@ describe("editor candidate route selection", () => {
     const preflight = await screen.findByRole("dialog", { name: "生成续写建议前检查" });
     await user.click(
       within(preflight).getByRole("button", {
-        name: /确认并生成续写建议|使用安全默认值并生成续写建议/u,
+        name: "确认生成",
       }),
     );
     await waitFor(async () => {
@@ -2346,7 +2586,7 @@ describe("editor candidate route selection", () => {
     const preflight = await screen.findByRole("dialog", { name: "生成续写建议前检查" });
     await user.click(
       within(preflight).getByRole("button", {
-        name: /确认并生成续写建议|使用安全默认值并生成续写建议/u,
+        name: "确认生成",
       }),
     );
     await waitFor(async () => {
@@ -2428,8 +2668,10 @@ describe("editor candidate route selection", () => {
 
     renderEditor(runtime, seeded.project, saved.value.chapter);
 
-    expect(await screen.findByRole("textbox", { name: "章节正文" })).toHaveValue("第二版稳定正文");
     const recovery = await screen.findByRole("dialog", { name: "发现未完成的本地草稿" });
+    expect(screen.getByRole("textbox", { name: "章节正文", hidden: true })).toHaveValue(
+      "第二版稳定正文",
+    );
     expect(within(recovery).getByText("第一版稳定正文")).toBeVisible();
     expect(within(recovery).getByText("第二版稳定正文")).toBeVisible();
     const persisted = await runtime.repositories.recoveryDrafts.findByChapterId(seeded.chapter.id);
@@ -3712,6 +3954,39 @@ function deferred<Value>() {
     resolve = complete;
   });
   return { promise, resolve } as const;
+}
+
+function omittedNovelSkill(
+  displayName: string,
+  selectionReason: PreparedNovelSkillInvocation["methods"][number]["selectionReason"],
+  ownerScope: PreparedNovelSkillInvocation["methods"][number]["ownerScope"] = "builtin",
+): PreparedNovelSkillInvocation["methods"][number] {
+  return Object.freeze({
+    displayName,
+    summary: `${displayName}的用途说明。`,
+    version: "1.0.0",
+    kind: ownerScope === "user" ? "custom" : "core",
+    ownerScope,
+    included: false,
+    selectionReason,
+    estimatedTokens: 120,
+  });
+}
+
+function expectConciseFiveItemSummary(summary: HTMLElement): void {
+  expect(summary.textContent.split("；")).toHaveLength(5);
+  expect(summary).toHaveTextContent(
+    /^任务：.+；本次要求：.+；模型：.+；资料：.+；预计发送 \d+ 次、自动重试 \d+ 次/u,
+  );
+  expect(summary).not.toHaveTextContent(/作品《|章节《|隔离/u);
+  expect(summary).toHaveTextContent(/不包含私密内容|私密内容仅在本机处理/u);
+}
+
+function expectBoundedRequirementSummary(summary: HTMLElement, fullRequirement: string): void {
+  expectConciseFiveItemSummary(summary);
+  expect(summary).toHaveTextContent("本次要求：已填写要求");
+  expect(summary).not.toHaveTextContent(fullRequirement);
+  expect(summary.textContent.length).toBeLessThan(240);
 }
 
 function repeatedContentChecksum(character: string) {

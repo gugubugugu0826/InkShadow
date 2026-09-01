@@ -59,6 +59,12 @@ export interface ContextCandidate {
   readonly priority?: number;
   /** Optional normalized relevance score used only inside the same layer. */
   readonly relevanceScore?: number | null;
+  /**
+   * Required entries fail closed when they cannot fit. Preferred entries stay
+   * optional but are considered after confirmed story context and before
+   * low-priority retrieval or writing preferences.
+   */
+  readonly budgetRetention?: "required" | "preferred";
 }
 
 export type ContextCandidateDraft = Omit<ContextCandidate, "layer">;
@@ -131,6 +137,7 @@ export type ContextCompilationErrorCode =
   | "CONTEXT_INPUT_INVALID"
   | "CONTEXT_REQUIRED_LAYER_MISSING"
   | "CONTEXT_REQUIRED_BUDGET_EXCEEDED"
+  | "CONTEXT_SOURCE_FINGERPRINT_CONFLICT"
   | "CONTEXT_TOKEN_ESTIMATE_INVALID";
 
 export interface ContextCompilationErrorDetails {
@@ -138,6 +145,7 @@ export interface ContextCompilationErrorDetails {
   readonly requiredTokens?: number;
   readonly overflowTokens?: number;
   readonly requiredEntryIds?: readonly string[];
+  readonly conflictingEntryIds?: readonly string[];
 }
 
 export class ContextCompilationError extends Error {
@@ -154,10 +162,14 @@ export class ContextCompilationError extends Error {
 
 const REQUIRED_LAYERS = new Set<ContextLayer>(["locked_hard_rules", "current_task"]);
 const CONTENT_WRAPPER_DEDUPE_SOURCE_TYPES = new Set<ContextEvidenceSourceType>([
+  "user_input",
+  "generation_task",
+  "scene_plan",
   "memory",
   "search_document",
   "rerank_result",
   "story_rule",
+  "other",
 ]);
 const MAXIMUM_CANDIDATES = 4_096;
 const MAXIMUM_CONTENT_CHARACTERS = 200_000;
@@ -258,8 +270,7 @@ export function compileContext(input: ContextCompilationInput): CompiledContext 
 
   const ordered = evaluated.sort(compareEvaluatedCandidates);
   const required = ordered.filter(
-    ({ candidate, duplicateOfId }) =>
-      duplicateOfId === null && REQUIRED_LAYERS.has(candidate.layer),
+    ({ candidate, duplicateOfId }) => duplicateOfId === null && isRequiredCandidate(candidate),
   );
   const requiredTokens = required.reduce((total, entry) => total + entry.estimatedTokens, 0);
   if (requiredTokens > input.maximumContextTokens) {
@@ -276,14 +287,19 @@ export function compileContext(input: ContextCompilationInput): CompiledContext 
     );
   }
 
-  let remaining = input.maximumContextTokens;
+  let optionalRemaining = input.maximumContextTokens - requiredTokens;
+  let requiredRemaining = requiredTokens;
   const entries = ordered.map((entry, evaluationIndex): CompiledContextEntry => {
     const duplicate = entry.duplicateOfId !== null;
-    const requiredEntry = !duplicate && REQUIRED_LAYERS.has(entry.candidate.layer);
-    const included = !duplicate && (requiredEntry || entry.estimatedTokens <= remaining);
-    const before = remaining;
+    const requiredEntry = !duplicate && isRequiredCandidate(entry.candidate);
+    const included = !duplicate && (requiredEntry || entry.estimatedTokens <= optionalRemaining);
+    const before = optionalRemaining + requiredRemaining;
     if (included) {
-      remaining -= entry.estimatedTokens;
+      if (requiredEntry) {
+        requiredRemaining -= entry.estimatedTokens;
+      } else {
+        optionalRemaining -= entry.estimatedTokens;
+      }
     }
     return Object.freeze({
       id: entry.candidate.id,
@@ -300,10 +316,11 @@ export function compileContext(input: ContextCompilationInput): CompiledContext 
       included,
       discardedReason: included ? null : duplicate ? "duplicate_source" : "token_budget_exhausted",
       budgetRemainingBefore: before,
-      budgetRemainingAfter: remaining,
+      budgetRemainingAfter: optionalRemaining + requiredRemaining,
     });
   });
 
+  const remaining = optionalRemaining + requiredRemaining;
   const usedTokens = input.maximumContextTokens - remaining;
   const discardedTokens = entries.reduce(
     (total, entry) => total + (entry.included ? 0 : entry.estimatedTokens),
@@ -348,6 +365,7 @@ export function compiledContextToPromptSections(
 function deduplicateContextCandidates(
   input: readonly Readonly<{ candidate: ContextCandidate; sourceIndex: number }>[],
 ): readonly DeduplicatedCandidate[] {
+  assertNoConflictingSourceFingerprints(input);
   const preferenceOrder = [...input].sort(compareDeduplicationPreference);
   const winners: Readonly<{ candidate: ContextCandidate; sourceIndex: number }>[] = [];
   const duplicateWinnerById = new Map<string, string>();
@@ -393,12 +411,10 @@ function compareDeduplicationPreference(
   left: Readonly<{ candidate: ContextCandidate; sourceIndex: number }>,
   right: Readonly<{ candidate: ContextCandidate; sourceIndex: number }>,
 ): number {
-  const leftRequired = REQUIRED_LAYERS.has(left.candidate.layer) ? 1 : 0;
-  const rightRequired = REQUIRED_LAYERS.has(right.candidate.layer) ? 1 : 0;
+  const leftRequired = isRequiredCandidate(left.candidate) ? 1 : 0;
+  const rightRequired = isRequiredCandidate(right.candidate) ? 1 : 0;
   if (leftRequired !== rightRequired) return rightRequired - leftRequired;
-  const layerDelta =
-    CONTEXT_LAYER_ORDER.indexOf(left.candidate.layer) -
-    CONTEXT_LAYER_ORDER.indexOf(right.candidate.layer);
+  const layerDelta = contextSelectionOrder(left.candidate) - contextSelectionOrder(right.candidate);
   if (layerDelta !== 0) return layerDelta;
   const priorityDelta = (right.candidate.priority ?? 0) - (left.candidate.priority ?? 0);
   if (priorityDelta !== 0) return priorityDelta;
@@ -409,17 +425,24 @@ function compareDeduplicationPreference(
 }
 
 function candidatesAreEquivalent(left: ContextCandidate, right: ContextCandidate): boolean {
-  // A current task is structural, author-requested input. It must never
-  // disappear merely because another wrapper happens to repeat its wording.
-  if (left.layer === "current_task" || right.layer === "current_task") return false;
+  // The generated task skeleton is the structural reason for the invocation.
+  // Author requirements use user_input evidence and may merge, but this
+  // skeleton must remain present even if a story source repeats its wording.
+  if (isGenerationTaskSkeleton(left) || isGenerationTaskSkeleton(right)) return false;
   if (sameCanonicalSourceWithDifferentRevision(left, right)) return false;
   const leftSourceKeys = new Set(canonicalSourceKeys(left));
   if (canonicalSourceKeys(right).some((key) => leftSourceKeys.has(key))) return true;
   return (
     isContentWrapperCandidate(left) &&
     isContentWrapperCandidate(right) &&
+    !hasExplicitContentFingerprint(left) &&
+    !hasExplicitContentFingerprint(right) &&
     canonicalContextContent(left.content) === canonicalContextContent(right.content)
   );
+}
+
+function isGenerationTaskSkeleton(candidate: ContextCandidate): boolean {
+  return candidate.evidence.some(({ sourceType }) => sourceType === "generation_task");
 }
 
 function isContentWrapperCandidate(candidate: ContextCandidate): boolean {
@@ -431,9 +454,48 @@ function isContentWrapperCandidate(candidate: ContextCandidate): boolean {
 function canonicalSourceKeys(candidate: ContextCandidate): readonly string[] {
   const fallback = canonicalContextContent(candidate.content);
   return candidate.evidence.map(
-    ({ sourceType, sourceId, sourceVersionId, contentHash }) =>
-      `${sourceType}|${sourceId.trim().toLowerCase()}|${sourceVersionId?.trim().toLowerCase() ?? "-"}|${contentHash?.trim().toLowerCase() ?? `content:${fallback}`}`,
+    ({ sourceId, sourceVersionId, locator, contentHash }) =>
+      `${sourceId.trim().toLowerCase()}|${sourceVersionId?.trim().toLowerCase() ?? "-"}|${locator?.trim().toLowerCase() ?? "-"}|${contentHash?.trim().toLowerCase() ?? `content:${fallback}`}`,
   );
+}
+
+function assertNoConflictingSourceFingerprints(
+  input: readonly Readonly<{ candidate: ContextCandidate; sourceIndex: number }>[],
+): void {
+  const firstBySourceRevision = new Map<
+    string,
+    Readonly<{ entryId: string; contentHash: string }>
+  >();
+  for (const { candidate } of input) {
+    for (const reference of candidate.evidence) {
+      if (reference.contentHash === null) continue;
+      const sourceRevisionAndRange = `${reference.sourceId.trim().toLowerCase()}|${reference.sourceVersionId?.trim().toLowerCase() ?? "-"}|${reference.locator?.trim().toLowerCase() ?? "-"}`;
+      const contentHash = reference.contentHash.trim().toLowerCase();
+      const first = firstBySourceRevision.get(sourceRevisionAndRange);
+      if (first === undefined) {
+        firstBySourceRevision.set(sourceRevisionAndRange, {
+          entryId: candidate.id,
+          contentHash,
+        });
+        continue;
+      }
+      if (first.contentHash !== contentHash) {
+        throw new ContextCompilationError(
+          "CONTEXT_SOURCE_FINGERPRINT_CONFLICT",
+          "One source revision has conflicting content fingerprints.",
+          { conflictingEntryIds: Object.freeze([first.entryId, candidate.id]) },
+        );
+      }
+    }
+  }
+}
+
+function hasExplicitContentFingerprint(candidate: ContextCandidate): boolean {
+  return candidate.evidence.some(({ contentHash }) => contentHash !== null);
+}
+
+function isRequiredCandidate(candidate: ContextCandidate): boolean {
+  return candidate.budgetRetention === "required" || REQUIRED_LAYERS.has(candidate.layer);
 }
 
 function sameCanonicalSourceWithDifferentRevision(
@@ -443,7 +505,6 @@ function sameCanonicalSourceWithDifferentRevision(
   return left.evidence.some((leftReference) =>
     right.evidence.some(
       (rightReference) =>
-        leftReference.sourceType === rightReference.sourceType &&
         leftReference.sourceId.trim().toLowerCase() ===
           rightReference.sourceId.trim().toLowerCase() &&
         (leftReference.sourceVersionId?.trim().toLowerCase() ?? null) !==
@@ -499,7 +560,10 @@ function validateCandidate(candidate: unknown, ids: Set<string>): ContextCandida
       (typeof candidate.relevanceScore !== "number" ||
         !Number.isFinite(candidate.relevanceScore) ||
         candidate.relevanceScore < 0 ||
-        candidate.relevanceScore > 1))
+        candidate.relevanceScore > 1)) ||
+    (candidate.budgetRetention !== undefined &&
+      candidate.budgetRetention !== "required" &&
+      candidate.budgetRetention !== "preferred")
   ) {
     throw invalidContextInput("A context candidate is invalid or duplicated.");
   }
@@ -512,6 +576,9 @@ function validateCandidate(candidate: unknown, ids: Set<string>): ContextCandida
     evidence: Object.freeze(candidate.evidence.map(validateEvidenceReference)),
     ...(candidate.priority === undefined ? {} : { priority: candidate.priority }),
     ...(candidate.relevanceScore === undefined ? {} : { relevanceScore: candidate.relevanceScore }),
+    ...(candidate.budgetRetention === undefined
+      ? {}
+      : { budgetRetention: candidate.budgetRetention }),
   });
 }
 
@@ -577,8 +644,10 @@ function estimateCandidateTokens(estimator: ContextTokenEstimator, text: string)
 }
 
 function compareEvaluatedCandidates(left: EvaluatedCandidate, right: EvaluatedCandidate): number {
-  if (left.layerOrder !== right.layerOrder) {
-    return left.layerOrder - right.layerOrder;
+  const layerDifference =
+    contextSelectionOrder(left.candidate) - contextSelectionOrder(right.candidate);
+  if (layerDifference !== 0) {
+    return layerDifference;
   }
   const priorityDifference = (right.candidate.priority ?? 0) - (left.candidate.priority ?? 0);
   if (priorityDifference !== 0) {
@@ -587,6 +656,12 @@ function compareEvaluatedCandidates(left: EvaluatedCandidate, right: EvaluatedCa
   const relevanceDifference =
     (right.candidate.relevanceScore ?? 0) - (left.candidate.relevanceScore ?? 0);
   return relevanceDifference === 0 ? left.sourceIndex - right.sourceIndex : relevanceDifference;
+}
+
+function contextSelectionOrder(candidate: ContextCandidate): number {
+  const layerOrder = CONTEXT_LAYER_ORDER.indexOf(candidate.layer) * 2;
+  if (candidate.budgetRetention !== "preferred") return layerOrder;
+  return CONTEXT_LAYER_ORDER.indexOf("character_voice_samples") * 2 + 1;
 }
 
 function buildLayerTraces(

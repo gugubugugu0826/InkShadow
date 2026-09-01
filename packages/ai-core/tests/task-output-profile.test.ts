@@ -14,15 +14,46 @@ describe("continuation output contracts", () => {
       Object.values(TASK_OUTPUT_PROFILE_REGISTRY)
         .filter(({ implementationStatus }) => implementationStatus === "wired")
         .map(({ task }) => task),
-    ).toEqual(["continuation"]);
+    ).toEqual([
+      "book_start",
+      "prose_generation",
+      "continuation",
+      "rewrite",
+      "polish",
+      "expand",
+      "shorten",
+      "import_rewrite",
+    ]);
+    expect(
+      Object.values(TASK_OUTPUT_PROFILE_REGISTRY)
+        .filter(({ implementationStatus }) => implementationStatus === "wired")
+        .every(
+          ({ outputKind, thinkingPolicy }) =>
+            outputKind === "visible_prose" && thinkingPolicy === "disabled_for_visible_prose",
+        ),
+    ).toBe(true);
     expect(TASK_OUTPUT_PROFILE_REGISTRY.chapter_summary).toMatchObject({
       outputKind: "plain_summary",
       truncationPolicy: "fail_without_promotion",
     });
   });
+
+  it("keeps story what-if simulation on the strict structured-output contract", () => {
+    expect(TASK_OUTPUT_PROFILE_REGISTRY.what_if).toMatchObject({
+      outputKind: "structured_data",
+      truncationPolicy: "fail_without_promotion",
+    });
+    expect(TASK_OUTPUT_PROFILE_REGISTRY.what_if.thinkingPolicy as string).toBe(
+      "disabled_for_structured_output",
+    );
+    expect(TASK_OUTPUT_PROFILE_REGISTRY.what_if.thinkingPolicy).not.toBe(
+      "disabled_for_visible_prose",
+    );
+  });
   it("uses a scene-sized standard continuation by default", () => {
     expect(resolveContinuationOutputContract()).toMatchObject({
       profile: "standard",
+      advancedTargetVisibleCharacters: null,
       destination: "complete_scene",
       customDestinationInstruction: null,
       minimumVisibleCharacters: 1_800,
@@ -66,9 +97,65 @@ describe("continuation output contracts", () => {
         customTargetVisibleCharacters: 3_300,
       }),
     ).toMatchObject({
-      minimumVisibleCharacters: 2_805,
+      advancedTargetVisibleCharacters: 3_300,
+      minimumVisibleCharacters: 2_640,
       targetVisibleCharacters: 3_300,
-      maximumVisibleCharacters: 3_795,
+      maximumVisibleCharacters: 3_960,
+    });
+    expect(
+      resolveContinuationOutputContract({
+        profile: "custom",
+        customTargetVisibleCharacters: 200,
+      }),
+    ).toMatchObject({
+      minimumVisibleCharacters: 160,
+      targetVisibleCharacters: 200,
+      maximumVisibleCharacters: 240,
+    });
+    expect(
+      resolveContinuationOutputContract({
+        profile: "custom",
+        customTargetVisibleCharacters: 12_000,
+      }),
+    ).toMatchObject({
+      minimumVisibleCharacters: 9_600,
+      targetVisibleCharacters: 12_000,
+      maximumVisibleCharacters: 14_400,
+    });
+  });
+
+  it.each(["short", "standard", "long"] as const)(
+    "keeps the %s natural-stop profile when an advanced target overrides only the range",
+    (profile) => {
+      expect(
+        resolveContinuationOutputContract({
+          profile,
+          customTargetVisibleCharacters: 3_300,
+        }),
+      ).toMatchObject({
+        profile,
+        advancedTargetVisibleCharacters: 3_300,
+        minimumVisibleCharacters: 2_640,
+        targetVisibleCharacters: 3_300,
+        maximumVisibleCharacters: 3_960,
+      });
+    },
+  );
+
+  it("bounds the observed 5,535-character runaway without shrinking long-form story context", () => {
+    const output = resolveContinuationOutputContract({ profile: "long" });
+    const context = resolveDynamicContextBudget({
+      profile: "long",
+      modelContextWindow: 128_000,
+      outputReserve: output.requestedMaxOutputTokens,
+    });
+
+    expect(output.maximumVisibleCharacters).toBeLessThan(5_535);
+    expect(output.requestedMaxOutputTokens).toBeGreaterThan(output.maximumVisibleCharacters);
+    expect(context).toMatchObject({
+      taskProfileLimit: 64_000,
+      effectiveInputBudget: 64_000,
+      modelLimitApplied: false,
     });
   });
 

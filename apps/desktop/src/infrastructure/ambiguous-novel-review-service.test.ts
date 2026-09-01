@@ -176,6 +176,38 @@ describe("AmbiguousNovelReviewService", () => {
     expect(startInvocation).not.toHaveBeenCalled();
   });
 
+  it("keeps every remote review task at zero sends after the chapter becomes private", async () => {
+    const fixture = await seedEvidenceFixture();
+    const chapter = unwrap(await fixture.runtime.repositories.chapters.findById(fixture.chapterId));
+    if (chapter === null) throw new Error("Expected the review chapter.");
+    unwrap(
+      await fixture.runtime.useCases.setChapterPrivacy.execute({
+        chapterId: chapter.id,
+        privacyMode: "local_only",
+        expectedPrivacyRevision: chapter.privacyRevision,
+      }),
+    );
+    const harness = createHarness(fixture.runtime, characterPreparation(fixture));
+    await seedRoutes(fixture.runtime.modelHub, [
+      "contradiction_check",
+      "pov_check",
+      "character_voice_check",
+      "content_quality_check",
+    ]);
+    const startInvocation = vi.spyOn(fixture.runtime.modelHub, "startInvocation");
+
+    const result = await harness.service.review({
+      projectId: fixture.projectId,
+      chapterId: fixture.chapterId,
+      expectedChapterVersionId: fixture.chapterVersionId,
+    });
+
+    expect(result.tasks).toHaveLength(4);
+    expect(result.tasks.every(({ status }) => status === "skipped")).toBe(true);
+    expect(harness.generate).not.toHaveBeenCalled();
+    expect(startInvocation).not.toHaveBeenCalled();
+  });
+
   it("rejects invalid provider JSON after recording the real invocation", async () => {
     const fixture = await seedEvidenceFixture();
     const harness = createHarness(fixture.runtime, characterPreparation(fixture));

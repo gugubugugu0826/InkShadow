@@ -305,7 +305,7 @@ describe("desktop diagnostics", () => {
     expect(artifact.bundle).toMatchObject({
       schemaVersion: 4,
       summary: {
-        appVersion: "0.2.16",
+        appVersion: "0.2.17",
         databaseHealth: "unknown",
         indexHealth: "healthy",
         syncState: "local_only",

@@ -34,6 +34,13 @@ if (!parsedNow.ok) {
 const clock = { now: () => parsedNow.value };
 const PRIVATE_INPUT = "PRIVATE_CHAPTER_TEXT_不要写入台账";
 const PRIVATE_OUTPUT = "PRIVATE_MODEL_RESPONSE_不要写入台账";
+const WIRED_VISIBLE_PROSE_MODEL_TASKS = [
+  "book_start_guidance",
+  "prose_generation",
+  "continuation",
+  "rewrite",
+  "polish",
+] as const satisfies readonly NovelAiTask[];
 
 describe("Model Hub text execution service", () => {
   it("inspects the exact primary selection and final policy without invocation or generation side effects", async () => {
@@ -711,6 +718,107 @@ describe("Model Hub text execution service", () => {
       },
     });
   });
+  it.each([
+    ["meta narration", "下面是续写内容：\n雨声落在檐下。", "MODEL_VISIBLE_PROSE_OUTPUT_META"],
+    [
+      "reasoning tag",
+      "<think>先安排冲突</think>\n雨声落在檐下。",
+      "MODEL_VISIBLE_PROSE_OUTPUT_INTERNAL_TAG",
+    ],
+    ["Markdown fence", "```text\n雨声落在檐下。\n```", "MODEL_VISIBLE_PROSE_OUTPUT_CODE_FENCE"],
+  ])(
+    "fails a visible-prose invocation containing %s before success",
+    async (_label, text, code) => {
+      const harness = createHarness();
+      const target = await seedTarget(harness.modelHub, {
+        connectionId: `visible-prose-invalid-${String(text.length)}`,
+        catalogEntryId: `visible-prose-invalid-${String(text.length)}-catalog`,
+        modelId: "visible-prose-invalid-model",
+      });
+      await saveRoute(harness.modelHub, {
+        task: "continuation",
+        primaryCatalogEntryId: target.id,
+      });
+      harness.generate.mockResolvedValue({
+        text,
+        usage: { inputTokens: 9, outputTokens: 8, cachedInputTokens: null },
+        streamed: true,
+      });
+      const invocationId = `visible-prose-invalid-${String(text.length)}`;
+
+      await expect(
+        executeModelHubTextTask(
+          harness.dependencies,
+          request({
+            task: "continuation",
+            invocationId,
+            executionPolicy: SINGLE_ATTEMPT_VISIBLE_PROSE_POLICY,
+          }),
+        ),
+      ).rejects.toMatchObject({
+        code,
+        dispatched: true,
+        retryable: false,
+        failure: {
+          stage: "response_normalization",
+          visibleContentLength: Array.from(text).length,
+        },
+      });
+      expect(harness.generate).toHaveBeenCalledOnce();
+      await expect(harness.modelHub.findInvocation(invocationId)).resolves.toMatchObject({
+        status: "failed",
+        errorCode: code,
+        attempt: 1,
+      });
+    },
+  );
+  it.each(WIRED_VISIBLE_PROSE_MODEL_TASKS)(
+    "applies the shared prose filter to production task %s",
+    async (task) => {
+      const harness = createHarness();
+      const target = await seedTarget(harness.modelHub, {
+        connectionId: `visible-prose-task-${task}`,
+        catalogEntryId: `visible-prose-task-${task}-catalog`,
+        modelId: `visible-prose-task-${task}-model`,
+      });
+      await saveRoute(harness.modelHub, {
+        task,
+        primaryCatalogEntryId: target.id,
+      });
+      const text = "雨声落在檐下。\n\n说明：下一段可以切换视角。";
+      harness.generate.mockResolvedValue({
+        text,
+        usage: { inputTokens: 9, outputTokens: 8, cachedInputTokens: null },
+        streamed: true,
+      });
+      const invocationId = `visible-prose-task-${task}`;
+
+      await expect(
+        executeModelHubTextTask(
+          harness.dependencies,
+          request({
+            task,
+            invocationId,
+            executionPolicy: SINGLE_ATTEMPT_VISIBLE_PROSE_POLICY,
+          }),
+        ),
+      ).rejects.toMatchObject({
+        code: "MODEL_VISIBLE_PROSE_OUTPUT_META",
+        dispatched: true,
+        retryable: false,
+        failure: {
+          stage: "response_normalization",
+          visibleContentLength: Array.from(text).length,
+        },
+      });
+      expect(harness.generate).toHaveBeenCalledOnce();
+      await expect(harness.modelHub.findInvocation(invocationId)).resolves.toMatchObject({
+        status: "failed",
+        errorCode: "MODEL_VISIBLE_PROSE_OUTPUT_META",
+        attempt: 1,
+      });
+    },
+  );
   it("records an HTTP 200 structured schema rejection as failed before success is committed", async () => {
     const harness = createHarness();
     const target = await seedTarget(harness.modelHub, {

@@ -85,6 +85,37 @@ describe("ModelHubCausalWhatIfModelPort", () => {
     expect(noCapabilityStart).not.toHaveBeenCalled();
   });
 
+  it("keeps a private project's causal simulation at zero remote sends and zero invocation rows", async () => {
+    const harness = createHarness();
+    const project = await harness.runtime.useCases.createProject.execute({
+      name: "私密剧情试演",
+    });
+    if (!project.ok) throw project.error;
+    const chapter = await harness.runtime.useCases.createChapter.execute({
+      projectId: project.value.id,
+      title: "第一章",
+      content: "主角在旧屋拿到钥匙。",
+    });
+    if (!chapter.ok) throw chapter.error;
+    const privateChapter = await harness.runtime.useCases.setChapterPrivacy.execute({
+      chapterId: chapter.value.chapter.id,
+      privacyMode: "local_only",
+      expectedPrivacyRevision: chapter.value.chapter.privacyRevision,
+    });
+    if (!privateChapter.ok) throw privateChapter.error;
+    await seedRoute(harness.runtime.modelHub, true);
+    const startInvocation = vi.spyOn(harness.runtime.modelHub, "startInvocation");
+
+    await expect(harness.adapter.simulate(modelInput(project.value.id))).rejects.toMatchObject({
+      code: "CAUSAL_WHAT_IF_MODEL_REQUEST_FAILED",
+      sourceCode: "PRIVATE_CHAPTER_LOCAL_ONLY",
+      dispatched: false,
+    } satisfies Partial<CausalWhatIfModelHubError>);
+
+    expect(harness.generate).not.toHaveBeenCalled();
+    expect(startInvocation).not.toHaveBeenCalled();
+  });
+
   it("rejects Markdown-wrapped JSON and keeps the real provider invocation auditable", async () => {
     const harness = createHarness();
     await seedRoute(harness.runtime.modelHub, true);
@@ -268,9 +299,9 @@ async function seedRoute(modelHub: ModelHubStore, includeStructuredOutput: boole
   });
 }
 
-function modelInput(): CausalWhatIfModelInput {
+function modelInput(projectId = PROJECT_ID): CausalWhatIfModelInput {
   return Object.freeze({
-    projectId: PROJECT_ID,
+    projectId,
     hypothesis: "如果主角没有拿到钥匙？",
     sourceEvent: eventContext(SOURCE_ID, "主角拿到钥匙"),
     impactedEvents: Object.freeze([eventContext(IMPACT_ID, "主角打开密室")]),

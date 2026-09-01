@@ -1,6 +1,7 @@
 import {
   compileContext,
   compiledContextToPromptSections,
+  estimateContextTokensUtf8Conservative,
   type CompiledContext,
   type ContextCandidate,
   type ContextCandidateDraft,
@@ -44,11 +45,12 @@ export interface StoryContextCompilationRequest {
   readonly currentBranchId?: string | null;
   readonly currentTask: ContextCandidateDraft;
   /**
-   * Additional user-visible instructions that belong to the current task,
-   * such as enabled writing preferences. They keep their own evidence so the
-   * context trace can explain exactly why each instruction was included.
+   * Additional explicit author requirements for this one action. They remain
+   * part of the required task layer while keeping their own source evidence.
    */
   readonly currentTaskSupplements?: readonly ContextCandidateDraft[];
+  /** Optional low-priority aids such as author writing preferences. */
+  readonly supplementalCandidates?: readonly ContextCandidate[];
   /** Author-confirmed creation inputs, already assigned to reviewed layers. */
   readonly creationSeedCandidates?: readonly ContextCandidate[];
   readonly sceneGoal?: ContextCandidateDraft | null;
@@ -72,6 +74,8 @@ export interface StoryContextCompilationReceipt {
   readonly promptSections: readonly PromptSection[];
   readonly discardedFacts: readonly StoryContextFactDiscard[];
   readonly includedFactIds: readonly string[];
+  /** In-memory exact source set used only for one late unified compilation. */
+  readonly candidateSnapshot: readonly ContextCandidate[];
 }
 
 const CURRENT_CHAPTER_CONTEXT_CHARACTER_LIMIT = 12_000;
@@ -119,8 +123,25 @@ export async function compileStoryContextForGeneration(
     const candidates: ContextCandidate[] = [...assembled.candidates];
     candidates.push(...cloneLayeredCandidates(request.creationSeedCandidates ?? []));
     candidates.push(...layerCandidates("current_task", request.currentTaskSupplements ?? []));
+    candidates.push(...cloneLayeredCandidates(request.supplementalCandidates ?? []));
     if (request.currentChapter !== undefined && request.currentChapter !== null) {
-      const chapter = currentChapterCandidate(request.currentChapter);
+      const requiredTokensBeforeChapter = compileContext({
+        maximumContextTokens: request.maximumContextTokens,
+        candidates,
+      }).trace.requiredTokens;
+      const availableChapterTokens = request.maximumContextTokens - requiredTokensBeforeChapter;
+      const chapterTokenBudget = Math.min(
+        CURRENT_CHAPTER_CONTEXT_CHARACTER_LIMIT,
+        Math.floor(request.maximumContextTokens * 0.6),
+        availableChapterTokens,
+      );
+      if (chapterTokenBudget < 1) {
+        throw new StoryContextRuntimeError(
+          "STORY_CONTEXT_COMPILATION_FAILED",
+          "The current task and locked facts leave no auditable budget for the latest saved chapter text.",
+        );
+      }
+      const chapter = currentChapterCandidate(request.currentChapter, chapterTokenBudget);
       if (chapter !== null) {
         candidates.push(chapter);
       }
@@ -130,15 +151,17 @@ export async function compileStoryContextForGeneration(
       ...layerCandidates("semantic_retrieval", request.semanticCandidates ?? []),
       ...layerCandidates("rerank_supplement", request.rerankCandidates ?? []),
     );
+    const candidateSnapshot = Object.freeze(cloneLayeredCandidates(candidates));
     const compiled = compileContext({
       maximumContextTokens: request.maximumContextTokens,
-      candidates,
+      candidates: candidateSnapshot,
     });
     return Object.freeze({
       compiled,
       promptSections: compiledContextToPromptSections(compiled),
       discardedFacts: assembled.discardedFacts,
       includedFactIds: assembled.includedFactIds,
+      candidateSnapshot,
     });
   } catch (cause: unknown) {
     if (cause instanceof StoryContextRuntimeError) {
@@ -177,7 +200,37 @@ export function formatStoryContextPrompt(receipt: StoryContextCompilationReceipt
   ].join("\n\n");
 }
 
-function currentChapterCandidate(source: CurrentChapterContextSource): ContextCandidate | null {
+/**
+ * Runs late-bound, auditable instructions through the same compiler as every
+ * other story source. This is used for prepared writing methods: their rules
+ * may merge with an identical author requirement or setting, while the
+ * complete source chain remains on the winning entry.
+ */
+export function recompileStoryContextWithAdditionalCandidates<
+  TReceipt extends StoryContextCompilationReceipt,
+>(
+  receipt: TReceipt,
+  additionalCandidates: readonly ContextCandidate[],
+  maximumContextTokens: number,
+): TReceipt {
+  if (additionalCandidates.length === 0) return receipt;
+  const candidateSnapshot = Object.freeze([
+    ...cloneLayeredCandidates(receipt.candidateSnapshot),
+    ...cloneLayeredCandidates(additionalCandidates),
+  ]);
+  const compiled = compileContext({ maximumContextTokens, candidates: candidateSnapshot });
+  return Object.freeze({
+    ...receipt,
+    compiled,
+    promptSections: compiledContextToPromptSections(compiled),
+    candidateSnapshot,
+  });
+}
+
+function currentChapterCandidate(
+  source: CurrentChapterContextSource,
+  maximumTokens: number,
+): ContextCandidate | null {
   const leadingWhitespace = /^\s*/u.exec(source.content)?.[0].length ?? 0;
   const trailingWhitespace = /\s*$/u.exec(source.content)?.[0].length ?? 0;
   const contentEnd = Math.max(leadingWhitespace, source.content.length - trailingWhitespace);
@@ -185,8 +238,15 @@ function currentChapterCandidate(source: CurrentChapterContextSource): ContextCa
     return null;
   }
   const normalized = source.content.slice(leadingWhitespace, contentEnd);
-  const relativeStart = safeTailStart(normalized, CURRENT_CHAPTER_CONTEXT_CHARACTER_LIMIT);
-  const startOffset = leadingWhitespace + relativeStart;
+  const characterBoundStart =
+    leadingWhitespace + safeTailStart(normalized, CURRENT_CHAPTER_CONTEXT_CHARACTER_LIMIT);
+  const startOffset = fitCurrentChapterTailStart(
+    source.content,
+    characterBoundStart,
+    contentEnd,
+    source.title,
+    maximumTokens,
+  );
   const tail = source.content.slice(startOffset, contentEnd);
   const evidence: ContextEvidenceReference = Object.freeze({
     sourceType: "chapter",
@@ -207,7 +267,64 @@ function currentChapterCandidate(source: CurrentChapterContextSource): ContextCa
     evidence: Object.freeze([evidence]),
     priority: 1_000,
     relevanceScore: 1,
+    budgetRetention: "required",
   });
+}
+
+function fitCurrentChapterTailStart(
+  content: string,
+  minimumStart: number,
+  contentEnd: number,
+  title: string,
+  maximumTokens: number,
+): number {
+  const prefix = `[当前章节：${title}]\n`;
+  if (
+    estimateContextTokensUtf8Conservative(`${prefix}${content.slice(minimumStart, contentEnd)}`) <=
+    maximumTokens
+  ) {
+    return minimumStart;
+  }
+  let low = minimumStart;
+  let high = contentEnd;
+  let best = contentEnd;
+  while (low <= high) {
+    const middle = safeTailStartOffset(content, Math.floor((low + high) / 2), contentEnd);
+    const estimate = estimateContextTokensUtf8Conservative(
+      `${prefix}${content.slice(middle, contentEnd)}`,
+    );
+    if (estimate <= maximumTokens) {
+      best = middle;
+      high = middle - 1;
+    } else {
+      low = middle + 1;
+    }
+  }
+  if (
+    best >= contentEnd ||
+    estimateContextTokensUtf8Conservative(`${prefix}${content.slice(best, contentEnd)}`) >
+      maximumTokens
+  ) {
+    throw new StoryContextRuntimeError(
+      "STORY_CONTEXT_COMPILATION_FAILED",
+      "The latest saved chapter tail cannot fit in the auditable context budget.",
+    );
+  }
+  return best;
+}
+
+function safeTailStartOffset(content: string, offset: number, maximum: number): number {
+  if (
+    offset > 0 &&
+    offset < maximum &&
+    content.charCodeAt(offset) >= 0xdc00 &&
+    content.charCodeAt(offset) <= 0xdfff &&
+    content.charCodeAt(offset - 1) >= 0xd800 &&
+    content.charCodeAt(offset - 1) <= 0xdbff
+  ) {
+    return offset + 1;
+  }
+  return offset;
 }
 
 function layerCandidates(

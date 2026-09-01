@@ -49,7 +49,7 @@ export function loadEditorContinuationPreference(
     );
     return Object.freeze({
       schemaVersion: 1,
-      profile: value.profile,
+      profile: value.profile === "custom" ? "standard" : value.profile,
       customTargetVisibleCharacters: custom as number | null,
       destination,
       customDestinationInstruction,

@@ -393,7 +393,100 @@ describe("ConsistencyInvestigationPanel", () => {
     expect(screen.queryByText(invocationId)).not.toBeInTheDocument();
     expect(screen.queryByText("DISPATCH_OUTCOME_UNKNOWN")).not.toBeInTheDocument();
   });
+
+  it.each([
+    {
+      name: "已检查且没有发现有证据的问题",
+      status: "succeeded" as const,
+      findingCount: 0,
+      droppedFindingCount: 0,
+      title: "已检查，未发现有证据的问题",
+    },
+    {
+      name: "证据不足而未能判断",
+      status: "partial" as const,
+      findingCount: 0,
+      droppedFindingCount: 10,
+      title: "证据不足，部分内容未能判断",
+    },
+    {
+      name: "发送前未执行",
+      status: "not_dispatched" as const,
+      findingCount: 0,
+      droppedFindingCount: 0,
+      title: "本次未执行",
+    },
+    {
+      name: "检查失败",
+      status: "failed" as const,
+      findingCount: 0,
+      droppedFindingCount: 0,
+      title: "检查失败",
+    },
+  ])("distinguishes $name from the other investigation outcomes", async (outcome) => {
+    const user = userEvent.setup();
+    const snapshot: ConsistencyInvestigationSnapshot = {
+      ...completedSnapshot(),
+      run: {
+        ...completedSnapshot().run,
+        status: outcome.status,
+        findingCount: outcome.findingCount,
+        droppedFindingCount: outcome.droppedFindingCount,
+        summary: null,
+        failureCode: outcome.status === "failed" ? "AGENT_RESULT_INVALID" : null,
+      },
+      findings: [],
+    };
+    const runtime: ConsistencyInvestigationRuntimePort = {
+      prepare: vi.fn(() => Promise.resolve(disclosureFixture())),
+      run: vi.fn(() => Promise.resolve(snapshot)),
+      cancel: vi.fn(() => Promise.resolve(snapshot)),
+      get: vi.fn(() => Promise.resolve(snapshot)),
+      list: vi.fn(() => Promise.resolve([])),
+      decideFinding: vi.fn(() => Promise.reject(new Error("not used"))),
+      prepareRepairCandidate: vi.fn(() => Promise.reject(new Error("not used"))),
+      runRepairCandidate: vi.fn(() => Promise.reject(new Error("not used"))),
+      cancelRepairCandidate: vi.fn(() => Promise.resolve()),
+    };
+
+    render(<ConsistencyInvestigationPanel projectId={PROJECT_ID} runtime={runtime} />);
+    await user.click(screen.getByRole("button", { name: "查看范围与费用" }));
+    await user.click(screen.getByRole("button", { name: "确认并开始 1 次调查" }));
+
+    const outcomeTitles = await screen.findAllByText(outcome.title);
+    expect(outcomeTitles[0]).toBeVisible();
+    if (outcome.droppedFindingCount > 0) {
+      expect(screen.getByText(/10 项.*证据不足/u)).toBeVisible();
+      expect(screen.queryByText(/检查通过/u)).not.toBeInTheDocument();
+    }
+  });
 });
+
+function disclosureFixture(): ConsistencyInvestigationDisclosure {
+  return {
+    runId: RUN_ID,
+    chapterCount: 8,
+    estimatedInputTokens: 9_000,
+    connectionDisplayName: "我的长篇模型",
+    providerKind: "deepseek",
+    connectionId: "internal-connection-id",
+    catalogEntryId: "internal-catalog-id",
+    modelId: "deepseek-v4-flash",
+    dataDestination: "remote",
+    includesPrivateContent: false,
+    maximumModelCalls: 1,
+    maximumToolSteps: 5,
+    automaticRetryCount: 0,
+    maximumDurationMs: 120_000,
+    maximumOutputTokens: 4_096,
+    estimatedMaximumCostMicros: null,
+    currency: null,
+    sends: ["当前已接受正文", "已确认故事事实"],
+    doesNotSend: ["API Key 或其他凭据", "未接受 Candidate"],
+    privacy: "发送前再次核对隐私范围。",
+    interruption: "越过网络边界后结果不明不会自动重发。",
+  };
+}
 
 function completedSnapshot(): ConsistencyInvestigationSnapshot {
   return {

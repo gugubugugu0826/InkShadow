@@ -5009,6 +5009,7 @@ function factTypeLabel(factType: string): string {
     character_voice: "人物说话方式",
     pov_knowledge: "人物知道的信息",
     event_category: "事件分类",
+    recalled_memory: "人物回忆",
     weak_inference: "待验证推测",
   };
   return labels[factType] ?? "其他故事设定";

@@ -1,4 +1,4 @@
-import { runGenerationPreflight } from "@inkshadow/ai-core";
+import { resolveContinuationOutputContract, runGenerationPreflight } from "@inkshadow/ai-core";
 import { parseIsoUtcTimestamp } from "@inkshadow/domain";
 import { describe, expect, it } from "vitest";
 
@@ -44,6 +44,88 @@ describe("BrowserDevelopmentGenerationGovernanceStore", () => {
     const serialized = window.localStorage.getItem(DEVELOPMENT_GENERATION_GOVERNANCE_KEY) ?? "";
     expect(serialized).not.toMatch(/chapter content|system prompt|api[_-]?key|secret/iu);
     expect(serialized).toContain('"codes":["READY"]');
+  });
+
+  it("round-trips the 12,000-character advanced target and 14,400-character result ceiling after restart", async () => {
+    const output = resolveContinuationOutputContract({
+      profile: "long",
+      customTargetVisibleCharacters: 12_000,
+    });
+    const base = runGenerationPreflight({
+      ...readyPreflightInput(),
+      maximumOutputTokens: output.requestedMaxOutputTokens,
+      contextWindowTokens: 128_000,
+    });
+    const preflight = Object.freeze({
+      ...base,
+      requestFingerprint: "a".repeat(64),
+      generationBudget: Object.freeze({
+        outputProfile: output.profile,
+        advancedTargetVisibleCharacters: output.advancedTargetVisibleCharacters,
+        targetVisibleCharacters: output.targetVisibleCharacters,
+        minimumVisibleCharacters: output.minimumVisibleCharacters,
+        maximumVisibleCharacters: output.maximumVisibleCharacters,
+        requestedMaximumOutputTokens: output.requestedMaxOutputTokens,
+        providerOutputLimit: output.providerOutputLimit,
+        contextProfile: "long",
+        effectiveInputBudget: 64_000,
+        budgetStatus: "available" as const,
+      }),
+    });
+    const created = await createStore().createRun({
+      id: RUN_ID,
+      taskId: TASK_ID,
+      idempotencyKey: `ai.generate:${CHAPTER_ID}:${VERSION_ID}:advanced`,
+      projectId: PROJECT_ID,
+      chapterId: CHAPTER_ID,
+      baseVersionId: VERSION_ID,
+      providerId: "openai",
+      modelId: "gpt-test",
+      preflight,
+    });
+    expect(created.run.preflight.generationBudget).toMatchObject({
+      advancedTargetVisibleCharacters: 12_000,
+      minimumVisibleCharacters: 9_600,
+      targetVisibleCharacters: 12_000,
+      maximumVisibleCharacters: 14_400,
+    });
+
+    await expect(createStore().findRunById(RUN_ID)).resolves.toMatchObject({
+      preflight: {
+        requestFingerprint: "a".repeat(64),
+        generationBudget: {
+          advancedTargetVisibleCharacters: 12_000,
+          minimumVisibleCharacters: 9_600,
+          targetVisibleCharacters: 12_000,
+          maximumVisibleCharacters: 14_400,
+        },
+      },
+    });
+
+    const serialized = window.localStorage.getItem(DEVELOPMENT_GENERATION_GOVERNANCE_KEY);
+    if (serialized === null) throw new Error("Expected the persisted governance ledger.");
+    const legacy = JSON.parse(serialized) as {
+      runs: {
+        preflight: {
+          requestFingerprint?: string | null;
+          generationBudget?: { advancedTargetVisibleCharacters?: number | null } | null;
+        };
+      }[];
+    };
+    const legacyRun = legacy.runs[0];
+    if (legacyRun === undefined) throw new Error("Expected the persisted generation run.");
+    delete legacyRun.preflight.requestFingerprint;
+    if (legacyRun.preflight.generationBudget !== null) {
+      delete legacyRun.preflight.generationBudget?.advancedTargetVisibleCharacters;
+    }
+    window.localStorage.setItem(DEVELOPMENT_GENERATION_GOVERNANCE_KEY, JSON.stringify(legacy));
+
+    await expect(createStore().findRunById(RUN_ID)).resolves.toMatchObject({
+      preflight: {
+        requestFingerprint: null,
+        generationBudget: { maximumVisibleCharacters: 14_400 },
+      },
+    });
   });
 
   it("tracks estimated retry cost and enforces revisioned lifecycle transitions", async () => {

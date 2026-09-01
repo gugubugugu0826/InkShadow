@@ -176,6 +176,7 @@ const FACT_TYPE_TO_LAYER = new Map<string, ContextLayer>([
   ["dialogue_sample", "character_voice_samples"],
   ["dialogue.sample", "character_voice_samples"],
   ["memory", "semantic_retrieval"],
+  ["recalled_memory", "semantic_retrieval"],
   ["semantic_memory", "semantic_retrieval"],
   ["memory.semantic", "semantic_retrieval"],
   ["weak_inference", "semantic_retrieval"],

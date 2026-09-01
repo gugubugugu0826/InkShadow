@@ -52,21 +52,18 @@ export function CandidateDiffViewer({
   return (
     <div className="candidate-diff-viewer">
       <div className="candidate-diff-viewer__summary">
-        <span>
-          共 {diff.changes.length.toLocaleString("zh-CN")} 处变化，编辑距离{" "}
-          {diff.editDistance.toLocaleString("zh-CN")}
-        </span>
+        <span>共 {diff.changes.length.toLocaleString("zh-CN")} 处文字变化</span>
         <span>
           第 {safePage + 1}/{pageCount} 页
         </span>
       </div>
       <ol className="candidate-diff-viewer__changes" start={firstChange + 1}>
-        {visibleChanges.map((change) => {
+        {visibleChanges.map((change, index) => {
           const decision = decisions[change.id];
           return (
             <li key={change.id}>
               <header>
-                <strong>变化 {change.id.replace("change-", "")}</strong>
+                <strong>第 {firstChange + index + 1} 处变化</strong>
                 <Badge>
                   {decision === undefined ? "待决定" : decision === "accept" ? "接受" : "保留原文"}
                 </Badge>

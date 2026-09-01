@@ -178,6 +178,73 @@ describe("persistent project embedding service", () => {
     expect(unavailableGateway.inputs).toHaveLength(0);
   });
 
+  it("blocks the entire remote vector route when the project privacy receipt contains a private chapter", async () => {
+    const store = new InMemoryVectorStore();
+    const gateway = new FakeEmbeddingGateway();
+    const privateReceipt: ProjectContextPrivacyReceipt = Object.freeze({
+      schemaVersion: 1,
+      projectId: PROJECT_ID,
+      fingerprint: `privacy:${PROJECT_ID}:private`,
+      activeChapterCount: 2,
+      retainedChapterCount: 2,
+      requiresVerifiedLocal: true,
+      chapters: Object.freeze([
+        {
+          chapterId: "019f9f4a-b3c7-7350-9226-000000000002",
+          currentVersionId: "019f9f4a-b3c7-7350-9226-000000000003",
+          revision: 1,
+          privacyRevision: 1,
+          privacyMode: "standard",
+          status: "active",
+        } as const,
+        {
+          chapterId: "019f9f4a-b3c7-7350-9226-000000000004",
+          currentVersionId: "019f9f4a-b3c7-7350-9226-000000000005",
+          revision: 1,
+          privacyRevision: 2,
+          privacyMode: "local_only",
+          status: "active",
+        } as const,
+      ]),
+    });
+    const projectContextPrivacy: Pick<
+      ProjectContextPrivacyAuthority,
+      "inspect" | "assertCurrentBeforeDispatch" | "assertRouteEligible"
+    > = {
+      inspect: vi.fn(() => Promise.resolve(privateReceipt)),
+      assertCurrentBeforeDispatch: vi.fn(() => Promise.resolve()),
+      assertRouteEligible: vi.fn(
+        (receipt: ProjectContextPrivacyReceipt, verifiedLocalEligible: boolean) => {
+          if (receipt.requiresVerifiedLocal && !verifiedLocalEligible) {
+            throw new ProjectContextPrivacyError(
+              "PRIVATE_CHAPTER_LOCAL_ONLY",
+              "private project must stay local",
+            );
+          }
+        },
+      ),
+    };
+    const service = createService({
+      store,
+      gateway,
+      hasher: fingerprintHasher(),
+      route: route(),
+      profile: profile("https://models.example/v1"),
+      projectContextPrivacy,
+    });
+    const documents = [
+      document(0, "standard chapter text"),
+      document(1, "PRIVATE_CHAPTER_TEXT_MUST_STAY_LOCAL"),
+    ];
+    const initial = await service.synchronizeProject(PROJECT_ID, documents, false);
+
+    await expect(
+      service.rebuildProject(PROJECT_ID, documents, initial.diagnostics.confirmationId),
+    ).rejects.toMatchObject({ code: "PRIVATE_CHAPTER_LOCAL_ONLY" });
+    expect(projectContextPrivacy.assertRouteEligible).toHaveBeenCalledWith(privateReceipt, false);
+    expect(gateway.inputs).toHaveLength(0);
+  });
+
   it("does not relabel real project queries as connection probes on local routes", async () => {
     const store = new InMemoryVectorStore();
     const gateway = new FakeEmbeddingGateway();

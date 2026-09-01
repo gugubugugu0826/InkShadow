@@ -35,18 +35,6 @@ import type {
 import { normalizeUiError } from "../infrastructure/ui-error";
 import { recordSafeOperationIncident } from "../infrastructure/safe-operation-diagnostics";
 
-const STATUS_LABELS: Readonly<Record<ConsistencyInvestigationRun["status"], string>> = {
-  planned: "等待确认",
-  dispatched: "已发送",
-  observing: "正在整理结果",
-  verifying: "正在核验证据",
-  succeeded: "已完成",
-  partial: "部分完成",
-  failed: "结果不可用",
-  cancelled: "已取消",
-  not_dispatched: "未发送",
-  ambiguous: "结果不确定",
-};
 const SEVERITY_LABELS: Readonly<Record<ConsistencyInvestigationFindingSeverity, string>> = {
   info: "提示",
   warning: "建议复核",
@@ -626,8 +614,7 @@ export function ConsistencyInvestigationPanel({
                   type="button"
                   onClick={() => void openRun(run.id)}
                 >
-                  {STATUS_LABELS[run.status]} · {formatTimestamp(run.createdAt)} ·{" "}
-                  {run.findingCount} 项
+                  {runStatusLabel(run)} · {formatTimestamp(run.createdAt)} · {run.findingCount} 项
                 </button>
               </li>
             ))}
@@ -870,8 +857,12 @@ function taskGraphResultSummary(node: InvestigationTaskGraphNode): string {
     return "结果未通过格式或本地证据核验；正文和不会被改动的历史版本没有改变。";
   if (node.status === "cancelled") return "调查已取消，未完成步骤不会在重启后自动续跑。";
   if (node.status === "not_dispatched") return "调查在发送前终止，本次没有发送正文。";
+  if (node.status === "partial" && safeCount(summary.findingCount) === "0")
+    return `证据不足：没有形成可核验结论，${safeCount(summary.droppedFindingCount)} 项内容未能判断。`;
   if (node.status === "partial")
     return `部分完成：保留 ${safeCount(summary.findingCount)} 项已核验结论，丢弃 ${safeCount(summary.droppedFindingCount)} 项证据不足的结论。`;
+  if (node.status === "succeeded" && safeCount(summary.findingCount) === "0")
+    return "已检查：未发现带当前精确证据的问题。";
   if (node.status === "succeeded")
     return `调查完成：${safeCount(summary.findingCount)} 项结论已通过当前证据核验。`;
   return "调查仍在进行，尚未形成最终结果。";
@@ -1027,7 +1018,29 @@ function RunStatusBadge({ run }: { readonly run: ConsistencyInvestigationRun }) 
         : run.status === "partial" || run.status === "not_dispatched"
           ? "warning"
           : "neutral";
-  return <Badge tone={tone}>{STATUS_LABELS[run.status]}</Badge>;
+  return <Badge tone={tone}>{runStatusLabel(run)}</Badge>;
+}
+
+function runStatusLabel(run: ConsistencyInvestigationRun): string {
+  if (run.status === "succeeded") {
+    return run.findingCount === 0 ? "已检查无问题" : "已检查并形成结论";
+  }
+  if (run.status === "partial") {
+    return run.findingCount === 0 ? "证据不足" : "部分完成";
+  }
+  const labels: Readonly<
+    Record<Exclude<ConsistencyInvestigationRun["status"], "succeeded" | "partial">, string>
+  > = {
+    planned: "等待确认",
+    dispatched: "已发送",
+    observing: "正在整理结果",
+    verifying: "正在核验证据",
+    failed: "检查失败",
+    cancelled: "已取消",
+    not_dispatched: "未执行",
+    ambiguous: "结果不确定",
+  };
+  return labels[run.status];
 }
 
 function statusMessage(run: ConsistencyInvestigationRun): Readonly<{
@@ -1045,8 +1058,8 @@ function statusMessage(run: ConsistencyInvestigationRun): Readonly<{
   if (run.status === "not_dispatched")
     return {
       tone: "warning",
-      title: "本次没有发送正文",
-      description: "调查在模型发送前终止。可以查看配置后手动开始一次新的调查。",
+      title: "本次未执行",
+      description: "检查在发送前终止，没有向模型发送正文。可以查看配置后手动重新开始。",
     };
   if (run.status === "cancelled")
     return {
@@ -1057,19 +1070,31 @@ function statusMessage(run: ConsistencyInvestigationRun): Readonly<{
   if (run.status === "failed")
     return {
       tone: "error",
-      title: "模型返回无法形成可信结果",
-      description: "已发送请求的记录仍保留，但格式或本地核验失败；正文和版本未改变。",
+      title: "检查失败",
+      description: "本次没有形成可用检查结果。可查看本次记录确认准确阶段；正文和版本未改变。",
+    };
+  if (run.status === "partial" && run.findingCount === 0)
+    return {
+      tone: "warning",
+      title: "证据不足，部分内容未能判断",
+      description: `没有形成可核验结论；${String(run.droppedFindingCount)} 项内容因证据不足未能判断。`,
     };
   if (run.status === "partial")
     return {
       tone: "warning",
-      title: "调查部分完成",
+      title: "检查部分完成",
       description: `${String(run.findingCount)} 项通过证据核验，另有 ${String(run.droppedFindingCount)} 项因证据不足被丢弃。`,
+    };
+  if (run.status === "succeeded" && run.findingCount === 0)
+    return {
+      tone: "info",
+      title: "已检查，未发现有证据的问题",
+      description: "已核对当前已接受正文与已确认设定，本次没有发现带精确证据的问题。",
     };
   if (run.status === "succeeded")
     return {
       tone: "info",
-      title: "调查已完成",
+      title: "检查已完成",
       description: `${String(run.findingCount)} 项结论均引用当前已接受正文或已确认事实。`,
     };
   return {

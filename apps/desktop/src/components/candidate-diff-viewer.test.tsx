@@ -32,6 +32,12 @@ describe("CandidateDiffViewer", () => {
       <CandidateDiffViewer decisions={{}} diff={diffWithChanges(2)} onDecision={onDecision} />,
     );
 
+    expect(screen.getByText("共 2 处文字变化")).toBeVisible();
+    expect(screen.getByText("第 1 处变化")).toBeVisible();
+    expect(screen.getByText("第 2 处变化")).toBeVisible();
+    expect(document.body).not.toHaveTextContent("编辑距离");
+    expect(document.body).not.toHaveTextContent("change-000001");
+    expect(document.body).not.toHaveTextContent("change-000002");
     expect(screen.getAllByText("待决定")).toHaveLength(2);
     const acceptButtons = screen.getAllByRole("button", { name: "接受此处" });
     const rejectButtons = screen.getAllByRole("button", { name: "保留原文" });

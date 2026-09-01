@@ -1,6 +1,8 @@
 import {
+  buildVisibleProseSystemInstruction,
   compileContext,
   compiledContextToPromptSections,
+  naturalProseStopInstruction,
   type CompiledContext,
   type ContextCandidate,
 } from "@inkshadow/ai-core";
@@ -1848,10 +1850,13 @@ function buildOpeningMessages(
     .slice(0, 12)
     .map(([key, value]) => `${key}：${value}`)
     .join("\n");
-  const baseSystemMessage =
-    partialOpening === null
-      ? "你是故事或文章的开篇助手。根据作者的一句话灵感写一段 500 至 900 字、可直接继续修改的开头。只输出正文，不要标题、分析、设定表、Markdown 围栏或元评论。不要把推测写成已经确认的长期设定；聚焦具体场景、人物行动和一个能推动下一段的问题。"
-      : "你是故事或文章的开篇助手。续写作者明确选择的未完整开头，只输出从已有文字结尾之后开始的新正文。不要复述已有文字，不要标题、分析、设定表、Markdown 围栏或元评论；让补全后的开头形成一个可继续修改的完整场景。";
+  const baseSystemMessage = buildVisibleProseSystemInstruction({
+    taskInstruction:
+      partialOpening === null
+        ? "你是故事或文章的开篇助手。根据作者的一句话灵感写一个可直接继续修改的开头。不要把推测写成已经确认的长期设定；聚焦具体场景、人物行动和一个能推动下一段的问题。"
+        : "你是故事或文章的开篇助手。续写作者明确选择的未完整开头，只写从已有文字结尾之后开始的新正文，不要复述已有文字；让补全后的开头形成一个可继续修改的完整场景。",
+    naturalStopInstruction: naturalProseStopInstruction("standard"),
+  });
   const systemMessage =
     novelSkillPromptSection === null
       ? baseSystemMessage

@@ -8,7 +8,7 @@ import {
 } from "./editor-continuation-preference";
 
 describe("editor continuation preference", () => {
-  it("partitions this-device preferences by project and restores them", () => {
+  it("partitions preferences by project and migrates the old custom profile into advanced target", () => {
     const storage = memoryStorage();
     saveEditorContinuationPreference(storage, "project-a", {
       schemaVersion: 1,
@@ -19,7 +19,7 @@ describe("editor continuation preference", () => {
     });
 
     expect(loadEditorContinuationPreference(storage, "project-a")).toMatchObject({
-      profile: "custom",
+      profile: "standard",
       customTargetVisibleCharacters: 3_300,
       destination: "custom_instruction",
       customDestinationInstruction: "写到主角发现密信为止。",

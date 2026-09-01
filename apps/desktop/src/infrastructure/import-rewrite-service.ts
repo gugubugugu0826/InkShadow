@@ -1,3 +1,4 @@
+import { buildVisibleProseSystemInstruction } from "@inkshadow/ai-core";
 import { AiCandidate, AppError, err, ok, type Result, type UuidV7 } from "@inkshadow/domain";
 
 import { ModelCenterError } from "./model-center-store";
@@ -275,12 +276,14 @@ function buildRewriteMessages(
 ): readonly NativeModelMessage[] {
   const scope =
     input.mode === "trial"
-      ? "只改写给出的代表段落。保持事实、人物姓名、事件顺序和信息边界；只输出改写后的段落，不要标题、说明、引号或 Markdown 围栏。"
-      : "改写给出的完整章节。保持主要事实、人物姓名、事件顺序和信息边界；只输出完整的改写后正文，不要标题、说明或 Markdown 围栏。";
+      ? "只改写给出的代表段落，保持事实、人物姓名、事件顺序和信息边界。"
+      : "改写给出的完整章节，保持主要事实、人物姓名、事件顺序和信息边界。";
   return Object.freeze([
     {
       role: "system",
-      content: `你是长篇小说改写助手。${scope}不得声称执行了没有证据的作品分析，不得添加与规则冲突的新设定。`,
+      content: buildVisibleProseSystemInstruction({
+        taskInstruction: `你是长篇小说改写助手。${scope}不得声称执行了没有证据的作品分析，不得添加与规则冲突的新设定。`,
+      }),
     },
     {
       role: "user",

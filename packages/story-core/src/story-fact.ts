@@ -837,6 +837,67 @@ export class StoryFact {
   }
 
   /**
+   * Records which active projections this newly-created rebuild replaces.
+   * The relation is written only on the successor before its first insert, so
+   * immutable evidence on existing facts remains untouched.
+   */
+  public withRebuildableSupersession(
+    supersededFactIds: readonly string[],
+  ): Result<StoryFact, StoryCoreError> {
+    if (supersededFactIds.length === 0) return ok(this);
+    if (
+      !isRebuildableStoryFactType(this.snapshot.factType) ||
+      this.snapshot.revision !== 1 ||
+      this.snapshot.status !== "temporary" ||
+      this.snapshot.origin !== "system" ||
+      this.snapshot.userConfirmed ||
+      this.snapshot.locked ||
+      this.snapshot.deprecated ||
+      this.snapshot.needsReview ||
+      this.snapshot.branchId !== null
+    ) {
+      return invalidTransition(
+        "Only a new, active system-derived rebuildable fact can record supersession.",
+      );
+    }
+    const structuredValue = this.snapshot.structuredValue;
+    if (
+      structuredValue === null ||
+      Array.isArray(structuredValue) ||
+      typeof structuredValue !== "object"
+    ) {
+      return factValidationError("A rebuildable story fact needs complete replacement metadata.");
+    }
+    const structuredRecord = structuredValue as Readonly<Record<string, StoryValue>>;
+    if (
+      Object.keys(structuredRecord).length !== 3 ||
+      structuredRecord.schemaVersion !== "inkshadow.rebuildable-system-fact.v1" ||
+      typeof structuredRecord.replacementKey !== "string" ||
+      !Object.prototype.hasOwnProperty.call(structuredRecord, "payload")
+    ) {
+      return factValidationError("A rebuildable story fact needs complete replacement metadata.");
+    }
+    const parsedIds: UuidV7[] = [];
+    for (const id of new Set(supersededFactIds)) {
+      if (id === this.snapshot.id) {
+        return factValidationError("A rebuildable story fact cannot supersede itself.");
+      }
+      const parsed = parseUuidV7(id);
+      if (!parsed.ok) return err(parsed.error);
+      parsedIds.push(parsed.value);
+    }
+    const markedValue = createStoryValue({
+      ...structuredRecord,
+      supersedesFactIds: parsedIds,
+    });
+    if (!markedValue.ok) return markedValue;
+    return StoryFact.rehydrate({
+      ...this.snapshot,
+      structuredValue: markedValue.value,
+    });
+  }
+
+  /**
    * Retires an active disposable system projection. Temporary status is the
    * authority boundary: review-required AI facts and all formal/user facts are
    * deliberately excluded.

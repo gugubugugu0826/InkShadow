@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { AiCandidate } from "@inkshadow/domain";
 import { parseUuidV7 as parseStoryUuidV7 } from "@inkshadow/story-core";
 
 import { createDevelopmentRuntime } from "./runtime";
@@ -161,6 +162,87 @@ describe("direct local story-fact organization", () => {
       alreadyOrganizedCount: 7,
       sourceWasCurrent: true,
     });
+    expect(generate).not.toHaveBeenCalled();
+  });
+
+  it("classifies an explicit recollection by its predicate instead of treating a mentioned relative as a relationship", async () => {
+    const runtime = createDevelopmentRuntime(window.localStorage);
+    const generate = vi.spyOn(runtime.modelGateway, "generate");
+    const project = expectOk(await runtime.useCases.createProject.execute({ name: "回忆分类" }));
+    const content = "他忽然想起母亲笔记本里夹着的那张照片。";
+    const created = expectOk(
+      await runtime.useCases.createChapter.execute({
+        projectId: project.id,
+        title: "第一章",
+        content,
+      }),
+    );
+    const version = created.version.toSnapshot();
+
+    await organizeDirectStoryFacts(
+      {
+        facts: runtime.story.facts,
+        factService: runtime.story.factService,
+        hasher: runtime.hasher,
+        now: () => runtime.clock.now(),
+      },
+      {
+        projectId: project.id,
+        chapterId: created.chapter.id,
+        versionId: version.id,
+        versionCreatedAt: version.createdAt,
+        acceptedText: content,
+        acceptedStartOffset: 0,
+        sourceLength: content.length,
+        sourceContentHash: version.contentChecksum,
+        currentVersionId: version.id,
+        localOnly: false,
+      },
+    );
+
+    const facts = expectStoryOk(
+      await runtime.story.facts.listByProjectId(expectStoryUuid(project.id)),
+    )
+      .map((fact) => fact.toSnapshot())
+      .filter(({ factType }) => factType !== "chapter_summary");
+    expect(facts).toHaveLength(1);
+    expect(facts[0]).toMatchObject({
+      factType: "recalled_memory",
+      contentText: content,
+      status: "unconfirmed",
+      origin: "system",
+      needsReview: true,
+      userConfirmed: false,
+      source: {
+        chapterId: created.chapter.id,
+        versionId: version.id,
+        startOffset: 0,
+        endOffset: content.length,
+        sourceLength: content.length,
+        excerpt: content,
+      },
+      structuredValue: {
+        payload: {
+          schemaVersion: "inkshadow.direct-local-story-fact.v1",
+          classification: "ordinary",
+          kind: "explicit_narrative_recollection",
+          evidence: {
+            projectId: project.id,
+            chapterId: created.chapter.id,
+            immutableVersionId: version.id,
+            sourceKind: "chapter",
+            locator: {
+              kind: "utf16",
+              startOffset: 0,
+              endOffset: content.length,
+              sourceLength: content.length,
+            },
+            currentness: "current",
+          },
+        },
+      },
+    });
+    expect(facts.some(({ factType }) => factType === "core_relationship")).toBe(false);
     expect(generate).not.toHaveBeenCalled();
   });
 
@@ -1003,6 +1085,8 @@ describe("direct local story-fact organization", () => {
 
   it("rebuilds one non-authoritative extractive summary from the current full version", async () => {
     const runtime = createDevelopmentRuntime(window.localStorage);
+    const fixedFactTime = runtime.clock.now();
+    vi.spyOn(runtime.clock, "now").mockReturnValue(fixedFactTime);
     const generate = vi.spyOn(runtime.modelGateway, "generate");
     const project = expectOk(await runtime.useCases.createProject.execute({ name: "本地摘要" }));
     const firstSentence = "🌙钟声第一次响起。";
@@ -1090,6 +1174,7 @@ describe("direct local story-fact organization", () => {
     ]);
 
     const reopened = createDevelopmentRuntime(window.localStorage);
+    vi.spyOn(reopened.clock, "now").mockReturnValue(fixedFactTime);
     const reopenedGenerate = vi.spyOn(reopened.modelGateway, "generate");
     const dependencies = {
       chapters: reopened.repositories.chapters,
@@ -1185,6 +1270,161 @@ describe("direct local story-fact organization", () => {
         excerpt: `${updatedContent.split("。")[0] ?? ""}。`,
       }),
     ]);
+    const authorTombstone = summaries.find((fact) => fact.id === existingSummary.id)?.toSnapshot();
+    expect(authorTombstone?.updatedAt).toBe(currentSummary.toSnapshot().createdAt);
+    expect(authorTombstone?.structuredValue).not.toHaveProperty("supersededByFactId");
+
+    const restoredAfterAuthorDeletion = expectOk(
+      await reopened.useCases.restoreChapterVersion.execute({
+        chapterId: chapter.id,
+        versionId: firstVersion.id,
+        expectedRevision: saved.chapter.revision,
+        organizeLocalStoryFacts: false,
+      }),
+    );
+    await organizeCurrentSavedVersionStoryFacts(dependencies, {
+      projectId: project.id,
+      chapterId: chapter.id,
+      versionId: restoredAfterAuthorDeletion.version.id,
+    });
+    summaries = expectStoryOk(
+      await reopened.story.facts.listByProjectId(expectStoryUuid(project.id)),
+    ).filter((fact) => fact.toSnapshot().factType === "chapter_summary");
+    expect(
+      summaries.filter(
+        (fact) =>
+          String(fact.toSnapshot().source.versionId) ===
+          String(restoredAfterAuthorDeletion.version.id),
+      ),
+    ).toHaveLength(0);
+    expect(summaries.find((fact) => fact.id === existingSummary.id)?.toSnapshot().status).toBe(
+      "deprecated",
+    );
+    expect(generate).not.toHaveBeenCalled();
+    expect(reopenedGenerate).not.toHaveBeenCalled();
+  });
+
+  it("rebuilds the summary against the new immutable recovery version and preserves it after restart", async () => {
+    const runtime = createDevelopmentRuntime(window.localStorage);
+    const generate = vi.spyOn(runtime.modelGateway, "generate");
+    const project = expectOk(await runtime.useCases.createProject.execute({ name: "恢复摘要" }));
+    const originalContent = "雨落在旧城。林澈收起那张照片。";
+    const created = expectOk(
+      await runtime.useCases.createChapter.execute({
+        projectId: project.id,
+        title: "第一章",
+        content: originalContent,
+      }),
+    );
+    const originalVersion = created.version.toSnapshot();
+    const dependencies = {
+      chapters: runtime.repositories.chapters,
+      chapterVersions: runtime.repositories.chapterVersions,
+      facts: runtime.story.facts,
+      factService: runtime.story.factService,
+      hasher: runtime.hasher,
+      now: () => runtime.clock.now(),
+    } as const;
+    await organizeCurrentSavedVersionStoryFacts(dependencies, {
+      projectId: project.id,
+      chapterId: created.chapter.id,
+      versionId: originalVersion.id,
+    });
+    const beforeCandidate = await runtime.story.chapterSummaries.inspectProject(project.id);
+    expect(beforeCandidate.entries[0]).toMatchObject({
+      state: "current",
+      sourceVersionId: originalVersion.id,
+    });
+
+    const candidateText = "这是尚未被作者接受的隔离候选。";
+    const streaming = AiCandidate.createStreaming({
+      id: runtime.ids.next(),
+      projectId: project.id,
+      chapterId: created.chapter.id,
+      source: "generate",
+      baseVersionId: originalVersion.id,
+      now: runtime.clock.now(),
+    });
+    if (!streaming.ok) throw streaming.error;
+    const candidateChecksum = await runtime.hasher.sha256(candidateText);
+    if (!candidateChecksum.ok) throw candidateChecksum.error;
+    const ready = streaming.value.markReady(
+      candidateText,
+      candidateChecksum.value,
+      runtime.clock.now(),
+    );
+    if (!ready.ok) throw ready.error;
+    expectOk(await runtime.repositories.aiCandidates.create(ready.value));
+    const afterCandidate = await runtime.story.chapterSummaries.inspectProject(project.id);
+    expect(afterCandidate.entries[0]).toMatchObject({
+      state: "current",
+      sourceVersionId: originalVersion.id,
+    });
+
+    const changedContent = "雨已经停了。林澈推开北门。";
+    expectOk(
+      await runtime.useCases.editChapter.execute({
+        chapterId: created.chapter.id,
+        expectedRevision: created.chapter.revision,
+        content: changedContent,
+        cursorOffset: changedContent.length,
+      }),
+    );
+    const saved = expectOk(
+      await runtime.useCases.saveChapter.execute({
+        chapterId: created.chapter.id,
+        expectedRevision: created.chapter.revision,
+        reason: "manual",
+        organizeLocalStoryFacts: false,
+      }),
+    );
+    if (saved.version === null) throw new Error("Expected the changed immutable version.");
+    await organizeCurrentSavedVersionStoryFacts(dependencies, {
+      projectId: project.id,
+      chapterId: created.chapter.id,
+      versionId: saved.version.id,
+    });
+
+    const restored = expectOk(
+      await runtime.useCases.restoreChapterVersion.execute({
+        chapterId: created.chapter.id,
+        versionId: originalVersion.id,
+        expectedRevision: saved.chapter.revision,
+        organizeLocalStoryFacts: true,
+      }),
+    );
+    const restoredVersion = restored.version.toSnapshot();
+    expect(restoredVersion).toMatchObject({
+      content: originalContent,
+      reason: "recovery",
+    });
+    await organizeCurrentSavedVersionStoryFacts(dependencies, {
+      projectId: project.id,
+      chapterId: created.chapter.id,
+      versionId: restoredVersion.id,
+    });
+
+    const summaries = expectStoryOk(
+      await runtime.story.facts.listByProjectId(expectStoryUuid(project.id)),
+    ).filter((fact) => fact.toSnapshot().factType === "chapter_summary");
+    const active = summaries.find((fact) => fact.toSnapshot().status === "temporary");
+    expect(active?.toSnapshot().source.versionId).toBe(restoredVersion.id);
+    expect(active === undefined ? null : parseStoredChapterSummaryPayload(active)).toMatchObject({
+      sourceVersionId: restoredVersion.id,
+    });
+
+    const reopened = createDevelopmentRuntime(window.localStorage);
+    const reopenedGenerate = vi.spyOn(reopened.modelGateway, "generate");
+    const reopenedSummaries = expectStoryOk(
+      await reopened.story.facts.listByProjectId(expectStoryUuid(project.id)),
+    ).filter((fact) => fact.toSnapshot().factType === "chapter_summary");
+    const reopenedActive = reopenedSummaries.find(
+      (fact) => fact.toSnapshot().status === "temporary",
+    );
+    expect(reopenedActive?.toSnapshot().source.versionId).toBe(restoredVersion.id);
+    expect(
+      reopenedActive === undefined ? null : parseStoredChapterSummaryPayload(reopenedActive),
+    ).toMatchObject({ sourceVersionId: restoredVersion.id });
     expect(generate).not.toHaveBeenCalled();
     expect(reopenedGenerate).not.toHaveBeenCalled();
   });

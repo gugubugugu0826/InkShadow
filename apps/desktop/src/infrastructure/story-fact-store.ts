@@ -356,10 +356,21 @@ function matchesDevelopmentRebuildableReplacement(
     !snapshot.needsReview &&
     snapshot.branchId === null &&
     structured !== null &&
-    Object.keys(structured).length === 3 &&
+    hasDevelopmentRebuildableShape(structured) &&
     structured.schemaVersion === "inkshadow.rebuildable-system-fact.v1" &&
     structured.replacementKey === replacementKey &&
     Object.prototype.hasOwnProperty.call(structured, "payload")
+  );
+}
+
+function hasDevelopmentRebuildableShape(structured: Readonly<Record<string, unknown>>): boolean {
+  const keys = Object.keys(structured);
+  return (
+    keys.length === 3 ||
+    (keys.length === 4 &&
+      Array.isArray(structured.supersedesFactIds) &&
+      structured.supersedesFactIds.length > 0 &&
+      structured.supersedesFactIds.every((id) => typeof id === "string"))
   );
 }
 function authorityFenceBindingFailure(
@@ -937,21 +948,28 @@ export class BrowserDevelopmentStoryFactStore
         replacedFactIds.push(current.id);
       }
 
-      if (database.facts[snapshot.id] !== undefined || !hasSafeEntityAliasPayload(snapshot)) {
+      const marked = fact.withRebuildableSupersession(replacedFactIds);
+      if (!marked.ok) return marked;
+      const storedFact = marked.value;
+      const storedSnapshot = storedFact.toSnapshot();
+      if (
+        database.facts[storedSnapshot.id] !== undefined ||
+        !hasSafeEntityAliasPayload(storedSnapshot)
+      ) {
         return err(storeFailure("Story fact already exists or has an invalid initial revision."));
       }
-      database.facts[snapshot.id] = snapshot;
-      database.revisions[snapshot.id] = Object.freeze([
+      database.facts[storedSnapshot.id] = storedSnapshot;
+      database.revisions[storedSnapshot.id] = Object.freeze([
         Object.freeze({
           changeKind: "created" as const,
-          recordedAt: snapshot.updatedAt,
-          snapshot,
+          recordedAt: storedSnapshot.updatedAt,
+          snapshot: storedSnapshot,
         }),
       ]);
-      appendBrowserEvidence(database, snapshot.id, snapshot);
+      appendBrowserEvidence(database, storedSnapshot.id, storedSnapshot);
       return ok(
         Object.freeze({
-          fact,
+          fact: storedFact,
           replacedFactIds: Object.freeze(replacedFactIds),
         }),
       );

@@ -602,11 +602,15 @@ export class SqliteStoryFactStore implements StoryFactStore, LegacyStoryFactComp
           replacedFactIds.push(current.id);
         }
 
-        await insertFact(transaction, snapshot);
-        await insertInitialRevision(transaction, snapshot, "created");
-        await insertStoryFactEvidence(transaction, snapshot.id, snapshot);
+        const marked = fact.withRebuildableSupersession(replacedFactIds);
+        if (!marked.ok) abortPersistence(marked.error);
+        const storedFact = marked.value;
+        const storedSnapshot = storedFact.toSnapshot();
+        await insertFact(transaction, storedSnapshot);
+        await insertInitialRevision(transaction, storedSnapshot, "created");
+        await insertStoryFactEvidence(transaction, storedSnapshot.id, storedSnapshot);
         return Object.freeze({
-          fact,
+          fact: storedFact,
           replacedFactIds: Object.freeze(replacedFactIds),
         });
       }),
@@ -1507,10 +1511,21 @@ function matchesStoredRebuildableReplacement(
     !snapshot.needsReview &&
     snapshot.branchId === null &&
     structured !== null &&
-    Object.keys(structured).length === 3 &&
+    hasStoredRebuildableShape(structured) &&
     structured.schemaVersion === "inkshadow.rebuildable-system-fact.v1" &&
     structured.replacementKey === replacementKey &&
     Object.prototype.hasOwnProperty.call(structured, "payload")
+  );
+}
+
+function hasStoredRebuildableShape(structured: Record<string, unknown>): boolean {
+  const keys = Object.keys(structured);
+  return (
+    keys.length === 3 ||
+    (keys.length === 4 &&
+      Array.isArray(structured.supersedesFactIds) &&
+      structured.supersedesFactIds.length > 0 &&
+      structured.supersedesFactIds.every((id) => typeof id === "string"))
   );
 }
 function assertAuthorityFenceMatchesFact(

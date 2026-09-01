@@ -2038,6 +2038,11 @@ describe("unified story fact SQLite store", () => {
       status: "temporary",
       deprecated: false,
       revision: 1,
+      structuredValue: {
+        schemaVersion: "inkshadow.rebuildable-system-fact.v1",
+        replacementKey,
+        supersedesFactIds: [first.id],
+      },
     });
     expect(unwrap(await store.listEvidenceByFactId(current.id))).toEqual([
       expect.objectContaining({
