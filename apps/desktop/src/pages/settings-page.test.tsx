@@ -77,7 +77,8 @@ describe("SettingsPage model routing", () => {
     });
     const user = userEvent.setup();
     renderRoute(fixture.runtime, "/settings?connectionId=failed-routing-choice#model-routing");
-    await user.click(await screen.findByRole("button", { name: "专家设置" }));
+    await screen.findByRole("heading", { name: "创作任务安排" }, { timeout: 5_000 });
+    await user.click(screen.getByRole("button", { name: "专家设置" }));
     const primary = await screen.findByRole("combobox", { name: "主模型", hidden: true });
     await waitFor(() => expect(screen.queryByText("正在读取模型目录…")).not.toBeInTheDocument());
     expect(
@@ -91,6 +92,9 @@ describe("SettingsPage model routing", () => {
     ).not.toContain(fixture.catalogEntryId);
     const catalogBrowser = screen.getByRole("region", { name: "可选模型目录", hidden: true });
     await user.click(within(catalogBrowser).getByText("浏览全部可选模型"));
+    expect(
+      within(catalogBrowser).getAllByRole("button", { name: /^选择 /u, hidden: true }).length,
+    ).toBeGreaterThan(0);
     expect(catalogBrowser.querySelectorAll('[data-connected="true"]')).toHaveLength(0);
     expect(await fixture.runtime.modelHub.findConnection(connection.id)).toMatchObject({
       enabled: true,
