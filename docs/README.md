@@ -1,12 +1,14 @@
 # 墨影 InkShadow 文档入口
 
-> 当前源码与人工复测候选：`0.2.17`；本轮不创建标签或 GitHub Release，人工安装复测前不得宣布正式发布  
+> 当前源码与发布目标：`0.2.18`；全部本地门禁通过后，授权安全推送 main、创建新标签及 GitHub Release；未签名包只能预发行  
 > 设计基线（Design Baseline）：`DESIGN v0.3.1b`  
-> 最近治理复核：2026-09-02  
+> 最近治理复核：2026-09-06  
 > 公开版本的精确状态以 [GitHub Releases](https://github.com/gugubugugu0826/InkShadow/releases) 为准；现有 `v0.2.16` 及更早标签、Release 与附件保持不可变。  
 > 注意：设计版本用于界面与交互验收，不会自动改变应用版本。
 
-0.2.17 收敛编辑器常驻开头／续写入口、单一任务要求、短中长篇幅、简洁发送确认和编辑器写作技能入口；统一正文指令优先级、自然收束、资料去重／预算和异常输出隔离，并修复事实分类、摘要版本、一致性四态与项目级私密发送边界。本轮不新增数据库迁移，不修改既有迁移。当前缺陷矩阵、提示词审计、已执行命令、未执行人工项和候选边界见 [`execution/2026-09-01-V0217-CANDIDATE.md`](execution/2026-09-01-V0217-CANDIDATE.md)。0.2.16 及更早发布记录作为冻结历史保留。
+0.2.18 修复私密状态回读与路由竞争、逐句设定、规则锁定、基本规划安排、技能创建和采用回执、资料与检查展示、导出及编辑空间。本轮没有新增迁移；旧标签、附件和 0.2.17 人工复测包保持不变。当前缺陷矩阵见 [`execution/2026-09-06-V0218-REPAIR.md`](execution/2026-09-06-V0218-REPAIR.md)，实现边界见 [`product-rebuild/V0218-CURRENT-REALITY.md`](product-rebuild/V0218-CURRENT-REALITY.md)。最终提交验证、产物来源和发布回下载以随版本交付的报告为准，不能把本索引当作已发布证明。
+
+0.2.17 的编辑器与提示词修复记录保留为历史基线，见 [`execution/2026-09-01-V0217-CANDIDATE.md`](execution/2026-09-01-V0217-CANDIDATE.md)。该轮“只交付人工复测包”的限制不适用于已另行授权的 0.2.18。
 `0.2.11` 人工复测候选的缺陷矩阵与证据边界继续作为历史记录保留，见
 [`execution/2026-08-24-V0211-BLOCKERS-UI-REMEDIATION.md`](execution/2026-08-24-V0211-BLOCKERS-UI-REMEDIATION.md)。
 
@@ -42,7 +44,8 @@
 | `SUPPORTING_CURRENT`    | [`front-end/README.md`](front-end/README.md)                                                                                               | 当前前端页面、路由、普通/专家体验和接口索引        |
 | `SUPPORTING_CURRENT`    | [`back-end/README.md`](back-end/README.md)                                                                                                 | Cloud、Desktop 原生层、共享包与工程工具索引        |
 | `EVIDENCE_CURRENT`      | [`execution/CURRENT_STATUS.md`](execution/CURRENT_STATUS.md)                                                                               | 当前执行状态；必须同时核对其中绑定的提交与运行日期 |
-| `EVIDENCE_CURRENT`      | [`execution/2026-09-01-V0217-CANDIDATE.md`](execution/2026-09-01-V0217-CANDIDATE.md)                                                       | 0.2.17 缺陷矩阵、提示词审计与人工候选门禁         |
+| `EVIDENCE_CURRENT`      | [`execution/2026-09-06-V0218-REPAIR.md`](execution/2026-09-06-V0218-REPAIR.md)                                                       | 0.2.18 缺陷矩阵、失败回归及验证边界         |
+| `HISTORICAL`      | [`execution/2026-09-01-V0217-CANDIDATE.md`](execution/2026-09-01-V0217-CANDIDATE.md)                                                       | 0.2.17 缺陷矩阵、提示词审计与人工候选历史         |
 | `HISTORICAL`            | [`execution/TEST_RESULTS.md`](execution/TEST_RESULTS.md)                                                                                   | 历史工作树测试快照；不得替代 0.2.16 当前证据      |
 | `EVIDENCE_CURRENT`      | [`execution/RELEASE_CHECKLIST.md`](execution/RELEASE_CHECKLIST.md)                                                                         | 当前版本的构建、打包、发布与外部门禁               |
 | `HISTORICAL`            | [`execution/2026-08-30-V0216-RELEASE.md`](execution/2026-08-30-V0216-RELEASE.md)                                                           | 0.2.16 缺陷矩阵、验证与公开预发行历史             |
@@ -79,7 +82,7 @@
 ## 目标与历史文档
 
 - `DESIGN/`：`TARGET_BASELINE`。DESIGN v0.3.1b 规定视觉与交互目标；当前工作树应用清单为
-  0.2.17 当前人工复测候选；v0.2.16 及更早发布证据保持不可变。设计版本不会自动改变应用版本，
+  0.2.18 当前发布目标；v0.2.16 及更早发布证据和 0.2.17 人工复测包保持不可变。设计版本不会自动改变应用版本，
   公开附件的精确大小和 SHA-256 以对应版本发布门禁为准。
 - [`product-rebuild/00-PHASE-0-REALITY-AUDIT.md`](product-rebuild/00-PHASE-0-REALITY-AUDIT.md)：
   `HISTORICAL` Phase 0 起始审计；当前差异须再读增量现实矩阵。
