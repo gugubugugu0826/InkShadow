@@ -22,6 +22,22 @@ const ACTOR_ID = uuid(2);
 const BRANCH_ID = uuid(3);
 
 describe("unified story fact context adapter", () => {
+  it.each(["character_attribute", "character_ability"])(
+    "compiles a confirmed %s with its author evidence",
+    (type) => {
+      const decision = adaptStoryFactContextSource(
+        fact(91, type, { contentText: "陈九左臂残废。" }),
+        { projectId: PROJECT_ID, currentBranchId: null },
+      );
+      expect(decision).toMatchObject({
+        included: true,
+        candidate: {
+          layer: "character_current_state",
+          content: `[用户已确认的正式事实]\n类型：${type}\n内容：陈九左臂残废。`,
+        },
+      });
+    },
+  );
   it("assembles an explicit task, optional scene goal, and reviewed facts into fixed layers", () => {
     const knowledgeSource = causalKnowledgeSourceFact(110, "character-linyao");
     const facts = [

@@ -3,6 +3,7 @@ export type SafeOperationKind =
   | "opening_creation"
   | "continuation"
   | "chapter_privacy"
+  | "story_fact"
   | "consistency_investigation";
 
 export type SafeOperationStage =
@@ -150,6 +151,7 @@ function parseIncident(value: unknown): SafeOperationIncident | null {
       value.operation !== "opening_creation" &&
       value.operation !== "continuation" &&
       value.operation !== "chapter_privacy" &&
+      value.operation !== "story_fact" &&
       value.operation !== "consistency_investigation") ||
     !isSafeStage(value.stage) ||
     typeof value.normalizedErrorCode !== "string" ||

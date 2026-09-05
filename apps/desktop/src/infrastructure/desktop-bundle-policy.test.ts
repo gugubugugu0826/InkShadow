@@ -18,7 +18,7 @@ describe("desktop bundle policy", () => {
 
     expect(configSource).toMatch(/ASYNC_CHUNK_BUDGET_BYTES = 520 \* 1024/u);
     expect(releaseAuditSource).toMatch(/asyncChunk: 520 \* 1024/u);
-    expect(configSource).toMatch(/TOTAL_FRONTEND_BUDGET_BYTES = 7 \* 1024 \* 1024 \+ 160 \* 1024/u);
-    expect(releaseAuditSource).toMatch(/totalFrontend: 7 \* 1024 \* 1024 \+ 160 \* 1024/u);
+    expect(configSource).toMatch(/TOTAL_FRONTEND_BUDGET_BYTES = 7 \* 1024 \* 1024 \+ 224 \* 1024/u);
+    expect(releaseAuditSource).toMatch(/totalFrontend: 7 \* 1024 \* 1024 \+ 224 \* 1024/u);
   });
 });

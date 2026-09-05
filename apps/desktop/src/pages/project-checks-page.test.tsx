@@ -22,6 +22,7 @@ import {
 } from "../infrastructure/chapter-supplemental-finding-verifier";
 import type { ChapterSupplementalFindingResolutionSummary } from "../infrastructure/novel-validation-runtime";
 import { RuntimeProvider } from "../runtime-context";
+import { organizeCurrentSavedVersionStoryFacts } from "../infrastructure/direct-story-fact-organizer";
 import { ProjectChecksPage } from "./project-checks-page";
 
 const CONTENT = "林遥仍然活着。林遥已经死去。";
@@ -66,6 +67,66 @@ function seedWritingExperience(mode: "direct" | "professional"): void {
 }
 
 describe("ProjectChecksPage", () => {
+  it("verifies pending evidence against the saved version and preserves every authoritative record", async () => {
+    window.localStorage.clear();
+    seedWritingExperience("direct");
+    const runtime = createDevelopmentRuntime(window.localStorage);
+    const project = unwrap(await runtime.useCases.createProject.execute({ name: "原文证据核对" }));
+    const created = unwrap(
+      await runtime.useCases.createChapter.execute({
+        projectId: project.id,
+        title: "钟楼第一章",
+        content: "周望是钟楼的管理员。周望五十七岁。",
+      }),
+    );
+    await organizeCurrentSavedVersionStoryFacts(
+      {
+        facts: runtime.story.facts,
+        factService: runtime.story.factService,
+        chapters: runtime.repositories.chapters,
+        chapterVersions: runtime.repositories.chapterVersions,
+        hasher: runtime.hasher,
+        now: () => runtime.clock.now(),
+      },
+      {
+        projectId: project.id,
+        chapterId: created.chapter.id,
+        versionId: created.version.id,
+      },
+    );
+    const before = (await listFacts(runtime, project.id)).map((fact) => fact.toSnapshot());
+    const send = vi.spyOn(runtime.modelGateway, "generate");
+    const view = renderPage(runtime, project.id);
+    const auxiliary = await screen.findByRole("region", { name: "待确认资料辅助核对" });
+    expect(
+      within(auxiliary).getAllByText("原句与保存版本一致，但设定含义仍需作者确认。").length,
+    ).toBeGreaterThan(0);
+    const user = userEvent.setup();
+    const quotation = within(auxiliary).getByText("周望是钟楼的管理员。", {
+      selector: "blockquote",
+    });
+    const evidenceDetails = quotation.closest("details");
+    if (evidenceDetails === null) throw new Error("原文依据缺少展开入口");
+    await user.click(within(evidenceDetails).getByText("查看原文依据"));
+    expect(quotation).toBeVisible();
+    expect(auxiliary).toHaveTextContent("来源章节：钟楼第一章");
+    expect(auxiliary).toHaveTextContent(`第 1 至 ${String("周望是钟楼的管理员。".length)} 个字符`);
+    view.unmount();
+    const reopened = createDevelopmentRuntime(window.localStorage);
+    expect((await listFacts(reopened, project.id)).map((fact) => fact.toSnapshot())).toEqual(
+      before,
+    );
+    expect(
+      unwrap(await reopened.repositories.chapters.findById(created.chapter.id))?.toSnapshot(),
+    ).toEqual(created.chapter.toSnapshot());
+    expect(
+      unwrap(
+        await reopened.repositories.chapterVersions.findVersionById(created.version.id),
+      )?.toSnapshot(),
+    ).toEqual(created.version.toSnapshot());
+    expect(send).not.toHaveBeenCalled();
+  });
+
   beforeEach(() => {
     window.localStorage.clear();
     seedWritingExperience("professional");
@@ -333,33 +394,45 @@ describe("ProjectChecksPage", () => {
     expect(aiReview).not.toHaveBeenCalled();
   });
 
-  it("guides the author to review pending settings when deterministic checks lack confirmed facts", async () => {
-    const user = userEvent.setup();
-    const fixture = await seededRuntime(false);
-    const parsedProjectId = parseStoryUuid(fixture.projectId);
-    if (!parsedProjectId.ok) throw parsedProjectId.error;
-    for (let index = 1; index <= 9; index += 1) {
-      unwrap(
-        await fixture.runtime.story.factService.stageUserDraftFact({
-          projectId: parsedProjectId.value,
-          factType: "world_rule",
-          contentText: `待确认设定 ${String(index)}`,
-          actorId: fixture.runtime.story.actorId,
-        }),
+  it.each(["professional", "direct"] as const)(
+    "guides the author to review pending settings in %s mode when deterministic checks lack confirmed facts",
+    async (mode) => {
+      seedWritingExperience(mode);
+      const user = userEvent.setup();
+      const fixture = await seededRuntime(false);
+      const parsedProjectId = parseStoryUuid(fixture.projectId);
+      if (!parsedProjectId.ok) throw parsedProjectId.error;
+      for (let index = 1; index <= 9; index += 1) {
+        unwrap(
+          await fixture.runtime.story.factService.stageUserDraftFact({
+            projectId: parsedProjectId.value,
+            factType: "world_rule",
+            contentText: `待确认设定 ${String(index)}`,
+            actorId: fixture.runtime.story.actorId,
+          }),
+        );
+      }
+
+      renderPage(fixture.runtime, fixture.projectId);
+      await user.click(await screen.findByRole("button", { name: "检查本章" }));
+
+      expect(
+        await screen.findByText("已经找到 9 条待确认设定。确认后可用于确定性检查。"),
+      ).toBeVisible();
+      expect(screen.getByRole("link", { name: "去确认设定" })).toHaveAttribute(
+        "href",
+        `/projects/${fixture.projectId}/story`,
       );
-    }
-
-    renderPage(fixture.runtime, fixture.projectId);
-    await user.click(await screen.findByRole("button", { name: "检查本章" }));
-
-    expect(
-      await screen.findByText("已经找到 9 条待确认设定。确认后可用于确定性检查。"),
-    ).toBeVisible();
-    expect(screen.getByRole("link", { name: "去确认设定" })).toHaveAttribute(
-      "href",
-      `/projects/${fixture.projectId}/story`,
-    );
-  });
+      const auxiliary = screen.getByRole("region", { name: "待确认资料辅助核对" });
+      expect(within(auxiliary).getAllByRole("article")).toHaveLength(9);
+      expect(auxiliary).toHaveTextContent("不计入已检查范围");
+      const preserved = await fixture.runtime.story.facts.listByProjectId(parsedProjectId.value);
+      if (!preserved.ok) throw preserved.error;
+      expect(
+        preserved.value.filter((fact) => fact.toSnapshot().status === "unconfirmed"),
+      ).toHaveLength(9);
+    },
+  );
 
   it("keeps direct checks task-focused and hides professional investigation controls", async () => {
     window.localStorage.clear();

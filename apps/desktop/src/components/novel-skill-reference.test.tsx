@@ -27,6 +27,13 @@ describe("NovelSkillInvocationReference", () => {
     expect(screen.getByText(/本次最多参考的写作技能数量：6 项/u)).toBeVisible();
     expect(screen.getByText(/发送给 AI 的文字量（不是金额）：约 480\/1,200/u)).toBeVisible();
     expect(screen.getByText("1 项采用")).toBeVisible();
+    expect(
+      screen.getByText(
+        "以下是本次要求模型如何写，不代表成文已经达到这些效果。安全规则、正文与已锁定设定始终优先。",
+      ),
+    ).toBeVisible();
+    await user.click(screen.getByText("查看本次写法要求"));
+    expect(screen.getByText("先写人物动作，再补充环境变化。")).toBeVisible();
     const discardedTrigger = screen.getByRole("button", {
       name: /查看本次未采用的写作技能及原因（3）/u,
     });
@@ -61,5 +68,6 @@ function method(
     included,
     selectionReason,
     estimatedTokens: 120,
+    writingRequirements: ["先写人物动作，再补充环境变化。"],
   };
 }

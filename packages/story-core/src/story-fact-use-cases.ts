@@ -143,7 +143,7 @@ export class StoryFactApplicationService {
     const created = this.buildFormalUserFact(command);
     if (!created.ok) return created;
     const saved = await this.options.facts.create(created.value);
-    return saved.ok ? ok(created.value) : saved;
+    return saved.ok ? this.verifyPersistedFact(created.value) : saved;
   }
 
   /**
@@ -374,13 +374,13 @@ export class StoryFactApplicationService {
     );
   }
 
-  public setLocked(command: {
+  public async setLocked(command: {
     readonly factId: string;
     readonly locked: boolean;
     readonly humanConfirmed: boolean;
     readonly expectedRevision: number;
   }): Promise<Result<StoryFact, StoryCoreError>> {
-    return this.mutate(command.factId, (fact) =>
+    const result = await this.mutate(command.factId, (fact) =>
       fact.setLocked({
         locked: command.locked,
         humanConfirmed: command.humanConfirmed,
@@ -388,6 +388,36 @@ export class StoryFactApplicationService {
         now: this.options.clock.now(),
       }),
     );
+    if (!result.ok) return result;
+    return this.verifyPersistedFact(result.value);
+  }
+
+  private async verifyPersistedFact(
+    expectedFact: StoryFact,
+  ): Promise<Result<StoryFact, StoryCoreError>> {
+    const persisted = await this.options.facts.findById(expectedFact.id);
+    if (!persisted.ok) return persisted;
+    const actual = persisted.value?.toSnapshot();
+    const expected = expectedFact.toSnapshot();
+    if (
+      persisted.value === null ||
+      actual?.projectId !== expected.projectId ||
+      actual.revision !== expected.revision ||
+      actual.locked !== expected.locked ||
+      actual.contentText !== expected.contentText ||
+      actual.factType !== expected.factType ||
+      actual.status !== expected.status ||
+      actual.userConfirmed !== expected.userConfirmed
+    ) {
+      return err(
+        new StoryCoreError({
+          code: "STORY_REPOSITORY_ERROR",
+          message: "The saved story rule could not be verified.",
+          details: { reason: "STORY_FACT_READBACK_MISMATCH", factId: expectedFact.id },
+        }),
+      );
+    }
+    return ok(persisted.value);
   }
 
   public deprecate(command: {

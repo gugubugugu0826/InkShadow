@@ -160,6 +160,7 @@ export function ProjectChecksPage() {
   const chapterListLoadSequence = useRef(0);
   const pendingFactLoadSequence = useRef(0);
   const [pendingFactCount, setPendingFactCount] = useState<number | null>(null);
+  const [pendingReviews, setPendingReviews] = useState<readonly PendingFactReview[]>([]);
   const [pendingFactReadUnavailable, setPendingFactReadUnavailable] = useState(false);
   const routeIdentityRef = useRef(diagnosticRoute);
   const checkOperationSequence = useRef(0);
@@ -285,6 +286,7 @@ export function ProjectChecksPage() {
     void Promise.resolve().then(async () => {
       if (pendingFactLoadSequence.current !== requestSequence) return;
       setPendingFactCount(null);
+      setPendingReviews([]);
       setPendingFactReadUnavailable(false);
       const storyProjectId = parseStoryUuid(projectIdValue);
       if (projectId === null || !storyProjectId.ok) {
@@ -299,6 +301,66 @@ export function ProjectChecksPage() {
           return;
         }
         setPendingFactCount(countPendingAuthorReviewFacts(factResult.value));
+        const reviews = await Promise.all(
+          factResult.value
+            .map((fact) => fact.toSnapshot())
+            .filter((snapshot) => pendingAuthorReviewIdentity(snapshot) !== null)
+            .map(async (snapshot): Promise<PendingFactReview> => {
+              const { source } = snapshot;
+              if (source.kind !== "chapter_span" || source.versionId === null) {
+                return {
+                  snapshot,
+                  evidence: null,
+                  notice: "这是作者输入，尚未绑定正文原句；请手动核对，不作为自动冲突判断依据。",
+                };
+              }
+              try {
+                const versionId = parseUuidV7(source.versionId);
+                if (!versionId.ok) throw versionId.error;
+                const found = await runtime.repositories.chapterVersions.findVersionById(
+                  versionId.value,
+                );
+                if (!found.ok) throw found.error;
+                const version = found.value?.toSnapshot();
+                if (
+                  version === undefined ||
+                  String(version.projectId) !== String(snapshot.projectId) ||
+                  String(version.chapterId) !== String(source.chapterId) ||
+                  source.startOffset === null ||
+                  source.endOffset === null ||
+                  source.excerpt === null ||
+                  source.startOffset < 0 ||
+                  source.endOffset <= source.startOffset ||
+                  source.sourceLength !== version.content.length ||
+                  source.endOffset > version.content.length ||
+                  version.content.slice(source.startOffset, source.endOffset) !== source.excerpt
+                ) {
+                  return {
+                    snapshot,
+                    evidence: null,
+                    notice: "原文版本或文字范围无法核对，原记录已保留；请到设定页检查来源。",
+                  };
+                }
+                return {
+                  snapshot,
+                  evidence: {
+                    sequence: version.sequence,
+                    start: source.startOffset,
+                    end: source.endOffset,
+                    excerpt: source.excerpt,
+                  },
+                  notice: "原句与保存版本一致，但设定含义仍需作者确认。",
+                };
+              } catch {
+                return {
+                  snapshot,
+                  evidence: null,
+                  notice: "暂时无法读取原文版本，原记录已保留；请重新打开本页或到设定页重试。",
+                };
+              }
+            }),
+        );
+        if (pendingFactLoadSequence.current === requestSequence) setPendingReviews(reviews);
       } catch {
         if (pendingFactLoadSequence.current === requestSequence) {
           setPendingFactReadUnavailable(true);
@@ -783,7 +845,7 @@ export function ProjectChecksPage() {
             </Badge>
           )}
         </div>
-        {!directMode && pendingFactCount !== null && pendingFactCount > 0 && (
+        {pendingFactCount !== null && pendingFactCount > 0 && (
           <InlineAlert
             tone="info"
             title="有待确认的设定"
@@ -795,16 +857,42 @@ export function ProjectChecksPage() {
             }
           />
         )}
-        {!directMode && pendingFactReadUnavailable && (
+        {pendingFactReadUnavailable && (
           <InlineAlert
             tone="warning"
             title="暂时无法读取待确认设定"
             description="正文和现有检查结果不受影响。请重新打开本页后再试。"
           />
         )}
-        {!directMode && result !== null && (
-          <DeterministicCoverageSummary coverage={result.coverage} />
+        {pendingReviews.length > 0 && (
+          <section aria-label="待确认资料辅助核对">
+            <h3>待确认资料辅助核对</h3>
+            <p>
+              以下内容不计入已检查范围，也不会自动成为正式设定或硬规则。请逐条对照原文，再到设定页决定是否确认。
+            </p>
+            {pendingReviews.map(({ snapshot, evidence, notice }) => (
+              <article key={snapshot.id}>
+                <Badge tone="warning">待确认</Badge>
+                <p>{snapshot.contentText ?? "结构化资料已保留，请到设定页查看。"}</p>
+                <p>{notice}</p>
+                {evidence !== null && (
+                  <details>
+                    <summary>查看原文依据</summary>
+                    <p>
+                      来源章节：
+                      {chapters.find(({ id }) => String(id) === String(snapshot.source.chapterId))
+                        ?.title ?? "章节名称暂不可用"}
+                      ；保存版本：第 {evidence.sequence} 版；原文范围：第 {evidence.start + 1} 至{" "}
+                      {evidence.end} 个字符。
+                    </p>
+                    <blockquote>{evidence.excerpt}</blockquote>
+                  </details>
+                )}
+              </article>
+            ))}
+          </section>
         )}
+        {result !== null && <DeterministicCoverageSummary coverage={result.coverage} />}
         {result === null ? (
           <EmptyState
             title="还没有检查结果"
@@ -2152,6 +2240,17 @@ function SkippedCheckResult({ result }: { result: ChapterNovelValidationResult }
       }
     />
   );
+}
+
+interface PendingFactReview {
+  readonly snapshot: StoryFactSnapshot;
+  readonly evidence: Readonly<{
+    sequence: number;
+    start: number;
+    end: number;
+    excerpt: string;
+  }> | null;
+  readonly notice: string;
 }
 
 function countPendingAuthorReviewFacts(facts: readonly StoryFact[]): number {

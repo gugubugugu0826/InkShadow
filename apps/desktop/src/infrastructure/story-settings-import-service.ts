@@ -250,6 +250,7 @@ export class StorySettingsImportService {
         const createdFactIds: string[] = [];
         const createdMemoryIds: string[] = [];
         const characterReferences = new Map<string, string>();
+        const characterDisplayNames = new Map<string, string>();
         const reservedCharacterNames = collectReservedNames(existingRecords, "character");
         const reservedWorldRuleNames = collectReservedNames(existingRecords, "world_rule");
         let importedCount = 0;
@@ -281,6 +282,7 @@ export class StorySettingsImportService {
           });
           reservePortableNames(reservedCharacterNames, applied.displayName, applied.aliases);
           characterReferences.set(character.id, applied.recordId);
+          characterDisplayNames.set(character.id, applied.displayName);
           if (applied.kind === "created") createdRecordIds.push(applied.recordId);
           if (applied.kind === "updated") updatedRecordFences.push(applied.fence);
           if (applied.kind === "skipped") {
@@ -319,7 +321,15 @@ export class StorySettingsImportService {
         for (const relationship of candidate.relationships) {
           const from = characterReferences.get(relationship.fromCharacterRef);
           const to = characterReferences.get(relationship.toCharacterRef);
-          if (from === undefined || to === undefined || from === to) {
+          const fromName = characterDisplayNames.get(relationship.fromCharacterRef);
+          const toName = characterDisplayNames.get(relationship.toCharacterRef);
+          if (
+            from === undefined ||
+            to === undefined ||
+            from === to ||
+            fromName === undefined ||
+            toName === undefined
+          ) {
             throw new StorySettingsImportError(
               "STORY_SETTINGS_INVALID",
               `关系“${relationship.relationshipType}”的两端人物无法安全关联。`,
@@ -330,7 +340,7 @@ export class StorySettingsImportService {
               id: this.options.ids.next(),
               projectId: command.projectId,
               factType: "core_relationship",
-              contentText: `${relationship.relationshipType}：${relationship.fromCharacterRef} ↔ ${relationship.toCharacterRef}`,
+              contentText: `${fromName}和${toName}：${relationship.relationshipType}`,
               structuredValue: {
                 schemaVersion: "inkshadow.character-relationship.v1",
                 fromCharacterId: from,

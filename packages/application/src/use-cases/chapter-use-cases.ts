@@ -120,14 +120,30 @@ export class SetChapterPrivacy {
       changed.value,
       command.expectedPrivacyRevision,
     );
-    return committed.ok
-      ? ok({
-          chapter: committed.value.chapter,
-          blockedProjectionCount: committed.value.blockedProjectionCount,
-          removedOutboxOperationCount: committed.value.removedOutboxOperationCount,
-          acknowledgedCloudEvidenceCount: committed.value.acknowledgedCloudEvidenceCount,
-        })
-      : committed;
+    if (!committed.ok) return committed;
+    const readback = await findChapter(this.chapters, command.chapterId);
+    if (!readback.ok) return readback;
+    const expected = changed.value.toSnapshot();
+    const actual = readback.value.toSnapshot();
+    if (
+      actual.projectId !== expected.projectId ||
+      actual.privacyMode !== expected.privacyMode ||
+      actual.privacyRevision !== expected.privacyRevision
+    ) {
+      return err(
+        new AppError({
+          code: "REPOSITORY_ERROR",
+          message: "Chapter privacy could not be verified after saving.",
+          details: { reason: "CHAPTER_PRIVACY_READBACK_MISMATCH", chapterId: command.chapterId },
+        }),
+      );
+    }
+    return ok({
+      chapter: readback.value,
+      blockedProjectionCount: committed.value.blockedProjectionCount,
+      removedOutboxOperationCount: committed.value.removedOutboxOperationCount,
+      acknowledgedCloudEvidenceCount: committed.value.acknowledgedCloudEvidenceCount,
+    });
   }
 }
 

@@ -37,6 +37,13 @@ test("keeps every primary writing region reachable at 1440, 1280, 1024, and 800"
       await expect(workspace).toHaveAttribute("data-assistant-panel", "drawer");
       await exerciseCompactWritingPanels(page);
     } else {
+      const workspaceBounds = await workspace.boundingBox();
+      const writingBounds = await page.locator(".writing-canvas").boundingBox();
+      expect(workspaceBounds).not.toBeNull();
+      expect(writingBounds).not.toBeNull();
+      expect((writingBounds?.width ?? 0) / (workspaceBounds?.width ?? 1)).toBeGreaterThanOrEqual(
+        0.55,
+      );
       await expect(page.getByRole("navigation", { name: "章节列表" })).toBeVisible();
       await expect(page.getByRole("complementary", { name: "AI 创作助手" })).toBeVisible();
       await expectFocusable(page.getByRole("button", { name: "收起章节列表" }));

@@ -246,6 +246,17 @@ test("imports into the first chapter and exports validated artifacts and diagnos
   ).toBeVisible();
   await expect(page.getByText(/排除 1 个私密章节/u)).toBeVisible();
 
+  const textDownloadPromise = page.waitForEvent("download");
+  await page.getByRole("button", { name: "下载 TXT" }).click();
+  const textDownload = await textDownloadPromise;
+  expect(textDownload.suggestedFilename()).toBe(`${projectTitle}.txt`);
+  const textPath = await textDownload.path();
+  if (textPath === null) throw new Error("未取得纯文本导出的实际文件。");
+  const plainText = await readFile(textPath, "utf8");
+  expect(Buffer.byteLength(plainText, "utf8")).toBeGreaterThan(10_000);
+  expect(plainText).toContain(publicTailMarker);
+  expect(plainText).not.toContain(privateMarker);
+
   const epubDownloadPromise = page.waitForEvent("download");
   await page.getByRole("button", { name: "下载 EPUB" }).click();
   const epubDownload = await epubDownloadPromise;

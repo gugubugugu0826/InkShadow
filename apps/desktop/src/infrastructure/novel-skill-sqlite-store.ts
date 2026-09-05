@@ -22,6 +22,8 @@ import {
 import type { SqlExecutor, TransactionExecutor } from "@inkshadow/data";
 
 export interface NovelSkillInvocationSnapshotRecord {
+  /** Derived by verified replay, not a new database field or an output-quality claim. */
+  readonly writingRequirements?: CompiledNovelSkills["instructionRules"];
   readonly id: string;
   readonly projectId: string;
   readonly contextTraceId: string;
@@ -854,6 +856,7 @@ async function readSnapshot(
       selectionHash: row.selection_hash,
       configuration,
       items: Object.freeze(items),
+      writingRequirements: replayed.instructionRules,
       createdAt: row.created_at,
     });
   } catch (error: unknown) {

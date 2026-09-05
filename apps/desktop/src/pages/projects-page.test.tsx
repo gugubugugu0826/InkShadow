@@ -118,6 +118,7 @@ describe("ProjectsPage library states", () => {
       if (card === null) throw new Error("同名作品缺少作品卡片。 ");
       expect(within(card).getByText(/创建于/u)).toBeVisible();
       expect(within(card).getByText(/更新于/u)).toBeVisible();
+      expect(card.querySelectorAll(".project-meta")).toHaveLength(1);
       expect(within(card).getByText("进行中")).toBeVisible();
     }
   });
@@ -458,7 +459,13 @@ describe("ProjectsPage library states", () => {
     expect(
       within(authorSection).getByRole("heading", { name: "未命名新故事", level: 2 }),
     ).toBeVisible();
-    expect(screen.queryByRole("region", { name: "测试与示例" })).not.toBeInTheDocument();
+    const special = screen.getByRole("region", { name: "测试与示例" });
+    expect(
+      within(special).getByText("标记为测试作品的内容和内置示例会收纳在这里，不影响你的普通作品。"),
+    ).toBeVisible();
+    expect(
+      within(special).queryByRole("heading", { name: "未命名新故事" }),
+    ).not.toBeInTheDocument();
   });
 
   it("separates explicit test work and persists reversible author classification", async () => {

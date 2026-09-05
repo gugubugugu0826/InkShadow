@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { AiCandidate, Project, parseContentChecksum } from "@inkshadow/domain";
+import { AiCandidate, Project, parseContentChecksum, ok } from "@inkshadow/domain";
 
 import {
   AcceptAiCandidate,
@@ -166,6 +166,33 @@ describe("chapter and candidate use cases", () => {
       privacyMode: "local_only",
       privacyRevision: 1,
     });
+  });
+
+  it("rejects a privacy success receipt when authoritative storage still contains ordinary privacy", async () => {
+    const projects = new InMemoryProjectRepository();
+    projects.seed(activeProject());
+    const contentStore = new InMemoryContentStore(new InMemoryCandidateRepository());
+    await createStableChapter(projects, contentStore);
+    const before = await contentStore.findById(CHAPTER_ID);
+    const result = await new SetChapterPrivacy(
+      contentStore,
+      {
+        updatePrivacy: async (chapter) =>
+          ok({
+            chapter,
+            blockedProjectionCount: 0,
+            removedOutboxOperationCount: 0,
+            acknowledgedCloudEvidenceCount: 0,
+          }),
+      },
+      new FixedClock(),
+    ).execute({ chapterId: CHAPTER_ID, privacyMode: "local_only", expectedPrivacyRevision: 1 });
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error.details.reason).toBe("CHAPTER_PRIVACY_READBACK_MISMATCH");
+    const after = await contentStore.findById(CHAPTER_ID);
+    expect(after).toEqual(before);
+    const versions = await contentStore.listByChapterId(CHAPTER_ID);
+    expect(versions.ok && versions.value).toHaveLength(1);
   });
 
   it("marks a chapter local-only without creating a正文 version", async () => {

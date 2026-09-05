@@ -68,7 +68,7 @@ const IMPORT_STEPS = [
   "确认导入",
 ] as const;
 
-type StorySettingsRuntime = Pick<DesktopRuntime, "ids" | "clock"> &
+type StorySettingsRuntime = Pick<DesktopRuntime, "ids" | "clock" | "authorRecovery"> &
   Pick<DesktopRuntime, "story"> &
   Readonly<{ storySettingsImport: StorySettingsImportService | null }>;
 
@@ -115,6 +115,10 @@ const LOCAL_BULK_SETTING_RECOVERY_SCHEMA_VERSION =
 
 const BULK_SETTING_TYPE_OPTIONS = [
   { value: "character_identity", label: "人物身份" },
+  { value: "character_attribute", label: "人物属性" },
+  { value: "character_state", label: "人物状态" },
+  { value: "character_ability", label: "人物能力" },
+  { value: "event", label: "明确事件" },
   { value: "relationship", label: "人物关系" },
   { value: "location", label: "地点" },
   { value: "world_rule", label: "世界规则" },
@@ -138,6 +142,7 @@ interface BulkSettingRecoverySnapshot {
 }
 
 export interface BulkStorySettingsToolProps {
+  readonly triggerLabel?: string;
   readonly runtime: Pick<DesktopRuntime, "ids" | "story" | "authorRecovery">;
   readonly projectId: string;
   readonly readonly: boolean;
@@ -212,7 +217,6 @@ function parseBulkSettingRecoveryPayload(
       saved: draft.saved,
     };
   });
-  if (drafts.length === 0) throw new Error("empty bulk recovery batch");
   return {
     schemaVersion: LOCAL_BULK_SETTING_RECOVERY_SCHEMA_VERSION,
     projectId,
@@ -346,8 +350,7 @@ function BulkStorySettingsToolForProject(props: BulkStorySettingsToolProps) {
       !recoveryLoaded ||
       recoveryUnavailable ||
       suppressRecoveryWrites.current ||
-      batchId === null ||
-      drafts.length === 0
+      batchId === null
     ) {
       return;
     }
@@ -404,6 +407,7 @@ function BulkStorySettingsToolForProject(props: BulkStorySettingsToolProps) {
     setCompletionCount(null);
     setBusy(true);
     try {
+      await recoveryWriteQueue.current;
       const parsed = parseBulkNaturalLanguageSettings(source);
       const nextBatchId = String(props.runtime.ids.next());
       const nextDrafts: readonly BulkSettingReviewDraft[] = parsed.map(
@@ -646,7 +650,7 @@ function BulkStorySettingsToolForProject(props: BulkStorySettingsToolProps) {
             ? "正在读取未完成内容…"
             : hasRecoverableBatch
               ? "继续未完成的批量整理"
-              : "批量整理设定"}
+              : (props.triggerLabel ?? "批量整理设定")}
       </Button>
       {recoveryUnavailable && !open && (
         <span className="story-governance-meta" role="status">
@@ -669,7 +673,7 @@ function BulkStorySettingsToolForProject(props: BulkStorySettingsToolProps) {
         onOpenChange={(nextOpen) => {
           if (!busy) setOpen(nextOpen);
         }}
-        title="批量整理设定"
+        title={props.triggerLabel ?? "批量整理设定"}
         description="内容只在本机按标点拆分。请逐条核对原文、类型和文字；保存后仍需在待确认区决定是否采用。"
         footer={
           <div className="story-governance-actions">
@@ -705,6 +709,8 @@ function BulkStorySettingsToolForProject(props: BulkStorySettingsToolProps) {
                 disabled={busy || recoveryUnavailable || hasRecoverableBatch}
                 onChange={(event) => {
                   setSource(event.currentTarget.value);
+                  setSourceLength(event.currentTarget.value.length);
+                  if (batchId === null) setBatchId(String(props.runtime.ids.next()));
                   setNotice(null);
                   setCompletionCount(null);
                 }}
@@ -773,7 +779,7 @@ function BulkStorySettingsToolForProject(props: BulkStorySettingsToolProps) {
                       {draft.selectedCategory === "" && !draft.discarded && (
                         <InlineAlert
                           tone="warning"
-                          title="需要选择设定类型"
+                          title="未识别·原句保留"
                           description={
                             draft.missingInformation ??
                             "本机规则没有擅自判断，请选择合适的类型或放弃这一条。"
@@ -1538,20 +1544,13 @@ export function StorySettingsTools(props: StorySettingsToolsProps) {
           <p>可以用一句话整理成待确认的设定草稿，也可以使用规范文件批量导入；确认前不会写入。</p>
         </div>
         <div className="story-governance-actions">
-          <Button
-            id={plainLanguageTriggerId}
-            variant="secondary"
-            disabled={props.readonly}
-            onClick={() => {
-              setPlainCandidate(null);
-              setLegacyRelationshipRepair(null);
-              setLegacyRepairCompleted(false);
-              setLegacyFinalizeConfirmation(null);
-              setPlainLanguageOpen(true);
-            }}
-          >
-            用一句话添加设定
-          </Button>
+          <BulkStorySettingsTool
+            runtime={props.runtime}
+            projectId={props.projectId}
+            readonly={props.readonly}
+            onChanged={props.onChanged}
+            triggerLabel="用一句话添加设定"
+          />
           <Button variant="secondary" onClick={() => setTransferOpen(true)}>
             导入或导出
           </Button>

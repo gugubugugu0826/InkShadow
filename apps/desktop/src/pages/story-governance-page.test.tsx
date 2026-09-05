@@ -37,6 +37,35 @@ function seedWritingExperience(mode: "direct" | "professional"): void {
 }
 
 describe("StoryGovernancePage", () => {
+  it("keeps all sentences from the one-line entry as separate pending facts with restartable evidence", async () => {
+    const runtime = createDevelopmentRuntime(window.localStorage);
+    const project = await runtime.useCases.createProject.execute({ name: "逐句不丢失" });
+    if (!project.ok) throw project.error;
+    const sends = vi.spyOn(runtime.modelGateway, "generate");
+    const user = userEvent.setup();
+    const view = renderRoute(runtime, `/projects/${project.value.id}/story`);
+    await user.click(await screen.findByRole("button", { name: "用一句话添加设定" }));
+    const drawer = screen.getByRole("dialog", { name: "用一句话添加设定" });
+    const source = "陈九和赵伯是老邻居。陈九左臂残废。陈九目前受了重伤。";
+    await user.type(within(drawer).getByRole("textbox", { name: "粘贴多条设定" }), source);
+    await user.click(within(drawer).getByRole("button", { name: "拆分为待确认项" }));
+    expect(await within(drawer).findAllByRole("group", { name: /第 \d+ 条设定/u })).toHaveLength(3);
+    await user.click(within(drawer).getByRole("button", { name: "保存为待确认设定" }));
+    await screen.findByText("3 条设定已保存为待确认内容");
+    const facts = await runtime.story.facts.listByProjectId(parseStoryProjectId(project.value.id));
+    if (!facts.ok) throw facts.error;
+    expect(facts.value.map((fact) => fact.toSnapshot().factType).sort()).toEqual([
+      "character_attribute",
+      "character_state",
+      "relationship",
+    ]);
+    expect(facts.value.every((fact) => fact.toSnapshot().status === "unconfirmed")).toBe(true);
+    expect(facts.value.map((fact) => fact.toSnapshot().contentText).sort()).toEqual(
+      source.match(/[^。]+。/gu)?.sort(),
+    );
+    expect(sends).not.toHaveBeenCalled();
+    view.unmount();
+  });
   beforeEach(() => {
     window.localStorage.clear();
     seedWritingExperience("professional");
@@ -1126,6 +1155,19 @@ describe("StoryGovernancePage", () => {
     await user.click(within(card).getByRole("button", { name: "查看设定详情" }));
     const detail = screen.getByRole("dialog", { name: "世界硬规则" });
     expect(within(detail).getAllByText("已确认并锁定").length).toBeGreaterThan(0);
+    const lockedProjectId = parseUuidV7(project.value.id);
+    if (!lockedProjectId.ok) throw lockedProjectId.error;
+    const lockedRows = await createDevelopmentRuntime(
+      window.localStorage,
+    ).story.facts.listByProjectId(lockedProjectId.value);
+    expect(lockedRows.ok && lockedRows.value[0]?.toSnapshot().locked).toBe(true);
+    vi.spyOn(runtime.story.factService, "setLocked").mockRejectedValueOnce(
+      new Error("simulated local persistence failure"),
+    );
+    await user.click(within(detail).getByRole("button", { name: "取消锁定" }));
+    expect(await within(detail).findByText(/问题编号：墨影-/u)).toBeVisible();
+    expect(within(detail).getAllByText("已确认并锁定").length).toBeGreaterThan(0);
+    expect(within(detail).getByRole("button", { name: "取消锁定" })).toBeEnabled();
     expect(within(detail).getByText("这条记录没有保存可显示的精确原文片段。")).toBeVisible();
     await user.click(within(detail).getByRole("button", { name: "取消锁定" }));
     await waitFor(() => expect(within(detail).getAllByText("已确认").length).toBeGreaterThan(0));
@@ -2225,39 +2267,29 @@ describe("StoryGovernancePage", () => {
     );
   });
 
-  it("turns ordinary language into a two-ended candidate without silently saving suggestions", async () => {
+  it("restores an unsplit author input after reopening the one-line entry", async () => {
     const runtime = createDevelopmentRuntime(window.localStorage);
-    const project = await runtime.useCases.createProject.execute({ name: "白话设定测试" });
+    const project = await runtime.useCases.createProject.execute({ name: "输入恢复" });
     if (!project.ok) throw project.error;
     const user = userEvent.setup();
-    renderRoute(runtime, `/projects/${project.value.id}/story`);
-
-    await screen.findByRole("heading", { name: "白话设定测试", level: 1 });
-    await user.click(screen.getByRole("button", { name: "用一句话添加设定" }));
-    const dialog = screen.getByRole("dialog", { name: "用一句话添加设定" });
-    await user.type(
-      within(dialog).getByRole("textbox", { name: /^描述人物、关系或规则/u }),
-      "顾顾和丹丹是情侣关系，在初中就认识了。",
-    );
-    await user.click(within(dialog).getByRole("button", { name: "整理为待确认设定" }));
-
-    expect(within(dialog).getByRole("heading", { name: "待确认的结构化设定" })).toBeVisible();
-    expect(within(dialog).getByText("顾顾")).toBeVisible();
-    expect(within(dialog).getByText("丹丹")).toBeVisible();
-    expect(within(dialog).getByText("情侣")).toBeVisible();
-    expect(within(dialog).getByText("初中")).toBeVisible();
-    expect(within(dialog).getByText("本地整理建议（不会自动写入）")).toBeVisible();
-    expect(
-      within(dialog).queryByText(/guided_opening|fromCharacterRef|toCharacterRef/u),
-    ).toBeNull();
-
-    await user.click(within(dialog).getByRole("button", { name: "确认并保存" }));
-    expect(await screen.findByText("当前预览环境不写入本地数据库")).toBeVisible();
-    const records = await runtime.story.formalRecords.listByProjectId(
-      parseStoryProjectId(project.value.id),
-    );
-    if (!records.ok) throw records.error;
-    expect(records.value).toHaveLength(0);
+    const view = renderRoute(runtime, `/projects/${project.value.id}/story`);
+    await user.click(await screen.findByRole("button", { name: "用一句话添加设定" }));
+    const source = "陈九左臂残废。雾里的回声令人不安。";
+    await user.type(screen.getByRole("textbox", { name: "粘贴多条设定" }), source);
+    await waitFor(async () => {
+      const recovery = await runtime.authorRecovery.find(project.value.id, "bulk_story_settings");
+      expect(recovery?.payloadJson).toContain(source);
+    });
+    view.unmount();
+    const reopened = createDevelopmentRuntime(window.localStorage);
+    renderRoute(reopened, `/projects/${project.value.id}/story`);
+    await user.click(await screen.findByRole("button", { name: "用一句话添加设定" }));
+    expect(screen.getByRole("textbox", { name: "粘贴多条设定" })).toHaveValue(source);
+    await user.click(screen.getByRole("button", { name: "拆分为待确认项" }));
+    expect(await screen.findAllByRole("group", { name: /第 \d+ 条设定/u })).toHaveLength(2);
+    const facts = await reopened.story.facts.listByProjectId(parseStoryProjectId(project.value.id));
+    if (!facts.ok) throw facts.error;
+    expect(facts.value).toHaveLength(0);
   });
 
   it("stages a locally parsed batch with editable evidence-bound drafts and no model call", async () => {
@@ -2317,7 +2349,7 @@ describe("StoryGovernancePage", () => {
       name: "第 4 条设定类型",
     });
     expect(unknownType).toHaveValue("");
-    expect(within(fourthDraft).getByText("需要选择设定类型")).toBeVisible();
+    expect(within(fourthDraft).getByText("未识别·原句保留")).toBeVisible();
     const save = within(drawer).getByRole("button", { name: "保存为待确认设定" });
     expect(save).toBeDisabled();
 
@@ -2620,96 +2652,39 @@ describe("StoryGovernancePage", () => {
     );
   });
 
-  it("hands an unparsed sentence to one prefilled local form and restores focus without cloud work", async () => {
+  it("keeps an unknown sentence in its review card and stages only the author's chosen type", async () => {
     const runtime = createDevelopmentRuntime(window.localStorage);
-    const providerDispatch = vi.spyOn(runtime.modelGateway, "generate");
-    const invocationStart = vi.spyOn(runtime.modelHub, "startInvocation");
-    const factWrite = vi.spyOn(runtime.story.factService, "createFormalUserFact");
-    const project = await runtime.useCases.createProject.execute({ name: "手动表单转交测试" });
+    const project = await runtime.useCases.createProject.execute({ name: "未识别原句保留" });
     if (!project.ok) throw project.error;
-    const storyProjectId = parseStoryProjectId(project.value.id);
-    const sourceText = "林舟左腕藏着三枚月纹石，  银环逢雨发热。";
+    const send = vi.spyOn(runtime.modelGateway, "generate");
     const user = userEvent.setup();
     renderRoute(runtime, `/projects/${project.value.id}/story`);
-
-    await screen.findByRole("heading", { name: "手动表单转交测试", level: 1 });
-    const sourceTrigger = screen.getByRole("button", { name: "用一句话添加设定" });
-    await user.click(sourceTrigger);
-    const sourceDrawer = screen.getByRole("dialog", { name: "用一句话添加设定" });
-    const sourceInput = within(sourceDrawer).getByRole("textbox", {
-      name: /^描述人物、关系或规则/u,
-    });
-    await user.type(sourceInput, sourceText);
-    await user.click(within(sourceDrawer).getByRole("button", { name: "整理为待确认设定" }));
-    const typeError = within(sourceDrawer).getByText("需要你选择设定类型");
-    expect(typeError).toBeVisible();
-    await waitFor(() => expect(sourceInput).toHaveFocus());
-    expect(sourceInput).toHaveAttribute("aria-invalid", "true");
-    const describedBy = sourceInput.getAttribute("aria-describedby")?.split(/\s+/u) ?? [];
-    expect(describedBy).not.toHaveLength(0);
-    const field = sourceInput.closest(".ink-form-field");
-    expect(field).not.toBeNull();
-    expect(
-      describedBy.some((id) => {
-        const description = sourceDrawer.querySelector(`#${CSS.escape(id)}`);
-        return description !== null && field?.contains(description) === true;
-      }),
-    ).toBe(true);
-    await user.click(within(sourceDrawer).getByRole("button", { name: "打开手动表单" }));
-
-    const manualDialog = await screen.findByRole("dialog", { name: "添加故事设定" });
-    expect(screen.queryByRole("dialog", { name: "用一句话添加设定" })).not.toBeInTheDocument();
-    expect(screen.getAllByRole("dialog")).toHaveLength(1);
-    expect(within(manualDialog).getByRole("combobox", { name: "设定类型" })).toHaveValue(
-      "character_identity",
+    await user.click(await screen.findByRole("button", { name: "用一句话添加设定" }));
+    const source = "林舟左腕藏着三枚月纹石，银环逢雨发热。";
+    await user.type(screen.getByRole("textbox", { name: "粘贴多条设定" }), source);
+    await user.click(screen.getByRole("button", { name: "拆分为待确认项" }));
+    const card = await screen.findByRole("group", { name: "第 1 条设定" });
+    expect(within(card).getByText("未识别·原句保留")).toBeVisible();
+    expect(within(card).getByText(source, { selector: "blockquote" })).toBeVisible();
+    const save = screen.getByRole("button", { name: "保存为待确认设定" });
+    expect(save).toBeDisabled();
+    await user.selectOptions(
+      within(card).getByRole("combobox", { name: "第 1 条设定类型" }),
+      "character_attribute",
     );
-    const content = within(manualDialog).getByRole("textbox", { name: "内容" });
-    expect(content).toHaveValue(sourceText);
-    await waitFor(() => expect(content).toHaveFocus());
-
-    await user.click(within(manualDialog).getByRole("button", { name: "取消" }));
-    await waitFor(() => {
-      expect(screen.queryByRole("dialog", { name: "添加故事设定" })).not.toBeInTheDocument();
-      expect(sourceTrigger).toHaveFocus();
-    });
-    const factsAfterCancel = await runtime.story.facts.listByProjectId(storyProjectId);
-    if (!factsAfterCancel.ok) throw factsAfterCancel.error;
-    expect(factsAfterCancel.value).toHaveLength(0);
-    expect(factWrite).not.toHaveBeenCalled();
-    expect(providerDispatch).not.toHaveBeenCalled();
-    expect(invocationStart).not.toHaveBeenCalled();
-
-    await user.click(sourceTrigger);
-    const reopenedSourceDrawer = screen.getByRole("dialog", { name: "用一句话添加设定" });
-    expect(
-      within(reopenedSourceDrawer).getByRole("textbox", {
-        name: /^描述人物、关系或规则/u,
-      }),
-    ).toHaveValue(sourceText);
-    await user.click(
-      within(reopenedSourceDrawer).getByRole("button", { name: "整理为待确认设定" }),
-    );
-    await user.click(within(reopenedSourceDrawer).getByRole("button", { name: "打开手动表单" }));
-    const reopenedManualDialog = await screen.findByRole("dialog", { name: "添加故事设定" });
-    await user.click(within(reopenedManualDialog).getByRole("button", { name: "确认保存" }));
-
-    const restoredSourceTrigger = await screen.findByRole("button", {
-      name: "用一句话添加设定",
-    });
-    await waitFor(() => expect(restoredSourceTrigger).toHaveFocus());
-    const factsAfterSave = await runtime.story.facts.listByProjectId(storyProjectId);
-    if (!factsAfterSave.ok) throw factsAfterSave.error;
-    expect(factsAfterSave.value.map((fact) => fact.toSnapshot())).toMatchObject([
+    await user.click(save);
+    await screen.findByText("1 条设定已保存为待确认内容");
+    const facts = await runtime.story.facts.listByProjectId(parseStoryProjectId(project.value.id));
+    if (!facts.ok) throw facts.error;
+    expect(facts.value.map((fact) => fact.toSnapshot())).toMatchObject([
       {
-        factType: "character_identity",
-        contentText: sourceText,
-        status: "formal",
-        userConfirmed: true,
+        factType: "character_attribute",
+        contentText: source,
+        status: "unconfirmed",
+        userConfirmed: false,
       },
     ]);
-    expect(factWrite).toHaveBeenCalledTimes(1);
-    expect(providerDispatch).not.toHaveBeenCalled();
-    expect(invocationStart).not.toHaveBeenCalled();
+    expect(send).not.toHaveBeenCalled();
   });
 
   it("opens import teaching before file selection and blocks commit until dry-run is complete", async () => {

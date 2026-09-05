@@ -134,6 +134,8 @@ const FACT_TYPE_TO_LAYER = new Map<string, ContextLayer>([
   ["character.knowledge", "pov_known_information"],
   ["character", "character_current_state"],
   ["character_state", "character_current_state"],
+  ["character_attribute", "character_current_state"],
+  ["character_ability", "character_current_state"],
   ["character.state", "character_current_state"],
   ["relationship_change", "character_current_state"],
   ["character_identity", "character_current_state"],

@@ -4881,8 +4881,8 @@ export function IdeaJourneyPage() {
           </dl>
           <InlineAlert
             tone="ai-clarification"
-            title="生成结果仍是隔离建议"
-            description="本次生成不会自动写入正式正文；你仍需在比较界面明确选择并接受。"
+            title="生成后由你决定是否使用"
+            description="生成内容会先单独保存，不会自动写入正文。查看后选择“使用这版”，才会成为你的正文。"
           />
           <details>
             <summary>查看详细信息</summary>
@@ -6035,7 +6035,7 @@ export function IdeaJourneyPage() {
                   </>
                 ) : (
                   <>
-                    <span>本地旅程未能保存，本次没有发送</span>
+                    <span>创作进度未能保存，本次没有发送</span>
                     <br />
                     <span>问题编号：{unpersistedOpeningSupportId}（联系支持时请提供）</span>
                     <br />

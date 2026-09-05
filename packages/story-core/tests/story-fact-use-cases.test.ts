@@ -21,6 +21,44 @@ const VERSION_ID = uuid(4);
 const NOW = "2026-08-01T00:00:00.000Z";
 
 describe("StoryFactApplicationService", () => {
+  it("does not report a newly locked rule saved without an authoritative row", async () => {
+    const { service, store } = harness();
+    store.create = async () => ok(undefined);
+    const result = await service.createFormalUserFact({
+      projectId: PROJECT_ID,
+      factType: "world_rule",
+      contentText: "钟摆不得复活死者。",
+      actorId: ACTOR_ID,
+      humanConfirmed: true,
+      lock: true,
+    });
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error.details.reason).toBe("STORY_FACT_READBACK_MISMATCH");
+    expect(unwrap(await store.listByProjectId(parse(PROJECT_ID)))).toEqual([]);
+  });
+  it("does not report a rule locked when persistence acknowledges but does not save it", async () => {
+    const { service, store } = harness();
+    const original = unwrap(
+      await service.createFormalUserFact({
+        projectId: PROJECT_ID,
+        factType: "world_rule",
+        contentText: "钟摆不能逆转生命。",
+        actorId: ACTOR_ID,
+        humanConfirmed: true,
+        lock: false,
+      }),
+    );
+    store.save = async () => ok(undefined);
+    const changed = await service.setLocked({
+      factId: original.id,
+      locked: true,
+      humanConfirmed: true,
+      expectedRevision: original.revision,
+    });
+    expect(changed.ok).toBe(false);
+    if (!changed.ok) expect(changed.error.details.reason).toBe("STORY_FACT_READBACK_MISMATCH");
+    expect(unwrap(await store.findById(original.id))?.toSnapshot()).toEqual(original.toSnapshot());
+  });
   it("classifies update authority conservatively", () => {
     expect(storyFactUpdatePolicy("chapter_summary")).toBe("rebuildable_automatic");
     expect(storyFactUpdatePolicy("character_state")).toBe("automatic_reversible");

@@ -1798,7 +1798,10 @@ select {
 }
 
 .editor-toolbar {
-  align-items: flex-end;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  align-items: start;
+  gap: var(--space-2);
 }
 
 .editor-toolbar__title {
@@ -2025,6 +2028,10 @@ select {
 
 .editor-workspace {
   --editor-assistant-width: clamp(20rem, 24vw, 22.5rem);
+  --editor-assistant-effective-width: min(
+    var(--editor-assistant-width),
+    calc(29% - var(--space-3) - var(--space-3))
+  );
 
   position: relative;
   display: grid;
@@ -2033,9 +2040,9 @@ select {
   min-height: 0;
   flex: 1 1 auto;
   grid-template-columns:
-    minmax(11.25rem, 13.75rem)
-    minmax(0, 1fr)
-    var(--editor-assistant-width, clamp(20rem, 24vw, 22.5rem));
+    minmax(0, 15%)
+    minmax(56%, 1fr)
+    var(--editor-assistant-effective-width);
   gap: var(--space-3);
   overflow: hidden;
 }
@@ -2047,11 +2054,11 @@ select {
 .editor-workspace[data-chapter-panel="collapsed"] {
   grid-template-columns:
     auto minmax(0, 1fr)
-    var(--editor-assistant-width, clamp(20rem, 24vw, 22.5rem));
+    var(--editor-assistant-effective-width);
 }
 
 .editor-workspace[data-assistant-panel="collapsed"] {
-  grid-template-columns: minmax(11.25rem, 13.75rem) minmax(0, 1fr) auto;
+  grid-template-columns: minmax(0, 15%) minmax(56%, 1fr) auto;
 }
 
 .editor-workspace[data-chapter-panel="collapsed"][data-assistant-panel="collapsed"] {
@@ -2062,7 +2069,7 @@ select {
   position: absolute;
   z-index: 1;
   top: 0;
-  right: var(--editor-assistant-width, clamp(20rem, 24vw, 22.5rem));
+  right: var(--editor-assistant-effective-width);
   bottom: 0;
   width: var(--space-3);
   padding: 0;
@@ -2188,18 +2195,6 @@ select {
 @media (max-width: 80rem) and (min-width: 64.0625rem) {
   .editor-workspace {
     --editor-assistant-width: 18rem;
-
-    grid-template-columns:
-      minmax(9rem, 10rem) minmax(0, 1fr)
-      var(--editor-assistant-width, 18rem);
-  }
-
-  .editor-workspace[data-chapter-panel="collapsed"] {
-    grid-template-columns: auto minmax(0, 1fr) var(--editor-assistant-width, 18rem);
-  }
-
-  .editor-workspace[data-assistant-panel="collapsed"] {
-    grid-template-columns: minmax(9rem, 10rem) minmax(0, 1fr) auto;
   }
 }
 

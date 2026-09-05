@@ -70,10 +70,17 @@ describe("StoryPlanningPanel", () => {
     renderPanel(service);
     await waitFor(() => expect(service.listCandidates).toHaveBeenCalled());
 
+    await user.type(
+      screen.getByRole("textbox", { name: /^你希望接下来怎么发展/u }),
+      "主角先追查钟楼的脚印，不要引入新人物。",
+    );
     await user.click(screen.getByRole("button", { name: "查看发送前说明" }));
     await user.click(screen.getByRole("button", { name: "取消，不发送" }));
 
     expect(generate).not.toHaveBeenCalled();
+    expect(screen.getByRole("textbox", { name: /^你希望接下来怎么发展/u })).toHaveValue(
+      "主角先追查钟楼的脚印，不要引入新人物。",
+    );
     expect(screen.queryByText("确认后会发送 1 次")).not.toBeInTheDocument();
   });
 
@@ -102,6 +109,7 @@ describe("StoryPlanningPanel", () => {
     await user.click(screen.getByRole("button", { name: "查看发送前说明" }));
 
     expect(screen.getByText("发送确认摘要")).toBeVisible();
+    expect(screen.getByText(/本次要求：未填写额外要求/u)).toBeVisible();
     expect(screen.getByText(/我的写作服务 · planning-model/u)).toBeVisible();
     const detailsSummary = screen.getByText("查看详细信息");
     expect(detailsSummary).toBeVisible();

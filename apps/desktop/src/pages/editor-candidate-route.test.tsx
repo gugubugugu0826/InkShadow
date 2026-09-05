@@ -1540,7 +1540,9 @@ describe("editor candidate route selection", () => {
     await user.click(screen.getByRole("button", { name: "选择方向" }));
 
     const directionSummary = await screen.findByText("确认本次方向生成");
-    expect(directionSummary.closest('[role="status"]')).toHaveTextContent("本次要求：已填写要求");
+    expect(directionSummary.closest('[role="status"]')).toHaveTextContent(
+      "本次要求：三个方向都要围绕那封没有署名的信。",
+    );
     const directionStatus = directionSummary.closest('[role="status"]');
     if (!(directionStatus instanceof HTMLElement)) throw new Error("找不到方向发送确认摘要");
     const directionDescription = directionStatus.querySelector(".ink-inline-alert__description");
@@ -1581,7 +1583,7 @@ describe("editor candidate route selection", () => {
     });
     expect(
       within(continuationPreflight).getByText("发送确认摘要").closest('[role="status"]'),
-    ).toHaveTextContent(/任务：生成续写建议.*本次要求：已填写要求/u);
+    ).toHaveTextContent(/任务：生成续写建议.*本次要求：.*林晚留在旧站台追查寄信人的行踪/u);
     const continuationDetailsSummary = within(continuationPreflight).getByText("查看详情");
     await user.click(continuationDetailsSummary);
     expect(continuationDetailsSummary.closest("details")).toHaveTextContent(
@@ -3984,7 +3986,9 @@ function expectConciseFiveItemSummary(summary: HTMLElement): void {
 
 function expectBoundedRequirementSummary(summary: HTMLElement, fullRequirement: string): void {
   expectConciseFiveItemSummary(summary);
-  expect(summary).toHaveTextContent("本次要求：已填写要求");
+  expect(summary).toHaveTextContent(
+    `本次要求：${Array.from(fullRequirement.trim()).slice(0, 60).join("")}…（展开详情查看完整要求）`,
+  );
   expect(summary).not.toHaveTextContent(fullRequirement);
   expect(summary.textContent.length).toBeLessThan(240);
 }

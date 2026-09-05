@@ -653,6 +653,15 @@ export function ProjectsPage() {
                       />
                     ) : null}
 
+                    {specialProjects.length === 0 && tabStatus === "active" && !hasSearch && (
+                      <section
+                        className="project-library-page__collection project-library-page__collection--special"
+                        aria-labelledby={`special-empty-heading-${tabStatus}`}
+                      >
+                        <h2 id={`special-empty-heading-${tabStatus}`}>测试与示例</h2>
+                        <p>标记为测试作品的内容和内置示例会收纳在这里，不影响你的普通作品。</p>
+                      </section>
+                    )}
                     {specialProjects.length > 0 && (
                       <section
                         className="project-library-page__collection project-library-page__collection--special"
@@ -908,9 +917,7 @@ function ProjectLibraryCard({
       </CardHeader>
       <CardContent>
         <p className="project-meta">
-          创建于 <time dateTime={snapshot.createdAt}>{formatDate(snapshot.createdAt)}</time>
-        </p>
-        <p className="project-meta">
+          创建于 <time dateTime={snapshot.createdAt}>{formatDate(snapshot.createdAt)}</time>；
           更新于 <time dateTime={snapshot.updatedAt}>{formatDate(snapshot.updatedAt)}</time>
         </p>
         {project.retentionUntil !== null && (

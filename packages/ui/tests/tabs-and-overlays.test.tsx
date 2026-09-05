@@ -52,6 +52,31 @@ function DialogHarness() {
 }
 
 describe("Dialog", () => {
+  it("focuses expandable details and excludes controls inside closed details from its focus trap", async () => {
+    const user = userEvent.setup();
+    render(
+      <Dialog
+        open
+        onOpenChange={() => undefined}
+        title="发送前说明"
+        footer={<Button>确认发送</Button>}
+      >
+        <details>
+          <summary>查看详情</summary>
+          <Button>查看原文</Button>
+        </details>
+      </Dialog>,
+    );
+    const summary = screen.getByText("查看详情");
+    await waitFor(() => expect(summary).toHaveFocus());
+    await user.tab();
+    expect(screen.getByRole("button", { name: "确认发送" })).toHaveFocus();
+    await user.click(summary);
+    expect(summary.closest("details")).toHaveAttribute("open");
+    summary.focus();
+    await user.tab();
+    expect(screen.getByRole("button", { name: "查看原文" })).toHaveFocus();
+  });
   it("labels the modal, traps focus, closes with Escape, and restores focus", async () => {
     const user = userEvent.setup();
     render(<DialogHarness />);

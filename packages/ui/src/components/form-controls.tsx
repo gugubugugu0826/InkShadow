@@ -100,7 +100,7 @@ export const Textarea = forwardRef<HTMLTextAreaElement, TextareaProps>(function 
     disabled,
     invalid = false,
     maxLength,
-    maxLengthLabel = "字符",
+    maxLengthLabel = "字",
     onChange,
     readOnly,
     value,
@@ -138,8 +138,7 @@ export const Textarea = forwardRef<HTMLTextAreaElement, TextareaProps>(function 
       />
       {showCounter && (
         <span className="ink-textarea__counter" aria-live="off">
-          {resolvedCurrentLength}
-          {maxLength === undefined ? "" : ` / ${String(maxLength)}`} {maxLengthLabel}
+          共 {resolvedCurrentLength} {maxLengthLabel}
         </span>
       )}
     </span>

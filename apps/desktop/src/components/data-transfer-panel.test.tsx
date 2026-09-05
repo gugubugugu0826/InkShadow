@@ -12,6 +12,21 @@ import { RuntimeProvider } from "../runtime-context";
 import { DataTransferPanel } from "./data-transfer-panel";
 
 describe("DataTransferPanel import journey", () => {
+  it("explains project-list failures instead of leaving export preparation silently pending", async () => {
+    const runtime = createDevelopmentRuntime(window.localStorage);
+    vi.spyOn(runtime.useCases.listProjects, "execute").mockRejectedValue(
+      new Error("local read failed"),
+    );
+    render(
+      <MemoryRouter>
+        <RuntimeProvider runtime={runtime}>
+          <DataTransferPanel />
+        </RuntimeProvider>
+      </MemoryRouter>,
+    );
+    expect(await screen.findByText(/项目列表读取失败，请重新打开此页重试/u)).toBeVisible();
+    expect(screen.queryByRole("button", { name: "下载 TXT" })).not.toBeInTheDocument();
+  });
   beforeEach(() => {
     window.localStorage.clear();
     tauriMocks.invoke.mockReset();

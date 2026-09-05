@@ -58,6 +58,8 @@ export function NovelSkillPanel({ projectId, runtime, readonly = false }: NovelS
   const [loading, setLoading] = useState(true);
   const [busySkillId, setBusySkillId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+  const saveInFlight = useRef(false);
   const [editorMode, setEditorMode] = useState<"create" | "import" | null>(null);
   const [editingSkillId, setEditingSkillId] = useState<string | null>(null);
   const [draft, setDraft] = useState<CustomNovelSkillDraft>(EMPTY_DRAFT);
@@ -156,29 +158,76 @@ export function NovelSkillPanel({ projectId, runtime, readonly = false }: NovelS
 
   function organizeNaturalDescription(): void {
     try {
-      setDraft(runtime.organizeCustomSkillDraft(naturalDescription));
+      const organized = runtime.organizeCustomSkillDraft(naturalDescription);
+      setDraft(organized);
+      setNotice(
+        organized.displayName === "我的写作技能"
+          ? "未填写技能名称，暂用“我的写作技能”。请核对或修改名称、规则和适用任务，再确认创建。"
+          : `已整理“${organized.displayName}”，请核对规则和适用任务，再确认创建；尚未保存。`,
+      );
       setError(null);
     } catch (cause: unknown) {
-      setError(projectOrdinaryUiError(cause).description);
+      setError(
+        `自然语言整理未完成：${projectOrdinaryUiError(cause).description} 原描述已保留，你也可以手动填写名称和规则。`,
+      );
     }
   }
 
   async function saveDraft(event: SyntheticEvent<HTMLFormElement>): Promise<void> {
     event.preventDefault();
-    const operation =
-      editingSkillId === null
-        ? runtime.createCustomSkill(projectId, normalizedDraft(draft))
-        : runtime.updateCustomSkill(projectId, editingSkillId, normalizedDraft(draft));
+    if (saveInFlight.current || readonly) return;
+    const prepared = normalizedDraft(draft);
+    if (!prepared.displayName.trim() || !prepared.summary.trim() || prepared.rules.length === 0) {
+      if (naturalDescription.trim().length > 0 && editingSkillId === null) {
+        organizeNaturalDescription();
+      } else {
+        setError(
+          "请填写技能名称、用途说明和至少一条写作规则；也可以先输入自然语言描述，再整理成表单。",
+        );
+      }
+      return;
+    }
+    if (prepared.taskTypes.length === 0) {
+      setError("请至少选择一种适用任务，原有输入已保留。");
+      return;
+    }
+    saveInFlight.current = true;
+    const revision = operationRevision.current;
     setBusySkillId(editingSkillId ?? "new-custom-skill");
     try {
-      setState(await operation);
+      const next =
+        editingSkillId === null
+          ? await runtime.createCustomSkill(projectId, prepared)
+          : await runtime.updateCustomSkill(projectId, editingSkillId, prepared);
+      if (operationRevision.current !== revision) return;
+      const saved = next.methods.find(
+        (method) =>
+          method.displayName === prepared.displayName &&
+          (editingSkillId === null
+            ? !state?.methods.some((before) => before.skillId === method.skillId)
+            : method.skillId === editingSkillId),
+      );
+      if (saved === undefined) {
+        setError(
+          "保存后未读取到对应的技能与项目关联。请重新读取并核对，原输入已保留，不要重复创建。",
+        );
+        return;
+      }
+      setState(next);
+      setNotice(
+        `已保存“${saved.displayName}”。${saved.enabled ? "已在当前作品启用，实际采用情况请查看每次生成的记录。" : "尚未启用；请在技能列表中主动启用，创建成功不代表已用于生成。"}`,
+      );
       setEditorMode(null);
       setEditingSkillId(null);
       setError(null);
     } catch (cause: unknown) {
-      setError(projectOrdinaryUiError(cause).description);
+      if (operationRevision.current === revision)
+        setError(
+          `${skillSaveFailureStage(cause)}：${projectOrdinaryUiError(cause).description} 原输入已保留，请重新读取后再决定是否重试。`,
+        );
     } finally {
-      setBusySkillId(null);
+      saveInFlight.current = false;
+      if (operationRevision.current === revision) setBusySkillId(null);
     }
   }
 
@@ -253,6 +302,15 @@ export function NovelSkillPanel({ projectId, runtime, readonly = false }: NovelS
           description={error}
           action={{ label: "重新读取", onClick: () => void load() }}
           onDismiss={() => setError(null)}
+        />
+      )}
+
+      {notice !== null && (
+        <InlineAlert
+          tone="info"
+          title="写作技能"
+          description={notice}
+          onDismiss={() => setNotice(null)}
         />
       )}
 
@@ -611,7 +669,7 @@ function CustomSkillEditor({
         >
           本地整理成表单
         </Button>
-        <form onSubmit={onSubmit}>
+        <form noValidate onSubmit={onSubmit}>
           <FormField label="技能名称" required>
             {(fieldProps) => (
               <Input
@@ -713,6 +771,14 @@ function CustomSkillEditor({
       </CardContent>
     </Card>
   );
+}
+
+function skillSaveFailureStage(cause: unknown): string {
+  const code = cause instanceof Error && "code" in cause ? cause.code : null;
+  if (code === "NOVEL_SKILL_BINDING_CONFLICT" || code === "NOVEL_SKILL_BINDING_FAILED")
+    return "技能与当前作品的关联未完成";
+  if (code === "NOVEL_SKILL_DEFINITION_CONFLICT") return "技能内容保存未完成";
+  return "技能保存尚未确认完成";
 }
 
 function normalizedDraft(draft: CustomNovelSkillDraft): CustomNovelSkillDraft {

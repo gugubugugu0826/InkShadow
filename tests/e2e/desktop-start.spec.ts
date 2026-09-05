@@ -35,6 +35,25 @@ test("starts locally through the three creation paths without requiring cloud lo
   const creationEntries = page.getByRole("region", { name: "选择创作方式" });
   const ideaEntry = creationEntries.getByRole("link", { name: /从一个想法开始/u });
   await expect(creationEntries.getByRole("link")).toHaveCount(3);
+  const badgeStyles = await creationEntries
+    .locator(".start-page__entry-eyebrow")
+    .evaluateAll((badges) =>
+      badges.map((badge) => {
+        const style = getComputedStyle(badge);
+        const card = badge.closest(".start-page__entry");
+        return {
+          fontSize: style.fontSize,
+          fontWeight: style.fontWeight,
+          color: style.color,
+          top: Math.round(
+            badge.getBoundingClientRect().top - (card?.getBoundingClientRect().top ?? 0),
+          ),
+        };
+      }),
+    );
+  expect(badgeStyles).toHaveLength(3);
+  expect(badgeStyles[1]).toEqual(badgeStyles[0]);
+  expect(badgeStyles[2]).toEqual(badgeStyles[0]);
   await expect(ideaEntry).toHaveAttribute("href", "#/create/idea");
   await expect(
     creationEntries.getByRole("link", { name: /导入小说，继续写或改写/u }),

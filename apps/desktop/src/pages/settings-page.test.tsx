@@ -64,6 +64,79 @@ function seedWritingExperience(mode: "direct" | "professional"): void {
 }
 
 describe("SettingsPage model routing", () => {
+  it("excludes failed connections from normal task choices while retaining an edit recovery path", async () => {
+    const fixture = await createReadyDeepSeekProbeRuntime("failed-routing-choice");
+    const connection = await fixture.runtime.modelHub.findConnection("failed-routing-choice");
+    if (connection === null) throw new Error("缺少测试连接");
+    await fixture.runtime.modelHub.recordConnectionTest({
+      connectionId: connection.id,
+      status: "error",
+      errorCode: "MODEL_PROVIDER_UNAVAILABLE",
+      errorSummary: "controlled failure",
+      expectedRevision: connection.revision,
+    });
+    const user = userEvent.setup();
+    renderRoute(fixture.runtime, "/settings?connectionId=failed-routing-choice#model-routing");
+    await user.click(await screen.findByRole("button", { name: "专家设置" }));
+    const primary = await screen.findByRole("combobox", { name: "主模型", hidden: true });
+    await waitFor(() => expect(screen.queryByText("正在读取模型目录…")).not.toBeInTheDocument());
+    expect(
+      within(primary).queryByRole("option", {
+        name: /deepseek-v4-flash-vision-exp|DeepSeek V4 Flash Vision/iu,
+        hidden: true,
+      }),
+    ).not.toBeInTheDocument();
+    expect(
+      Array.from((primary as HTMLSelectElement).options).map(({ value }) => value),
+    ).not.toContain(fixture.catalogEntryId);
+    const catalogBrowser = screen.getByRole("region", { name: "可选模型目录", hidden: true });
+    await user.click(within(catalogBrowser).getByText("浏览全部可选模型"));
+    expect(catalogBrowser.querySelectorAll('[data-connected="true"]')).toHaveLength(0);
+    expect(await fixture.runtime.modelHub.findConnection(connection.id)).toMatchObject({
+      enabled: true,
+      connectionStatus: "error",
+    });
+  });
+  it("offers basic planning verification outside expert task assignments and cancels with zero sends", async () => {
+    const prepared = await createReadyDeepSeekProbeRuntime("basic-planning-entry");
+    await prepared.runtime.modelHub.recordCapabilityScan({
+      scanId: "basic-planning-text",
+      catalogEntryId: prepared.catalogEntryId,
+      scanKind: "user_review",
+      status: "succeeded",
+      evidenceVersion: "test-text-v1",
+      evidence: [
+        {
+          id: "basic-planning-text-evidence",
+          capability: "text_generation",
+          verdict: "supported",
+          evidenceSource: "user_confirmed",
+        },
+      ],
+    });
+    const generate = vi.spyOn(prepared.runtime.modelGateway, "generate");
+    const user = userEvent.setup();
+    renderRoute(prepared.runtime, "/settings#model-routing");
+    const missingPlanning = await waitFor(() => {
+      const row = document.getElementById("model-routing-task-outline_planning");
+      if (row === null) throw new Error("尚未显示缺失的规划安排");
+      return row;
+    });
+    expect(
+      await within(missingPlanning).findByRole(
+        "button",
+        { name: "查看验证说明", hidden: true },
+        { timeout: 5_000 },
+      ),
+    ).toBeInTheDocument();
+    await user.click(await screen.findByRole("button", { name: "准备大纲与规划" }));
+    const confirmation = await screen.findByRole("dialog", { name: "确认 1 次模型能力检查？" });
+    expect(confirmation).toHaveTextContent("结构化");
+    expect(confirmation).not.toHaveTextContent("unknown");
+    expect(generate).not.toHaveBeenCalled();
+    await user.click(within(confirmation).getByRole("button", { name: "取消（不发送）" }));
+    expect(generate).not.toHaveBeenCalled();
+  });
   beforeEach(() => {
     window.localStorage.clear();
     seedWritingExperience("professional");
@@ -572,7 +645,10 @@ describe("SettingsPage model routing", () => {
 
     const probedModelRow = probedModelLabel.closest("li");
     if (probedModelRow === null) throw new Error("Expected the probed model row.");
-    await user.click(within(probedModelRow).getByRole("button", { name: "用于此任务" }));
+    expect(within(probedModelRow).getByText("当前建议 · 请使用上方操作")).toBeVisible();
+    const probedTaskRow = document.getElementById("model-routing-task-prose_generation");
+    if (probedTaskRow === null) throw new Error("未找到正文生成任务。");
+    await user.click(within(probedTaskRow).getByRole("button", { name: "用于此任务" }));
 
     await waitFor(() =>
       expect(window.localStorage.getItem(MODEL_HUB_CONNECTION_INTENT_STORAGE_KEY)).toBeNull(),
@@ -635,7 +711,7 @@ describe("SettingsPage model routing", () => {
     );
     if (modelDisclosure === null) throw new Error("Expected the task model disclosure.");
     expect(modelDisclosure).toHaveAttribute("open");
-    const disclosureButton = within(modelDisclosure).getByRole("button", {
+    const disclosureButton = within(taskRow).getByRole("button", {
       name: "查看验证说明",
     });
     expect(disclosureButton).toBeVisible();
@@ -650,6 +726,7 @@ describe("SettingsPage model routing", () => {
     });
     expect(within(confirmation).getByText(/DeepSeek/u)).toBeVisible();
     expect(within(confirmation).getByText(/deepseek-v4-flash/u)).toBeVisible();
+    await user.click(within(confirmation).getByText("高级诊断详情：固定验证内容"));
     expect(within(confirmation).getByText(/固定用户句：雨停了。/u)).toBeVisible();
     expect(
       within(confirmation).getByText(/最大输出：\s*AI 最多返回 64\s*个文字量单位（这不是金额）/u),

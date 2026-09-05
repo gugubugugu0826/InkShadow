@@ -19,6 +19,65 @@ import { RuntimeProvider } from "../runtime-context";
 import { EditorPage } from "./editor-page";
 
 describe("simplified editor workspace", () => {
+  it("does not apply a previous chapter's privacy receipt to the current editor", async () => {
+    const runtime = createDevelopmentRuntime(window.localStorage);
+    const { project, chapter } = await seedProject(runtime);
+    const nextResult = await runtime.useCases.createChapter.execute({
+      projectId: project.id,
+      title: "隐私切换对照章",
+      content: "对照章正文保持不变",
+    });
+    if (!nextResult.ok) throw nextResult.error;
+    const next = nextResult.value.chapter;
+    const execute = runtime.useCases.setChapterPrivacy.execute.bind(
+      runtime.useCases.setChapterPrivacy,
+    );
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const save = vi
+      .spyOn(runtime.useCases.setChapterPrivacy, "execute")
+      .mockImplementation(async (command) => {
+        await gate;
+        return execute(command);
+      });
+    const user = userEvent.setup();
+    render(
+      <MemoryRouter initialEntries={[`/projects/${project.id}/chapters/${chapter.id}`]}>
+        <RuntimeProvider runtime={runtime}>
+          <ToastProvider>
+            <Link to={`/projects/${project.id}/chapters/${next.id}`}>切换到对照章</Link>
+            <Routes>
+              <Route path="/projects/:projectId/chapters/:chapterId" element={<EditorPage />} />
+            </Routes>
+          </ToastProvider>
+        </RuntimeProvider>
+      </MemoryRouter>,
+    );
+    await screen.findByRole("textbox", { name: "章节正文" });
+    await user.click(screen.getByRole("button", { name: "设为私密" }));
+    await user.click(screen.getByRole("button", { name: "确认仅限本地" }));
+    await waitFor(() => expect(save).toHaveBeenCalledTimes(1));
+    fireEvent.click(screen.getByRole("link", { name: "切换到对照章", hidden: true }));
+    await waitFor(() =>
+      expect(screen.getByRole("textbox", { name: "章节正文", hidden: true })).toHaveValue(
+        next.content,
+      ),
+    );
+    release();
+    await waitFor(async () => {
+      const stored = await runtime.repositories.chapters.findById(chapter.id);
+      expect(stored.ok && stored.value?.privacyMode).toBe("local_only");
+    });
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+    expect(screen.getByRole("textbox", { name: "章节正文" })).toHaveValue(next.content);
+    expect(screen.getByRole("button", { name: "设为私密" })).toBeEnabled();
+    const reopened = createDevelopmentRuntime(window.localStorage);
+    const unchanged = await reopened.repositories.chapters.findById(next.id);
+    expect(unchanged.ok && unchanged.value?.toSnapshot()).toEqual(next.toSnapshot());
+  });
+
   it("ignores a previous project's delayed load after the route switches", async () => {
     const runtime = createDevelopmentRuntime(window.localStorage);
     const first = await seedProject(runtime);
@@ -97,7 +156,12 @@ describe("simplified editor workspace", () => {
       `/projects/${project.id}/chapters/${second.value.chapter.id}`,
     );
     expect(screen.getByRole("textbox", { name: "章节正文" })).toHaveValue("第一章正文");
-    expect(screen.getByText("5 / 5000000 字符")).toBeVisible();
+    expect(screen.getByText("共 5 字")).toBeVisible();
+    expect(screen.getByRole("textbox", { name: "章节正文" })).toHaveAttribute(
+      "maxlength",
+      "5000000",
+    );
+    expect(screen.getByRole("button", { name: "写作技能设置" })).toBeVisible();
     expect(screen.getByRole("complementary", { name: "AI 创作助手" })).toBeVisible();
 
     const toolbar = document.querySelector(".editor-toolbar");
@@ -328,7 +392,7 @@ describe("simplified editor workspace", () => {
       name: /^本次要求（可选）/u,
     });
     expect(requirement).toHaveValue("");
-    expect(screen.getByText("发现旧版续写要求")).toBeVisible();
+    expect(await screen.findByText("发现旧版续写要求")).toBeVisible();
     await user.click(screen.getByRole("button", { name: "确认用于当前章节" }));
     expect(requirement).toHaveValue("写到主角发现密信为止。");
     expect(loadEditorContinuationPreference(window.localStorage, project.id)).toMatchObject({
@@ -457,11 +521,18 @@ describe("simplified editor workspace", () => {
     if (!(workspace instanceof HTMLElement)) {
       throw new Error("找不到编辑器工作区");
     }
-    vi.spyOn(workspace, "getBoundingClientRect").mockReturnValue(new DOMRect(0, 0, 900, 600));
-    vi.spyOn(writingCanvas, "getBoundingClientRect").mockReturnValue(new DOMRect(172, 0, 372, 600));
+    const workspaceBounds = vi
+      .spyOn(workspace, "getBoundingClientRect")
+      .mockReturnValue(new DOMRect(0, 0, 900, 600));
+    const canvasBounds = vi
+      .spyOn(writingCanvas, "getBoundingClientRect")
+      .mockReturnValue(new DOMRect(172, 0, 372, 600));
     fireEvent.keyDown(separator, { key: "End" });
-    expect(separator).toHaveAttribute("aria-valuemax", "408");
-    expect(separator).toHaveAttribute("aria-valuenow", "408");
+    expect(separator).toHaveAttribute("aria-valuemax", "223");
+    expect(separator).toHaveAttribute("aria-valuenow", "223");
+    expect(Number(separator.getAttribute("aria-valuemax"))).toBeLessThan(900 * 0.29);
+    workspaceBounds.mockReturnValue(new DOMRect(0, 0, 1440, 600));
+    canvasBounds.mockReturnValue(new DOMRect(216, 0, 806.4, 600));
     fireEvent.keyDown(separator, { key: "Home" });
     expect(separator).toHaveAttribute("aria-valuenow", "256");
 

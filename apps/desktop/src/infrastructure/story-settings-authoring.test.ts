@@ -7,6 +7,7 @@ import {
   parseNaturalLanguageSetting,
   projectStorySettingsForExport,
   readRelationship,
+  storyFactDisplayText,
 } from "./story-settings-authoring";
 
 const PROJECT_ID = "019f9f4a-b3c7-7350-9226-000000000001";
@@ -14,6 +15,80 @@ const ACTOR_ID = "019f9f4a-b3c7-7350-9226-000000000002";
 const NOW = "2026-08-09T00:00:00.000Z";
 
 describe("story settings authoring", () => {
+  it("projects only the relevant relationship sentence without changing historical data", () => {
+    const result = StoryFact.create({
+      id: "019f9f4a-b3c7-7350-9226-000000000099",
+      projectId: PROJECT_ID,
+      factType: "relationship",
+      contentText: "陈九左臂残废。陈九和赵伯是老邻居。陈九昨晚烧毁了信件。",
+      source: { kind: "user_statement", reference: "legacy" },
+      confidence: 1,
+      status: "formal",
+      origin: "user",
+      needsReview: false,
+      humanConfirmed: true,
+      confirmationActorId: ACTOR_ID,
+      now: NOW,
+    });
+    if (!result.ok) throw result.error;
+    const snapshot = result.value.toSnapshot();
+    const before = JSON.stringify(snapshot);
+    expect(storyFactDisplayText(snapshot)).toBe("陈九和赵伯是老邻居。");
+    expect(JSON.stringify(snapshot)).toBe(before);
+    expect(() => storyFactDisplayText({ ...snapshot, contentText: null })).not.toThrow();
+    const longSnapshot = { ...snapshot, contentText: "历史关系说明。".repeat(400) };
+    const longBefore = JSON.stringify(longSnapshot);
+    expect(() => storyFactDisplayText(longSnapshot)).not.toThrow();
+    expect(storyFactDisplayText(longSnapshot)).toContain("完整原句已保留");
+    expect(JSON.stringify(longSnapshot)).toBe(longBefore);
+    expect(
+      storyFactDisplayText({
+        ...snapshot,
+        contentText: "邻居：character.statement.from ↔ character.statement.to",
+        structuredValue: {
+          fromCharacterId: "character.statement.from",
+          toCharacterId: "character.statement.to",
+          relationshipType: "邻居",
+          extension: "保留扩展字段",
+        },
+      }),
+    ).toBe("邻居（人物名称请在关系卡中核对）");
+  });
+  it("retains every supplied sentence and distinguishes identity, attributes, state, ability and events", () => {
+    const source =
+      "陈九是钟楼管理员。陈九五十七岁。陈九担任钟楼管理员。陈九左臂残废。陈九目前受了重伤。陈九能够听见远处的钟声。陈九昨晚烧毁了信件。陈九和赵伯是多年的老邻居。雾里的回声令人不安。";
+    const drafts = parseBulkNaturalLanguageSettings(source);
+    expect(drafts.map((draft) => draft.category)).toEqual([
+      "character_identity",
+      "character_identity",
+      "character_identity",
+      "character_attribute",
+      "character_state",
+      "character_ability",
+      "event",
+      "relationship",
+      null,
+    ]);
+    expect(drafts.map((draft) => draft.sourceText).join("")).toBe(source);
+    for (const draft of drafts) {
+      expect(source.slice(draft.startOffset, draft.endOffset)).toBe(draft.sourceText);
+      expect(draft.confirmation).toBe("pending");
+    }
+  });
+
+  it("does not consume a later sentence as part of one relationship", () => {
+    expect(parseNaturalLanguageSetting("陈九和赵伯是老邻居。陈九左臂残废。").kind).toBe("manual");
+  });
+
+  it.each(["陈九可能受了重伤。", "陈九并没有烧毁信件。", "陈九能够听见钟声吗？"])(
+    "keeps uncertain or negated statements unclassified: %s",
+    (source) => {
+      expect(parseBulkNaturalLanguageSettings(source)[0]).toMatchObject({
+        sourceText: source,
+        category: null,
+      });
+    },
+  );
   it("parses a plain-language relationship into a two-ended candidate", () => {
     expect(parseNaturalLanguageSetting("顾顾和丹丹是情侣关系，在初中就认识了。")).toMatchObject({
       kind: "relationship",

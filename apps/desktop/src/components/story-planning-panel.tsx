@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { formatRequirementConfirmationSummary } from "../infrastructure/story-context-presentation";
 import type { Outline } from "@inkshadow/story-core";
 import {
   Badge,
@@ -443,11 +444,12 @@ export function StoryPlanningPanel({
               <InlineAlert
                 tone="warning"
                 title="发送确认摘要"
-                description={`模型：${disclosure.connectionDisplayName} · ${disclosure.modelId}；资料：当前大纲、已确认设定和有正文依据的主线事件；预计发送 1 次；${formatPlanningCostSummary(disclosure)}；私密内容：不包含私密章节正文。`}
+                description={`本次要求：${formatRequirementConfirmationSummary(direction)}；模型：${disclosure.connectionDisplayName} · ${disclosure.modelId}；资料：当前大纲、已确认设定和有正文依据的主线事件；预计发送 1 次；${formatPlanningCostSummary(disclosure)}；私密内容：不包含私密章节正文。`}
                 onDismiss={() => setDisclosure(null)}
               />
               <details className="candidate-panel__disclosure-details">
                 <summary>查看详细信息</summary>
+                <p>完整要求：{direction.trim() || "未填写额外要求"}</p>
                 <p>{disclosure.privacy}</p>
                 <p>发送内容：{disclosure.sends.join("；")}。</p>
                 <p>本次最多向模型服务发送 1 次，自动重试 0 次。</p>

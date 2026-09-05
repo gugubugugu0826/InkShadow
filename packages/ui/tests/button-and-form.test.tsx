@@ -102,7 +102,7 @@ describe("form controls", () => {
     expect(screen.getByRole("combobox", { name: "语言" })).toHaveValue("");
     expect(screen.getByRole("option", { name: "English" })).toBeDisabled();
     expect(screen.getByRole("textbox", { name: "简介" })).toHaveAttribute("maxlength", "20");
-    expect(screen.getByText("3 / 20 字符")).toBeInTheDocument();
+    expect(screen.getByText("共 3 字")).toBeInTheDocument();
   });
 
   it("keeps textarea counters in sync without requiring duplicate length props", async () => {
@@ -114,10 +114,10 @@ describe("form controls", () => {
       </>,
     );
 
-    expect(screen.getAllByText("2 / 20 字符")).toHaveLength(2);
+    expect(screen.getAllByText("共 2 字")).toHaveLength(2);
 
     await user.type(screen.getByRole("textbox", { name: "自由简介" }), "继续");
-    expect(screen.getByText("4 / 20 字符")).toBeInTheDocument();
+    expect(screen.getByText("共 4 字")).toBeInTheDocument();
 
     rerender(
       <Textarea
@@ -128,7 +128,7 @@ describe("form controls", () => {
         readOnly
       />,
     );
-    expect(screen.getByText("1 / 20 字符")).toBeInTheDocument();
+    expect(screen.getByText("共 1 字")).toBeInTheDocument();
   });
 
   it("lets users reveal and verify password-style values", async () => {

@@ -5,7 +5,7 @@ import path from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
 
-export const EXPECTED_RELEASE_VERSION = "0.2.17";
+export const EXPECTED_RELEASE_VERSION = "0.2.18";
 export const EXPECTED_PRODUCT_NAME = "墨影 InkShadow";
 export const EXPECTED_FILE_DESCRIPTION = "墨影 InkShadow";
 export const EXPECTED_PE_MACHINE = "AMD64";

@@ -31,7 +31,8 @@ const budgets = Object.freeze({
   workerAsset: 1_536 * 1024,
   generalAsset: 2 * 1024 * 1024,
   releaseManifest: 32 * 1024,
-  totalFrontend: 7 * 1024 * 1024 + 160 * 1024,
+  // v0.2.18 bounded safety and local-review allocation; see the build audit.
+  totalFrontend: 7 * 1024 * 1024 + 224 * 1024,
   maximumFiles: 200,
 });
 

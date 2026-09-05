@@ -165,7 +165,8 @@ describe("safe text conversion", () => {
             id: "chapter-text-export",
             title: "第一章",
             order: 0,
-            markdown: "## 小节\n\n**雾港** [外链](https://attacker.example) `钟声`。",
+            markdown:
+              "## 小节\n\n**雾港** [外链](https://attacker.example) `钟声`。\n\nPUBLIC_LONG_EXPORT_TAIL_终 中文_原文_编号 A__B__C _斜体_ __加重__ \\_保留\\_",
           },
         ],
       },
@@ -181,6 +182,9 @@ describe("safe text conversion", () => {
     expect(artifact.fileName).toBe("纯文本长篇.txt");
     expect(artifact.content).toContain("纯文本长篇\n\n第一章\n\n小节");
     expect(artifact.content).toContain("雾港 外链 钟声。");
+    expect(artifact.content).toContain(
+      "PUBLIC_LONG_EXPORT_TAIL_终 中文_原文_编号 A__B__C 斜体 加重 _保留_",
+    );
     expect(artifact.content).not.toMatch(/\bhttps?:/iu);
     expect(artifact.content).not.toContain("**");
   });

@@ -72,6 +72,8 @@ import {
 } from "../components/component-ownership-context";
 import { useWritingExperience } from "../hooks/use-writing-experience";
 import { projectOrdinaryUiError } from "../infrastructure/ui-error";
+import { storyFactDisplayText } from "../infrastructure/story-settings-authoring";
+import { recordSafeOperationIncident } from "../infrastructure/safe-operation-diagnostics";
 import {
   recordProjectAreaReadIncident,
   recoverUiRouteIncident,
@@ -508,6 +510,9 @@ function FactEditDialog({
 const FACT_TYPE_OPTIONS = [
   { value: "character_identity", label: "人物身份" },
   { value: "character_state", label: "人物当前状态" },
+  { value: "character_attribute", label: "人物属性" },
+  { value: "character_ability", label: "人物能力" },
+  { value: "event", label: "明确事件" },
   { value: "relationship", label: "人物关系" },
   { value: "world_setting", label: "世界设定" },
   { value: "world_rule", label: "世界硬规则" },
@@ -581,6 +586,11 @@ export function StoryGovernancePage() {
   const [pageState, setPageState] = useState<"loading" | "ready" | "fatal_error">("loading");
   const [error, setError] = useState<unknown>(identifierError);
   const [busy, setBusy] = useState(false);
+  const [factOperationFailure, setFactOperationFailure] = useState<{
+    description: string;
+    supportId: string;
+  } | null>(null);
+  const factWriteFlightRef = useRef(false);
   const [formalDialog, setFormalDialog] = useState<FormalDialog | null>(null);
   const [formalKind, setFormalKind] = useState<FormalRecordKind>("character");
   const [formalTitle, setFormalTitle] = useState("");
@@ -1216,27 +1226,72 @@ export function StoryGovernancePage() {
   }
 
   async function submitFact(): Promise<void> {
-    if (!storyProjectId.ok || busy || factContent.trim().length === 0) {
+    if (
+      !storyProjectId.ok ||
+      busy ||
+      factWriteFlightRef.current ||
+      factContent.trim().length === 0
+    ) {
       return;
     }
     setBusy(true);
-    const result = await runtime.story.factService.createFormalUserFact({
-      projectId: storyProjectId.value,
-      factType,
-      contentText: factContent.trim(),
-      actorId: runtime.story.actorId,
-      lock: factLocked,
-      humanConfirmed: true,
-    });
-    setBusy(false);
-    if (!result.ok) {
-      setError(result.error);
-      return;
+    factWriteFlightRef.current = true;
+    setFactOperationFailure(null);
+    try {
+      const result = await runtime.story.factService.createFormalUserFact({
+        projectId: storyProjectId.value,
+        factType,
+        contentText: factContent.trim(),
+        actorId: runtime.story.actorId,
+        lock: factLocked,
+        humanConfirmed: true,
+      });
+      if (!result.ok) {
+        throw result.error;
+      }
+      setFactDialogOpen(false);
+      setError(null);
+      await load();
+      restoreFactDialogFocus();
+    } catch (cause) {
+      recordFactOperationFailure(cause);
+    } finally {
+      factWriteFlightRef.current = false;
+      setBusy(false);
     }
-    setFactDialogOpen(false);
-    setError(null);
-    await load();
-    restoreFactDialogFocus();
+  }
+
+  function recordFactOperationFailure(cause: unknown): void {
+    const incident = recordSafeOperationIncident({
+      operation: "story_fact",
+      stage: "persist_result",
+      cause,
+      projectId: projectIdParameter,
+      dispatched: false,
+      occurredAt: runtime.clock.now(),
+    });
+    setFactOperationFailure({
+      description: projectOrdinaryUiError(cause).description,
+      supportId: incident.supportId,
+    });
+    setError(cause);
+  }
+
+  function renderFactOperationFailure() {
+    return factOperationFailure === null ? null : (
+      <InlineAlert
+        tone="error"
+        title="设定更改尚未确认保存"
+        description={
+          <>
+            <p>{factOperationFailure.description}</p>
+            <p>请重新读取后核对状态，再决定是否重试；正文和已有历史没有改变。</p>
+            <p>问题编号：{factOperationFailure.supportId}</p>
+          </>
+        }
+        action={{ label: "重新读取设定", onClick: () => void load() }}
+      />
+    );
   }
 
   async function confirmFact(fact: StoryFact): Promise<void> {
@@ -1310,24 +1365,31 @@ export function StoryGovernancePage() {
 
   async function toggleFactLock(fact: StoryFact): Promise<void> {
     const snapshot = fact.toSnapshot();
-    if (busy || snapshot.status !== "formal") {
+    if (busy || factWriteFlightRef.current || snapshot.status !== "formal") {
       return;
     }
     setBusy(true);
-    const result = await runtime.story.factService.setLocked({
-      factId: fact.id,
-      locked: !snapshot.locked,
-      humanConfirmed: true,
-      expectedRevision: fact.revision,
-    });
-    setBusy(false);
-    if (!result.ok) {
-      setError(result.error);
-      return;
+    factWriteFlightRef.current = true;
+    setFactOperationFailure(null);
+    try {
+      const result = await runtime.story.factService.setLocked({
+        factId: fact.id,
+        locked: !snapshot.locked,
+        humanConfirmed: true,
+        expectedRevision: fact.revision,
+      });
+      if (!result.ok) {
+        throw result.error;
+      }
+      await refreshCausalStoryLinks(result.value);
+      setError(null);
+      await load();
+    } catch (cause) {
+      recordFactOperationFailure(cause);
+    } finally {
+      factWriteFlightRef.current = false;
+      setBusy(false);
     }
-    await refreshCausalStoryLinks(fact);
-    setError(null);
-    await load();
   }
 
   async function refreshCausalStoryLinks(fact: StoryFact): Promise<void> {
@@ -1876,6 +1938,7 @@ export function StoryGovernancePage() {
   function renderEntityGroupDetails(group: StoryEntityGroup) {
     return (
       <div className="story-entity-detail">
+        {renderFactOperationFailure()}
         <dl className="story-entity-detail__summary">
           <div>
             <dt>已记录字段</dt>
@@ -1909,6 +1972,14 @@ export function StoryGovernancePage() {
                 <Badge tone={factStatusTone(snapshot)}>{factStatusLabel(snapshot)}</Badge>
               </div>
               <p className="story-governance-copy">{storyFactContent(snapshot)}</p>
+              {snapshot.factType.includes("relationship") &&
+                snapshot.contentText !== null &&
+                storyFactContent(snapshot) !== snapshot.contentText && (
+                  <details>
+                    <summary>高级详情：原始关系记录</summary>
+                    <p className="story-governance-copy">{snapshot.contentText}</p>
+                  </details>
+                )}
               <dl className="story-entity-detail__metadata">
                 <div>
                   <dt>来源章节</dt>
@@ -1930,9 +2001,17 @@ export function StoryGovernancePage() {
                   <dd>{Math.round(snapshot.confidence * 100)}%</dd>
                 </div>
               </dl>
-              <blockquote className="story-source-quote">
-                {snapshot.source.excerpt ?? "这条记录没有保存可显示的精确原文片段。"}
-              </blockquote>
+              {snapshot.factType.includes("relationship") && snapshot.source.excerpt !== null ? (
+                <details>
+                  <summary>高级详情：完整原始依据</summary>
+                  <p>原始依据按保存时的范围完整保留，不会把同批其他句子拼入上方关系摘要。</p>
+                  <blockquote className="story-source-quote">{snapshot.source.excerpt}</blockquote>
+                </details>
+              ) : (
+                <blockquote className="story-source-quote">
+                  {snapshot.source.excerpt ?? "这条记录没有保存可显示的精确原文片段。"}
+                </blockquote>
+              )}
               {mergeNotice !== null && (
                 <InlineAlert
                   tone="warning"
@@ -2496,11 +2575,7 @@ export function StoryGovernancePage() {
             <div className="story-governance-grid">
               {[...factRevisions].reverse().map((entry) => {
                 const snapshot = entry.fact.toSnapshot();
-                const visibleContent =
-                  snapshot.contentText ??
-                  (typeof snapshot.structuredValue === "string"
-                    ? snapshot.structuredValue
-                    : "这个版本没有可直接显示的文字内容。");
+                const visibleContent = storyFactDisplayText(snapshot);
                 const isCurrent = snapshot.revision === historyFact?.revision;
                 return (
                   <Card key={String(snapshot.revision)}>
@@ -2510,6 +2585,14 @@ export function StoryGovernancePage() {
                     </CardHeader>
                     <CardContent>
                       <p className="story-governance-copy">{visibleContent}</p>
+                      {snapshot.factType.includes("relationship") &&
+                        snapshot.contentText !== null &&
+                        visibleContent !== snapshot.contentText && (
+                          <details>
+                            <summary>高级详情：原始关系记录</summary>
+                            <p className="story-governance-copy">{snapshot.contentText}</p>
+                          </details>
+                        )}
                     </CardContent>
                     {!isCurrent && historyFact !== null && (
                       <CardFooter>
@@ -4033,6 +4116,7 @@ export function StoryGovernancePage() {
               />
             )}
           </FormField>
+          {renderFactOperationFailure()}
         </div>
       </Dialog>
 
@@ -5084,12 +5168,7 @@ function simpleFactDuplicateKey(snapshot: StoryFactSnapshot): string | null {
   return normalized.length === 0 ? null : snapshot.factType + String.fromCharCode(0) + normalized;
 }
 function storyFactContent(snapshot: StoryFactSnapshot): string {
-  if (snapshot.contentText !== null && snapshot.contentText.trim().length > 0) {
-    return snapshot.contentText;
-  }
-  return snapshot.structuredValue === null
-    ? "（这条设定没有可显示的内容）"
-    : "这条设定已按结构化字段保存；当前没有可显示的文字说明。";
+  return storyFactDisplayText(snapshot);
 }
 
 function formalKindLabel(kind: FormalRecordKind): string {

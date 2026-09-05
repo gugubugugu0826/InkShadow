@@ -16,7 +16,7 @@ const creationEntries = [
     to: "/create/idea",
     eyebrow: "推荐首次使用",
     title: "从一个想法开始",
-    description: "写下一句话，AI 会先给你三种彼此隔离的开头方案，再一次只和你确认一个问题。",
+    description: "写下一句话，先比较三种开头方案，由你决定使用哪一版，再一步步继续创作。",
     action: "说出我的想法",
     icon: "sparkles",
     primary: true,

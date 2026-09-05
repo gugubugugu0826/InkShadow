@@ -20,12 +20,29 @@ const focusableSelector = [
   "input:not([disabled])",
   "select:not([disabled])",
   "textarea:not([disabled])",
+  "details > summary:first-of-type",
   '[tabindex]:not([tabindex="-1"])',
 ].join(",");
 
 function focusableElements(container: HTMLElement): HTMLElement[] {
   return Array.from(container.querySelectorAll<HTMLElement>(focusableSelector)).filter(
-    (element) => !element.hasAttribute("hidden") && element.getAttribute("aria-hidden") !== "true",
+    (element) => {
+      if (element.closest('[hidden], [inert], [aria-hidden="true"]') !== null) return false;
+      for (
+        let ancestor: HTMLElement | null = element;
+        ancestor !== null;
+        ancestor = ancestor.parentElement
+      ) {
+        const style = window.getComputedStyle(ancestor);
+        if (style.display === "none" || style.visibility === "hidden") return false;
+        if (ancestor instanceof HTMLDetailsElement && !ancestor.open) {
+          const summary = ancestor.querySelector(":scope > summary");
+          if (!summary?.contains(element)) return false;
+        }
+        if (ancestor === container) break;
+      }
+      return true;
+    },
   );
 }
 
@@ -140,17 +157,17 @@ function OverlayPanel({
         return;
       }
 
-      const first = focusable[0];
-      const last = focusable.at(-1);
       const active = document.activeElement;
-
-      if (event.shiftKey && (active === first || active === panel)) {
-        event.preventDefault();
-        last?.focus();
-      } else if (!event.shiftKey && active === last) {
-        event.preventDefault();
-        first?.focus();
-      }
+      if (event.defaultPrevented || (active !== null && !panel.contains(active))) return;
+      const activeIndex = focusable.findIndex((element) => element === active);
+      const nextIndex =
+        activeIndex < 0
+          ? event.shiftKey
+            ? focusable.length - 1
+            : 0
+          : (activeIndex + (event.shiftKey ? -1 : 1) + focusable.length) % focusable.length;
+      event.preventDefault();
+      focusable[nextIndex]?.focus();
     }
 
     document.addEventListener("keydown", handleKeyDown);

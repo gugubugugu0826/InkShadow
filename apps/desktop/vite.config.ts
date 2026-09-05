@@ -55,7 +55,10 @@ const PDFJS_WORKER_LICENSE_BANNER = `/*!
 // summary implementation bring the complete production graph to 7,487,568
 // bytes. No source maps, tests or duplicate runtimes are present, so add exactly
 // 32 KiB while continuing to count every startup and lazy chunk.
-const TOTAL_FRONTEND_BUDGET_BYTES = 7 * 1024 * 1024 + 160 * 1024;
+// v0.2.18: allocate 64 KiB for audited authority readbacks, lossless local
+// setting review and recoverable error feedback. No dependency was added;
+// per-entry/chunk/worker/CSS/file-count limits are unchanged.
+const TOTAL_FRONTEND_BUDGET_BYTES = 7 * 1024 * 1024 + 224 * 1024;
 
 function isPdfJsWorkerModule(facadeModuleId: string | null): boolean {
   return (

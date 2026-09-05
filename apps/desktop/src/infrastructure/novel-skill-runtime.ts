@@ -58,6 +58,8 @@ export interface NovelSkillProjectState {
 }
 
 export interface NovelSkillSelectionView {
+  /** Rules from the exact selected definition version, never inferred from output. */
+  readonly writingRequirements?: readonly string[];
   readonly displayName: string;
   readonly summary: string;
   readonly version: string;
@@ -707,7 +709,7 @@ export class TauriNovelSkillRuntime implements NovelSkillRuntimePort {
           "写作技能历史记录引用的版本已不可用。",
         );
       }
-      return selectionView(definition, item);
+      return selectionView(definition, item, snapshot.writingRequirements);
     });
     return Object.freeze({
       taskType: snapshot.taskType,
@@ -1172,6 +1174,16 @@ function organizeCustomSkillDraft(description: string): CustomNovelSkillDraft {
     .split(/[；;]/u)
     .map((entry) => entry.trim())
     .filter((entry) => entry.length > 0);
+  const unlabelledRules = source
+    .split(/[。；;!！?？\n]+/u)
+    .map((entry) => entry.trim())
+    .filter(
+      (entry) =>
+        entry.length > 0 &&
+        !/^(?:名称|技能名|适用任务|支持任务)[：:]/u.test(entry) &&
+        !/^(?:用于|适用于|用在|不适用于|不用于|不要用于|不得用于|禁止用于)/u.test(entry) &&
+        !/^(?:不要|不得)/u.test(entry),
+    );
   const prohibitions = [...source.matchAll(/(?:不要|不得)\s*([^。；;!！?？\n]+)/gu)].map(
     (match) => match[1]?.trim() ?? "",
   );
@@ -1179,7 +1191,7 @@ function organizeCustomSkillDraft(description: string): CustomNovelSkillDraft {
     displayName,
     summary: source.length <= 500 ? source : `${source.slice(0, 499)}…`,
     taskTypes: taskTypes.length > 0 ? taskTypes : ["continuation"],
-    rules: rules.length > 0 ? rules : ["遵循作者当前要求，并保持已保存正文的语气和连续性。"],
+    rules: rules.length > 0 ? rules : unlabelledRules,
     prohibitions: prohibitions.filter((entry) => entry.length > 0),
     precedence: 500,
     projectScope: "current_project",
@@ -1408,7 +1420,7 @@ function selectionViews(
           "写作技能整理结果缺少对应的历史版本。",
         );
       }
-      return selectionView(definition, item);
+      return selectionView(definition, item, compiled.instructionRules);
     }),
   );
 }
@@ -1420,6 +1432,7 @@ function selectionView(
     selectionReason: NovelSkillSelectionReason;
     estimatedTokens: number;
   }>,
+  writingRequirements?: CompiledNovelSkills["instructionRules"],
 ): NovelSkillSelectionView {
   return Object.freeze({
     displayName: definition.displayName,
@@ -1430,6 +1443,20 @@ function selectionView(
     included: item.included,
     selectionReason: item.selectionReason,
     estimatedTokens: item.estimatedTokens,
+    ...(writingRequirements === undefined
+      ? {}
+      : {
+          writingRequirements: Object.freeze(
+            writingRequirements
+              .filter(
+                ({ sourceSkillId, sourceSkillVersion }) =>
+                  item.included &&
+                  sourceSkillId === definition.skillId &&
+                  sourceSkillVersion === definition.version,
+              )
+              .map(({ text }) => text),
+          ),
+        }),
   });
 }
 

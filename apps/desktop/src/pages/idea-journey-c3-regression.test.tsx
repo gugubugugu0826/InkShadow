@@ -1427,7 +1427,7 @@ describe("C3 opening journey durability regressions", () => {
     const attempted = createJourney.mock.calls[0]?.[0];
     const run = readOpeningJourneyRun(attempted?.snapshot.openingRun);
     if (run === null) throw new Error("创建尝试没有形成内存开书运行编号。");
-    expect(await screen.findByText("本地旅程未能保存，本次没有发送")).toBeVisible();
+    expect(await screen.findByText("创作进度未能保存，本次没有发送")).toBeVisible();
     expect(screen.getByText(new RegExp(openingJourneySupportNumber(run), "u"))).toBeVisible();
     expect(harness.generate).not.toHaveBeenCalled();
     expect(await harness.runtime.creativeJourneys.listActive("idea")).toHaveLength(0);

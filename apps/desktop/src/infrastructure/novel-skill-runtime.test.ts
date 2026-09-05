@@ -22,6 +22,33 @@ const TRACE_ID = "019f9f4a-b3c7-7350-9226-000000000002";
 const INVOCATION_ID = "019f9f4a-b3c7-7350-9226-000000000003";
 
 describe("Novel Skill desktop runtime", () => {
+  it("preserves unlabelled natural writing requirements in the compiled request after persistence and restart", async () => {
+    const persistence = new MemoryNovelSkillPersistence();
+    const runtime = new TauriNovelSkillRuntime(persistence, { now: () => NOW });
+    await runtime.initialize();
+    const draft = runtime.organizeCustomSkillDraft(
+      "名称：克制叙述。用于续写。每段最多使用一个比喻。用人物动作承接情绪。",
+    );
+    expect(draft.rules).toEqual(["每段最多使用一个比喻", "用人物动作承接情绪"]);
+    const created = await runtime.createCustomSkill(PROJECT_ID, draft);
+    const custom = created.methods.find((method) => method.displayName === "克制叙述");
+    if (custom === undefined) throw new Error("未读取到新技能");
+    expect(custom.enabled).toBe(false);
+    await runtime.setMethodEnabled(PROJECT_ID, custom.skillId, true);
+    const reopened = new TauriNovelSkillRuntime(persistence, { now: () => NOW });
+    await reopened.initialize();
+    const prepared = await reopened.prepareInvocation({
+      projectId: PROJECT_ID,
+      taskType: "continuation",
+      invocationMode: "draft",
+      availableContextLayers: ["current_task"],
+    });
+    expect(prepared.promptSection).toContain("每段最多使用一个比喻");
+    expect(prepared.promptSection).toContain("用人物动作承接情绪");
+    expect(
+      prepared.methods.find(({ displayName }) => displayName === "克制叙述")?.writingRequirements,
+    ).toEqual(["每段最多使用一个比喻", "用人物动作承接情绪"]);
+  });
   it("bootstraps idempotently, keeps every method off, and applies only explicit author opt-in", async () => {
     const persistence = new MemoryNovelSkillPersistence();
     const runtime = new TauriNovelSkillRuntime(persistence, { now: () => NOW });
@@ -476,6 +503,7 @@ class MemoryNovelSkillPersistence implements NovelSkillRuntimePersistence {
       selectionHash: input.compiled.selectionHash,
       configuration: input.compiled.configuration,
       items: input.compiled.items,
+      writingRequirements: input.compiled.instructionRules,
       createdAt: input.createdAt,
     });
     this.snapshots.set(input.contextTraceId, snapshot);

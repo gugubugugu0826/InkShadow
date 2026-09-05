@@ -209,9 +209,9 @@ function privacyDisclosure(
 ): string {
   const actualDestination = local ? "只在本机端点运行" : "发送到所选远程供应商";
   const recordedDestination =
-    profile === null ? "unknown" : destinationLabel(profile.dataDestination);
-  const retention = profile === null ? "unknown" : retentionLabel(profile.retentionPolicy);
-  const training = profile === null ? "unknown" : trainingLabel(profile.trainingPolicy);
+    profile === null ? "尚未确认" : destinationLabel(profile.dataDestination);
+  const retention = profile === null ? "尚未确认" : retentionLabel(profile.retentionPolicy);
+  const training = profile === null ? "尚未确认" : trainingLabel(profile.trainingPolicy);
   const authentication = usesConnectionCredential
     ? "连接凭据仅用于请求鉴权，不进入消息正文"
     : "当前请求不使用连接凭据";
@@ -221,14 +221,14 @@ function privacyDisclosure(
 function destinationLabel(value: ModelCostPrivacyProfile["dataDestination"]): string {
   if (value === "local") return "本机";
   if (value === "remote") return "远程";
-  return "unknown";
+  return "尚未确认";
 }
 
 function retentionLabel(value: ModelCostPrivacyProfile["retentionPolicy"]): string {
   if (value === "none") return "不保留";
   if (value === "temporary") return "临时保留";
   if (value === "provider_default") return "遵循供应商默认政策";
-  return "unknown";
+  return "尚未确认";
 }
 
 function trainingLabel(value: ModelCostPrivacyProfile["trainingPolicy"]): string {
@@ -236,7 +236,7 @@ function trainingLabel(value: ModelCostPrivacyProfile["trainingPolicy"]): string
   if (value === "opt_out") return "已选择退出训练";
   if (value === "may_be_used") return "可能用于训练";
   if (value === "provider_default") return "遵循供应商默认政策";
-  return "unknown";
+  return "尚未确认";
 }
 
 function disclosureChanged(): ModelHubTaskCapabilityProbeDisclosureError {

@@ -238,6 +238,7 @@ describe("NovelSkillSqliteStore", () => {
           contextTraceId: TRACE_ID,
           modelInvocationId: MODEL_INVOCATION_ID,
           selectionHash: compiled.selectionHash,
+          writingRequirements: compiled.instructionRules,
           items: [{ skillId: scene.skillId, included: true }],
         });
         await expect(

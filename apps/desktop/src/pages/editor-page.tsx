@@ -1,4 +1,8 @@
 import {
+  contextEntryExcerpt,
+  formatRequirementConfirmationSummary,
+} from "../infrastructure/story-context-presentation";
+import {
   useCallback,
   useEffect,
   useLayoutEffect,
@@ -397,7 +401,7 @@ function EditorAssistantResizeSeparator({
       aria-label={`调整正文与${assistantName}宽度`}
       aria-controls="editor-ai-assistant-panel"
       aria-orientation="vertical"
-      aria-valuemin={EDITOR_ASSISTANT_MIN_WIDTH_PX}
+      aria-valuemin={Math.min(EDITOR_ASSISTANT_MIN_WIDTH_PX, maxWidth)}
       aria-valuemax={maxWidth}
       aria-valuenow={width}
       aria-valuetext={`${assistantName}宽度 ${String(width)} 像素`}
@@ -1172,6 +1176,26 @@ export function EditorPage() {
   });
   const [privacyChangeTarget, setPrivacyChangeTarget] = useState<ChapterPrivacyMode | null>(null);
   const [privacyChangeBusy, setPrivacyChangeBusy] = useState(false);
+  const privacyChangeIdentityRef = useRef<{
+    routeKey: string;
+    chapterId: string;
+    privacyRevision: number;
+  } | null>(null);
+  const privacyChangeFlightRef = useRef<symbol | null>(null);
+  useEffect(() => {
+    privacyChangeIdentityRef.current = null;
+    privacyChangeFlightRef.current = null;
+    let active = true;
+    queueMicrotask(() => {
+      if (!active) return;
+      setPrivacyChangeTarget(null);
+      setPrivacyChangeBusy(false);
+      setPrivacyChangeFailure(null);
+    });
+    return () => {
+      active = false;
+    };
+  }, [editorRouteKey]);
   const [privacyChangeFailure, setPrivacyChangeFailure] = useState<Readonly<{
     description: string;
     supportId: string;
@@ -1272,15 +1296,21 @@ export function EditorPage() {
     const parsedColumnGap = Number.parseFloat(window.getComputedStyle(workspace).columnGap);
     const columnGap = Number.isFinite(parsedColumnGap) ? parsedColumnGap : 0;
     const writingOffset = Math.max(0, writingRect.left - workspaceRect.left);
-    const availableWidth = Math.floor(
-      workspaceRect.width - writingOffset - EDITOR_WRITING_MIN_WIDTH_PX - columnGap,
+    const availableWidth = Math.max(
+      1,
+      Math.floor(
+        Math.min(
+          workspaceRect.width -
+            writingOffset -
+            Math.max(EDITOR_WRITING_MIN_WIDTH_PX, workspaceRect.width * 0.56) -
+            columnGap,
+          workspaceRect.width * 0.29 - columnGap * 2,
+        ),
+      ),
     );
     return {
-      min: EDITOR_ASSISTANT_MIN_WIDTH_PX,
-      max: Math.max(
-        EDITOR_ASSISTANT_MIN_WIDTH_PX,
-        Math.min(EDITOR_ASSISTANT_MAX_WIDTH_PX, availableWidth),
-      ),
+      min: Math.min(EDITOR_ASSISTANT_MIN_WIDTH_PX, availableWidth),
+      max: Math.min(EDITOR_ASSISTANT_MAX_WIDTH_PX, availableWidth),
     };
   }, []);
 
@@ -5891,6 +5921,13 @@ export function EditorPage() {
   }
 
   function openChapterPrivacyDialog(target: ChapterPrivacyMode): void {
+    const stableChapter = chapterRef.current;
+    if (stableChapter?.id !== chapterId || stableChapter.projectId !== projectId) return;
+    privacyChangeIdentityRef.current = {
+      routeKey: editorRouteKey,
+      chapterId: stableChapter.id,
+      privacyRevision: stableChapter.privacyRevision,
+    };
     setError(null);
     setPrivacyChangeFailure(null);
     setPrivacyChangeTarget(target);
@@ -5920,9 +5957,12 @@ export function EditorPage() {
 
   async function confirmChapterPrivacyChange(): Promise<void> {
     const stableChapter = chapterRef.current;
+    const identity = privacyChangeIdentityRef.current;
     if (
+      privacyChangeFlightRef.current !== null ||
+      identity?.routeKey !== routeIdentityRef.current ||
+      stableChapter?.id !== identity.chapterId ||
       authorityWriteBlockedRef.current ||
-      stableChapter === null ||
       privacyChangeTarget === null ||
       stableChapter.privacyMode === privacyChangeTarget ||
       project?.status !== "active"
@@ -5930,6 +5970,12 @@ export function EditorPage() {
       return;
     }
 
+    const flight = Symbol("chapter-privacy");
+    privacyChangeFlightRef.current = flight;
+    const isCurrent = (): boolean =>
+      privacyChangeFlightRef.current === flight &&
+      routeIdentityRef.current === identity.routeKey &&
+      chapterRef.current?.id === identity.chapterId;
     setPrivacyChangeBusy(true);
     setPrivacyChangeFailure(null);
     setError(null);
@@ -5937,8 +5983,21 @@ export function EditorPage() {
       const result = await runtime.useCases.setChapterPrivacy.execute({
         chapterId: stableChapter.id,
         privacyMode: privacyChangeTarget,
-        expectedPrivacyRevision: stableChapter.privacyRevision,
+        expectedPrivacyRevision: identity.privacyRevision,
       });
+      if (!isCurrent()) {
+        if (!result.ok)
+          recordSafeOperationIncident({
+            operation: "chapter_privacy",
+            stage: "persist_result",
+            cause: result.error,
+            projectId: stableChapter.projectId,
+            chapterId: stableChapter.id,
+            dispatched: false,
+            occurredAt: runtime.clock.now(),
+          });
+        return;
+      }
       if (!result.ok) {
         recordChapterPrivacyFailure(stableChapter, result.error);
         return;
@@ -5966,9 +6025,22 @@ export function EditorPage() {
         );
       }
     } catch (cause: unknown) {
-      recordChapterPrivacyFailure(stableChapter, cause);
+      if (isCurrent()) recordChapterPrivacyFailure(stableChapter, cause);
+      else
+        recordSafeOperationIncident({
+          operation: "chapter_privacy",
+          stage: "persist_result",
+          cause,
+          projectId: stableChapter.projectId,
+          chapterId: stableChapter.id,
+          dispatched: false,
+          occurredAt: runtime.clock.now(),
+        });
     } finally {
-      setPrivacyChangeBusy(false);
+      if (isCurrent()) {
+        privacyChangeFlightRef.current = null;
+        setPrivacyChangeBusy(false);
+      }
     }
   }
 
@@ -6502,7 +6574,7 @@ export function EditorPage() {
               }`}
         </strong>
         <Button variant="ghost" onClick={() => setNovelSkillDrawerOpen(true)}>
-          设置
+          写作技能设置
         </Button>
       </div>
       {displayedNovelSkillPreparation === null ? (
@@ -6526,6 +6598,11 @@ export function EditorPage() {
             </p>
           )}
         </>
+      )}
+      {!novelSkillSummaryLoading && enabledNovelSkills.length === 0 && (
+        <p className="candidate-panel__hint">
+          首次使用：打开“写作技能设置”，先选择一项适合你的写法并启用，再在发送前核对本次采用情况。全局设置不会替你启用技能。
+        </p>
       )}
       <p className="candidate-panel__hint">选区改写、润色、扩写和缩写暂不采用写作技能。</p>
     </section>
@@ -7882,9 +7959,7 @@ export function EditorPage() {
                               </span>
                             </div>
                             <p>{contextSelectionReasonLabel(entry)}</p>
-                            <p className="candidate-panel__hint">
-                              {contextEntryExcerpt(entry.content)}
-                            </p>
+                            <p className="candidate-panel__hint">{contextEntryExcerpt(entry)}</p>
                             {entry.evidence.length > 0 ? (
                               <ul className="context-sources__evidence">
                                 {uniqueContextSourceTypes(entry.evidence).map((sourceType) => (
@@ -8732,6 +8807,9 @@ export function EditorPage() {
                 loading={directDisclosureSaving}
                 disabled={
                   !generationPlan?.preflight.canStart ||
+                  (chapter?.isLocalOnly === true &&
+                    generationPlan.executionMode !== "local_demo" &&
+                    continuationDisclosure?.dataDestination !== "local") ||
                   budgetSaving ||
                   directDisclosureSaving ||
                   candidateBusy
@@ -8755,6 +8833,13 @@ export function EditorPage() {
                     ? "当前只因网络离线而阻断；可保存不含正文和创作指令的待执行记录，联网后重新检查并确认。"
                     : "请按下列操作修复后重新检查；当前不会调用 AI 服务，但正文仍可编辑和保存。"
                 }
+              />
+            )}
+            {chapter?.isLocalOnly === true && (
+              <InlineAlert
+                tone="warning"
+                title="仅限本机，不能发送"
+                description="私密章节不能发送到远程服务。只有经过验证的本机模型可在本地处理，旧的远程确认不能继续使用。"
               />
             )}
 
@@ -9217,10 +9302,6 @@ function generationLengthSummary(contract: ContinuationOutputContract): string {
       : "中 · 一个完整场景";
 }
 
-function formatRequirementConfirmationSummary(requirement: string | null | undefined): string {
-  return requirement?.normalize("NFKC").trim().length ? "已填写要求" : "未填写额外要求";
-}
-
 function continuationConfirmationScope(
   plan: PreparedGenerationPlan,
   disclosure: ContinuationGenerationDisclosure | null,
@@ -9374,12 +9455,6 @@ function contextEntryStatusLabel(
   if (entry.discardedReason === "duplicate_source") return "已合并，未重复发送";
   if (entry.discardedReason === "token_budget_exhausted") return "篇幅预算未使用";
   return "未使用";
-}
-
-function contextEntryExcerpt(content: string): string {
-  const normalized = content.replace(/\s+/gu, " ").trim();
-  if (normalized.length === 0) return "这项资料没有可展示的文字摘要。";
-  return normalized.length <= 140 ? normalized : `${normalized.slice(0, 140)}…`;
 }
 
 function uniqueContextSourceTypes(

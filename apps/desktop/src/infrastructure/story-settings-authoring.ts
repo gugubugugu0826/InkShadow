@@ -57,7 +57,15 @@ export type NaturalLanguageSettingCandidate =
     }>;
 
 export type BulkNaturalLanguageSettingCategory =
-  "character_identity" | "relationship" | "location" | "world_rule" | "writing_rule";
+  | "character_identity"
+  | "character_attribute"
+  | "character_state"
+  | "character_ability"
+  | "event"
+  | "relationship"
+  | "location"
+  | "world_rule"
+  | "writing_rule";
 
 export interface BulkNaturalLanguageSettingDraft {
   readonly id: string;
@@ -90,6 +98,15 @@ export interface StorySettingsExportProjection {
 
 export function parseNaturalLanguageSetting(value: string): NaturalLanguageSettingCandidate {
   const sourceText = normalizeNaturalLanguageInput(value);
+  // The single-statement contract must not silently accept a paragraph prefix.
+  if (/[。！？!?；;]\s*[^。！？!?；;\s]/u.test(sourceText)) {
+    return Object.freeze({
+      kind: "manual",
+      sourceText,
+      missingInformation: "包含多条设定，请逐句拆分并核对，每个原句都会保留。",
+      suggestions: Object.freeze(["使用逐条整理入口核对全部句子。"]),
+    });
+  }
   const relationship =
     /^(.{1,40}?)(?:和|与)(.{1,40}?)(?:是|为)(.{1,32}?)(?:关系)?(?:[，,。；;]|$)(?:.*?(?:在|从)(.{1,40}?)(?:就)?(?:认识|相识|开始))?/u.exec(
       sourceText,
@@ -254,7 +271,38 @@ function bulkCategory(
   sourceText: string,
   candidate: NaturalLanguageSettingCandidate,
 ): BulkNaturalLanguageSettingCategory | null {
+  // Ambiguity, questions and negation remain author-reviewed, never inferred facts.
+  if (
+    /(?:可能|也许|或许|似乎|据说|如果|并非|并没有|不是|不曾|未曾|没有|未必|吗[？?]?|[？?])/u.test(
+      sourceText,
+    )
+  )
+    return null;
   if (isWritingConstraint(sourceText)) return "writing_rule";
+  if (
+    /^[\p{Script=Han}A-Za-z·]{1,20}?(?:目前|现在|此时)(?:受了|处于|身受|正在|已经|已)[^。！？]{1,80}[。！]?$/u.test(
+      sourceText,
+    )
+  )
+    return "character_state";
+  if (
+    /^[\p{Script=Han}A-Za-z·]{1,20}?(?:能够|能)(?:听见|看见|感知|操控|使用|读懂)[^。！？]{1,80}[。！]?$/u.test(
+      sourceText,
+    )
+  )
+    return "character_ability";
+  if (
+    /^[\p{Script=Han}A-Za-z·]{1,20}?(?:左臂|右臂|左腿|右腿|双眼|左眼|右眼|身高|体重)(?:残废|失明|受损|为|是|有)[^。！？]{0,80}[。！]?$/u.test(
+      sourceText,
+    )
+  )
+    return "character_attribute";
+  if (
+    /^[\p{Script=Han}A-Za-z·]{1,20}?(?:昨晚|昨天|今早|昨日|今天)(?:烧毁|离开|抵达|发现|遇见|救下|杀死|丢失)了?[^。！？]{1,80}[。！]?$/u.test(
+      sourceText,
+    )
+  )
+    return "event";
   if (candidate.kind === "relationship") return "relationship";
   if (candidate.kind === "character_profile" || candidate.kind === "character_voice") {
     return "character_identity";
@@ -570,6 +618,43 @@ export function isRelationshipFact(snapshot: StoryFactSnapshot): boolean {
     snapshot.factType === "relationship" ||
     snapshot.factType === "core_relationship" ||
     snapshot.factType === "relationship_change"
+  );
+}
+
+/** Read-only ordinary UI projection. Historical source text and extension fields stay intact. */
+export function storyFactDisplayText(snapshot: StoryFactSnapshot): string {
+  const original = snapshot.contentText?.trim() ?? "";
+  if (isRelationshipFact(snapshot)) {
+    const relationship = readRelationship(snapshot);
+    if (
+      original.length > MAX_NATURAL_LANGUAGE_SETTING ||
+      /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/u.test(original)
+    ) {
+      return "这条历史关系说明需要单独核对，完整原句已保留，请查看高级详情。";
+    }
+    const sentences = (
+      original.length === 0 ? [] : parseBulkNaturalLanguageSettings(original)
+    ).filter(
+      ({ category, sourceText }) =>
+        category === "relationship" &&
+        (relationship === null || sourceText.includes(relationship.type)),
+    );
+    if (sentences.length === 1) return sentences[0]?.sourceText ?? original;
+    if (
+      /(?:character|relationship)\.[A-Za-z0-9_.-]+|[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f-]+/iu.test(
+        original,
+      )
+    ) {
+      return `${relationship?.type ?? "人物关系"}（人物名称请在关系卡中核对）`;
+    }
+    if (sentences.length > 1)
+      return "这条历史记录包含多段关系说明，请到人物关系卡逐条核对；完整原句已保留。";
+  }
+  return (
+    original ||
+    (snapshot.structuredValue === null
+      ? "（这条设定没有可显示的内容）"
+      : "这条设定已按结构化字段保存；当前没有可显示的文字说明。")
   );
 }
 

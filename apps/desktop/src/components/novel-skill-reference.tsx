@@ -68,6 +68,9 @@ function NovelSkillReferenceList({
         </div>
         <Badge tone={included.length > 0 ? "warning" : "neutral"}>{included.length} 项采用</Badge>
       </div>
+      <p>
+        以下是本次要求模型如何写，不代表成文已经达到这些效果。安全规则、正文与已锁定设定始终优先。
+      </p>
       {included.length === 0 ? (
         <p>本次没有采用写作技能；故事资料和当前任务仍按原有安全规则处理。</p>
       ) : (
@@ -76,6 +79,18 @@ function NovelSkillReferenceList({
             <li key={`${method.displayName}@${method.version}`}>
               <strong>{method.displayName}</strong> · 版本 {method.version}
               <p>{method.summary}</p>
+              {method.writingRequirements !== undefined && method.writingRequirements.length > 0 ? (
+                <details>
+                  <summary>查看本次写法要求</summary>
+                  <ul>
+                    {method.writingRequirements.map((rule, index) => (
+                      <li key={index}>{rule}</li>
+                    ))}
+                  </ul>
+                </details>
+              ) : (
+                <p>这条历史记录没有可核对的具体写法要求。</p>
+              )}
               <Badge tone="success">已采用</Badge>
             </li>
           ))}

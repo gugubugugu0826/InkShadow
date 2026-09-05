@@ -68,7 +68,7 @@ const expectedUnsignedReleaseCandidateSteps = [
   },
 ];
 
-test("0.2.17 authoritative application versions stay aligned", async () => {
+test("0.2.18 authoritative application versions stay aligned", async () => {
   const [rootSource, desktopSource, tauriSource, cargoManifest, cargoLock, runtime] =
     await Promise.all([
       readFile(path.join(workspaceRoot, "package.json"), "utf8"),
@@ -84,16 +84,16 @@ test("0.2.17 authoritative application versions stay aligned", async () => {
   const rootManifest = JSON.parse(rootSource);
   const desktopManifest = JSON.parse(desktopSource);
   const tauriConfiguration = JSON.parse(tauriSource);
-  const expectedVersion = "0.2.17";
+  const expectedVersion = "0.2.18";
   assert.equal(rootManifest.version, expectedVersion);
   assert.equal(desktopManifest.version, expectedVersion);
   assert.equal(tauriConfiguration.version, expectedVersion);
   assert.equal(/^\s*version\s*=\s*"([^"]+)"\s*$/mu.exec(cargoManifest)?.[1], expectedVersion);
   assert.match(
     cargoLock,
-    /\[\[package\]\]\r?\nname = "inkshadow-desktop"\r?\nversion = "0\.2\.17"/u,
+    /\[\[package\]\]\r?\nname = "inkshadow-desktop"\r?\nversion = "0\.2\.18"/u,
   );
-  assert.match(runtime, /appVersion:\s*"0\.2\.17"/u);
+  assert.match(runtime, /appVersion:\s*"0\.2\.18"/u);
   assert.equal(
     rootManifest.scripts["release:verify:installer-version"],
     "node scripts/check-windows-installer-version.mjs",
@@ -101,7 +101,7 @@ test("0.2.17 authoritative application versions stay aligned", async () => {
   assert.deepEqual(UNSIGNED_RELEASE_CANDIDATE_STEPS, expectedUnsignedReleaseCandidateSteps);
 });
 
-test("Windows installer contract accepts only the 0.2.17 branded AMD64 unsigned package", () => {
+test("Windows installer contract accepts only the 0.2.18 branded AMD64 unsigned package", () => {
   assert.doesNotThrow(() =>
     validateTauriConfiguration({
       productName: EXPECTED_PRODUCT_NAME,
@@ -124,8 +124,8 @@ test("Windows installer contract accepts only the 0.2.17 branded AMD64 unsigned 
     validMetadata,
   );
   assert.throws(() => decodeWindowsInstallerMetadata("īӰ InkShadow"), /canonical Base64/u);
-  assert.equal(normalizeWindowsVersion("0.2.17.0"), EXPECTED_RELEASE_VERSION);
-  assert.equal(normalizeWindowsVersion("0.2.17"), EXPECTED_RELEASE_VERSION);
+  assert.equal(normalizeWindowsVersion("0.2.18.0"), EXPECTED_RELEASE_VERSION);
+  assert.equal(normalizeWindowsVersion("0.2.18"), EXPECTED_RELEASE_VERSION);
 });
 
 test("Windows installer inspection does not inherit an incompatible PowerShell module path", () => {
@@ -137,7 +137,7 @@ test("Windows installer inspection does not inherit an incompatible PowerShell m
       INKSHADOW_INSTALLER_PATH: "stale-installer",
       INKSHADOW_APPLICATION_PATH: "stale-application",
     },
-    "C:\\release\\墨影 InkShadow_0.2.17_x64-setup.exe",
+    "C:\\release\\墨影 InkShadow_0.2.18_x64-setup.exe",
     "C:\\release\\inkshadow-desktop.exe",
   );
 
@@ -148,14 +148,14 @@ test("Windows installer inspection does not inherit an incompatible PowerShell m
   assert.equal(environment.Path, "C:\\Windows\\System32");
   assert.equal(
     environment.INKSHADOW_INSTALLER_PATH,
-    "C:\\release\\墨影 InkShadow_0.2.17_x64-setup.exe",
+    "C:\\release\\墨影 InkShadow_0.2.18_x64-setup.exe",
   );
   assert.equal(environment.INKSHADOW_APPLICATION_PATH, "C:\\release\\inkshadow-desktop.exe");
 });
 
 test("Windows installer contract rejects wrong identity, version, architecture and signature", () => {
   assert.throws(
-    () => validateTauriConfiguration({ productName: "InkShadow", version: "0.2.17" }),
+    () => validateTauriConfiguration({ productName: "InkShadow", version: "0.2.18" }),
     /product name/u,
   );
   assert.throws(
@@ -165,8 +165,8 @@ test("Windows installer contract rejects wrong identity, version, architecture a
   const validMetadata = {
     ProductName: EXPECTED_PRODUCT_NAME,
     FileDescription: EXPECTED_FILE_DESCRIPTION,
-    ProductVersion: "0.2.17.0",
-    FileVersion: "0.2.17.0",
+    ProductVersion: "0.2.18.0",
+    FileVersion: "0.2.18.0",
     ApplicationMachine: EXPECTED_PE_MACHINE,
     SignatureStatus: "NotSigned",
   };
@@ -184,7 +184,7 @@ test("Windows installer contract rejects wrong identity, version, architecture a
       `${field} must be rejected`,
     );
   }
-  assert.equal(normalizeWindowsVersion("0.2.17.1"), null);
+  assert.equal(normalizeWindowsVersion("0.2.18.1"), null);
   assert.equal(normalizeWindowsVersion("not-a-version"), null);
 });
 
@@ -819,7 +819,7 @@ test("Vite and release attestation share the audited entry, async and aggregate 
     viteAsyncBudget.replaceAll(/\s+/gu, ""),
     "the build and release attestation must reject the same oversized async chunk",
   );
-  assert.equal(viteBudget.replaceAll(/\s+/gu, ""), "7*1024*1024+160*1024");
+  assert.equal(viteBudget.replaceAll(/\s+/gu, ""), "7*1024*1024+224*1024");
   assert.equal(
     attestationBudget.replaceAll(/\s+/gu, ""),
     viteBudget.replaceAll(/\s+/gu, ""),

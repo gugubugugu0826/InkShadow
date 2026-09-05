@@ -13,6 +13,47 @@ import { NovelSkillPanel } from "./novel-skill-panel";
 const PROJECT_ID = "019f9f4a-b3c7-7350-9226-000000000001";
 
 describe("NovelSkillPanel", () => {
+  it.each([
+    ["NOVEL_SKILL_BINDING_CONFLICT", "技能与当前作品的关联未完成"],
+    ["NOVEL_SKILL_DEFINITION_CONFLICT", "技能内容保存未完成"],
+  ])("reports the precise %s creation failure while retaining input", async (code, message) => {
+    const user = userEvent.setup();
+    const createCustomSkill = vi.fn(() =>
+      Promise.reject(Object.assign(new Error("受控写入失败"), { code })),
+    );
+    const runtime = {
+      listProjectState: vi.fn(() => Promise.resolve(projectState(false))),
+      createCustomSkill,
+    } as unknown as NovelSkillRuntimePort;
+    render(<NovelSkillPanel projectId={PROJECT_ID} runtime={runtime} />);
+    await user.click(await screen.findByRole("button", { name: "创建技能" }));
+    await user.type(screen.getByRole("textbox", { name: "技能名称" }), "克制对白");
+    await user.type(screen.getByRole("textbox", { name: "用途说明" }), "用动作承接情绪");
+    await user.type(screen.getByRole("textbox", { name: "写作规则" }), "对白保持简短。");
+    const form = screen.getByRole("textbox", { name: "技能名称" }).closest("form");
+    if (form === null) throw new Error("未取得技能表单。");
+    await user.click(within(form).getByRole("button", { name: "创建技能" }));
+    expect(await screen.findByText(new RegExp(message, "u"))).toBeVisible();
+    expect(screen.getByRole("textbox", { name: "技能名称" })).toHaveValue("克制对白");
+    expect(screen.getByRole("textbox", { name: "写作规则" })).toHaveValue("对白保持简短。");
+    expect(createCustomSkill).toHaveBeenCalledOnce();
+    expect(screen.queryByText(/已保存“克制对白”/u)).not.toBeInTheDocument();
+  });
+  it("explains incomplete creation before attempting to save an empty skill", async () => {
+    const user = userEvent.setup();
+    const createCustomSkill = vi.fn(() => Promise.reject(new Error("Invalid empty custom skill")));
+    const runtime = {
+      listProjectState: vi.fn(() => Promise.resolve(projectState(false))),
+      createCustomSkill,
+    } as unknown as NovelSkillRuntimePort;
+    render(<NovelSkillPanel projectId={PROJECT_ID} runtime={runtime} />);
+    await user.click(await screen.findByRole("button", { name: "创建技能" }));
+    const form = screen.getByRole("textbox", { name: "技能名称" }).closest("form");
+    if (form === null) throw new Error("未找到创建表单");
+    await user.click(within(form).getByRole("button", { name: "创建技能" }));
+    expect(await screen.findByText(/请填写技能名称、用途说明和至少一条写作规则/u)).toBeVisible();
+    expect(createCustomSkill).not.toHaveBeenCalled();
+  });
   it("separates built-in and project-enabled writing skills and lets the author enable then disable one", async () => {
     const user = userEvent.setup();
     let enabled = false;

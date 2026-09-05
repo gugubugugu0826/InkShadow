@@ -199,6 +199,41 @@ test("opens character details and story evidence with every standard activation 
   await expect(originalEvidenceButton).toBeFocused();
 });
 
+test("persists a locked story rule across refresh and accepts keyboard and touch changes", async ({
+  page,
+}) => {
+  await createProject(page, "锁定规则浏览器验收");
+  const href = await page.getByRole("link", { name: "打开", exact: true }).getAttribute("href");
+  const projectId = /^#\/projects\/([^/]+)$/u.exec(href ?? "")?.[1];
+  if (projectId === undefined) throw new Error("未取得测试作品标识。");
+  await page.goto(`/#/projects/${projectId}/story`);
+  await page.getByRole("tab", { name: "世界与规则" }).click();
+  await page.getByRole("button", { name: "添加世界设定" }).first().click();
+  const form = page.getByRole("dialog", { name: "添加故事设定" });
+  await form.getByRole("combobox", { name: "设定类型" }).selectOption("world_rule");
+  await form.getByRole("textbox", { name: "内容" }).fill("魔法不能复活死者。");
+  await form.getByRole("combobox", { name: /^AI 写作时的优先级/u }).selectOption("locked");
+  await form.getByRole("button", { name: "确认保存" }).click();
+  await page.getByRole("button", { name: "查看设定详情" }).press("Enter");
+  let detail = page.getByRole("dialog", { name: "世界硬规则" });
+  await expect(detail.getByText("已确认并锁定", { exact: true }).first()).toBeVisible();
+  await page.reload();
+  await page.getByRole("tab", { name: "世界与规则" }).click();
+  await page.getByRole("button", { name: "查看设定详情" }).tap();
+  detail = page.getByRole("dialog", { name: "世界硬规则" });
+  await expect(detail.getByText("已确认并锁定", { exact: true }).first()).toBeVisible();
+  await detail.getByRole("button", { name: "取消锁定" }).press("Space");
+  await expect(detail.getByRole("button", { name: "锁定为硬规则" })).toBeVisible();
+  await page.reload();
+  await page.getByRole("tab", { name: "世界与规则" }).click();
+  await page.getByRole("button", { name: "查看设定详情" }).click();
+  detail = page.getByRole("dialog", { name: "世界硬规则" });
+  await expect(detail.getByRole("button", { name: "锁定为硬规则" })).toBeVisible();
+  await detail.getByRole("button", { name: "锁定为硬规则" }).tap();
+  await expect(detail.getByText("已确认并锁定", { exact: true }).first()).toBeVisible();
+  await expect(detail).toContainText("魔法不能复活死者。");
+});
+
 async function createProject(page: Page, name: string): Promise<void> {
   await page.getByRole("button", { name: "新建项目" }).first().click();
   const dialog = page.getByRole("dialog", { name: "新建项目" });

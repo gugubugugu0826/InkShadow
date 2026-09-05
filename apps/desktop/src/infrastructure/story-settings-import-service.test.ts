@@ -360,6 +360,20 @@ describe("StorySettingsImportService", () => {
         expect.objectContaining({ source: "作者导入的写作约定" }),
       ]),
     );
+    const relationshipText = await executor.select<{ content_text: string }>(
+      "SELECT content_text FROM story_facts WHERE fact_type = 'core_relationship'",
+    );
+    const fromName = template.characters.find(
+      ({ id }) => id === firstRelationship.fromCharacterRef,
+    )?.name;
+    const toName = template.characters.find(
+      ({ id }) => id === firstRelationship.toCharacterRef,
+    )?.name;
+    if (fromName === undefined || toName === undefined) throw new Error("关系夹具缺少人物名称。");
+    expect(relationshipText[0]?.content_text).toBe(
+      `${fromName}和${toName}：${firstRelationship.relationshipType}`,
+    );
+    expect(relationshipText[0]?.content_text).not.toContain(firstRelationship.fromCharacterRef);
     await executor.close();
   });
 

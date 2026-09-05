@@ -3901,7 +3901,7 @@ export function SettingsPage() {
       new Map(
         routingVisibility.tasks.map(({ definition, status }) => [
           definition.task,
-          status === "configured"
+          status !== "configured"
             ? (recommendConnectedModelsForTask(definition.task, routingVisibility.models)[0] ??
               null)
             : null,
@@ -3921,6 +3921,10 @@ export function SettingsPage() {
       const entry = model.catalogEntry;
       const connection = model.connection;
       if (
+        !connection.enabled ||
+        connection.connectionStatus !== "ready" ||
+        entry.availability !== "available" ||
+        entry.lifecycle === "deprecated" ||
         isRetiredModelProviderConnection(connection) ||
         (entry.staleAfter !== null && entry.staleAfter <= now)
       ) {
@@ -3946,9 +3950,7 @@ export function SettingsPage() {
           appSupport:
             applicationVerifiedCapabilities.length > 0 &&
             model.connectionUsable &&
-            connection.connectionStatus === "ready" &&
-            connection.catalogSyncStatus === "succeeded" &&
-            entry.availability === "available"
+            connection.catalogSyncStatus === "succeeded"
               ? "verified_in_app"
               : "verification_required",
         }),
@@ -4165,13 +4167,15 @@ export function SettingsPage() {
     selectedModelId: selectedModel,
   });
   const selectableRoutingCatalog = routingCatalog.filter(
-    ({ id, availability, connectionId }) =>
+    ({ id, availability, connectionId, lifecycle, staleAfter }) =>
       availability === "available" &&
+      lifecycle !== "deprecated" &&
+      (staleAfter === null || staleAfter > runtime.clock.now()) &&
       hubConnections.some(
         (connection) =>
           connection.id === connectionId &&
           connection.enabled &&
-          connection.connectionStatus !== "disabled" &&
+          connection.connectionStatus === "ready" &&
           !isRetiredModelProviderConnection(connection),
       ) &&
       (novelRoutePrivacy !== "local_only" || localCatalogEntryIds.includes(id)),
@@ -4336,7 +4340,11 @@ export function SettingsPage() {
                         {!connected && candidate.entry.lifecycle === "preview" ? " · 预览型号" : ""}
                       </small>
                     </div>
-                    {connected ? (
+                    {connected &&
+                    connectedTaskRecommendations.get(task)?.model.catalogEntry.id ===
+                      candidate.entry.id ? (
+                      <Badge tone="neutral">当前建议 · 请使用上方操作</Badge>
+                    ) : connected ? (
                       taskProjection?.route === null ? (
                         task === "rerank" ? (
                           <a
@@ -6363,6 +6371,49 @@ export function SettingsPage() {
                   </div>
                 </CardHeader>
                 <CardContent>
+                  <section aria-label="基本规划安排" className="model-center-settings">
+                    <h3>大纲与场景规划</h3>
+                    <p>
+                      先为基本规划安排模型，不需要逐项填写高级分工。文字生成可用不等于规划格式已验证；如需检查，会先展示发送前说明，确认前不会发送。
+                    </p>
+                    {(["outline_planning", "scene_breakdown"] as const).map((task) => {
+                      const recommendation = connectedTaskRecommendations.get(task) ?? null;
+                      const current = routingVisibility.tasks.find(
+                        ({ definition }) => definition.task === task,
+                      );
+                      const configured = current?.status === "configured";
+                      return (
+                        <div key={task}>
+                          <strong>{task === "outline_planning" ? "大纲与规划" : "场景拆解"}</strong>
+                          <p>
+                            {configured
+                              ? "已安排可用模型。"
+                              : (recommendation?.reason ??
+                                current?.reason ??
+                                "请先连接并验证一个文字模型。")}
+                          </p>
+                          <Button
+                            variant="secondary"
+                            disabled={
+                              configured ||
+                              recommendation === null ||
+                              routeProbeResultAmbiguous ||
+                              recommendedTaskBusy !== null ||
+                              routeSaving ||
+                              taskProbeConfirmation !== null ||
+                              modelHubHydrationPending
+                            }
+                            onClick={() => {
+                              if (recommendation !== null)
+                                void requestRecommendedTaskAssignment(task, recommendation);
+                            }}
+                          >
+                            {task === "outline_planning" ? "准备大纲与规划" : "准备场景拆解"}
+                          </Button>
+                        </div>
+                      );
+                    })}
+                  </section>
                   <div className="model-center-settings">
                     {taskProbeDisclosureError !== null && (
                       <InlineAlert
@@ -7026,7 +7077,7 @@ export function SettingsPage() {
                         </section>
                         <InlineAlert
                           tone="info"
-                          title="小说任务任务安排"
+                          title="小说创作任务安排"
                           description={`逐项覆盖 ${String(NOVEL_AI_TASKS.length)} 类小说任务的主模型、备用模型、费用上限、隐私与失败处理。未明确保存的任务继续使用当前自动方案。`}
                         />
                         {routingCatalog.some(
@@ -7071,6 +7122,20 @@ export function SettingsPage() {
                                   />
                                 )}
                               </FormField>
+                              {novelRoutePrimaryCatalogId.length > 0 &&
+                                !selectableRoutingCatalog.some(
+                                  ({ id }) => id === novelRoutePrimaryCatalogId,
+                                ) && (
+                                  <InlineAlert
+                                    tone="warning"
+                                    title="当前模型安排需要修复"
+                                    description="原安排已保留，但所选模型或连接目前不可用。请修复连接或重新选择，不会自动改用其他模型。"
+                                    action={{
+                                      label: "检查模型连接",
+                                      onClick: () => void navigate("/settings#model-center"),
+                                    }}
+                                  />
+                                )}
                               <FormField
                                 label="备用模型"
                                 hint="建议选择不同连接；本地隐私只能选择本机模型。"
@@ -7677,10 +7742,20 @@ export function SettingsPage() {
               title="本次发送范围"
               description={taskProbeConfirmation.disclosure.privacy}
             />
+            <p>
+              {taskProbeConfirmation.recommendation.readiness === "verify_structured_output"
+                ? "本次单独检查结构化格式：发送一段固定格式要求，严格核对返回字段，不发送作品内容；文字生成成功不会替代这项检查。"
+                : "本次发送固定短句，检查返回内容是否符合该任务要求，不发送作品内容。"}
+            </p>
+            <details>
+              <summary>高级诊断详情：固定验证内容</summary>
+              <ul className="privacy-list">
+                {taskProbeConfirmation.disclosure.sends.map((item) => (
+                  <li key={item}>{item}</li>
+                ))}
+              </ul>
+            </details>
             <ul className="privacy-list">
-              {taskProbeConfirmation.disclosure.sends.map((item) => (
-                <li key={item}>{item}</li>
-              ))}
               <li>
                 最大输出： AI 最多返回{" "}
                 {String(taskProbeConfirmation.disclosure.maximumOutputTokens)}

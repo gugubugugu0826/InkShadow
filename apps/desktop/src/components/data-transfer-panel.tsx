@@ -237,22 +237,42 @@ export function DataTransferPanel({
   const importAbortRef = useRef<AbortController | null>(null);
   const exportAbortRef = useRef<AbortController | null>(null);
   const importFileInputRef = useRef<HTMLInputElement>(null);
+  const projectListSequence = useRef(0);
+  const selectedExportProject = projects.find(({ id }) => id === selectedProjectId);
+  const exportUnavailable =
+    exportBusy !== null || projectsLoading || selectedExportProject === undefined;
 
   const loadProjects = useCallback(async () => {
+    const sequence = ++projectListSequence.current;
     setProjectsLoading(true);
-    const result = await runtime.useCases.listProjects.execute({
-      statuses: ["active", "archived"],
-    });
-    if (result.ok) {
-      setProjects(result.value);
-      setSelectedProjectId((current) =>
-        current.length > 0 ? current : (result.value[0]?.id ?? ""),
+    try {
+      const result = await runtime.useCases.listProjects.execute({
+        statuses: ["active", "archived"],
+      });
+      if (sequence !== projectListSequence.current) return;
+      if (result.ok) {
+        setProjects(result.value);
+        setSelectedProjectId((current) =>
+          current.length === 0
+            ? (result.value[0]?.id ?? "")
+            : result.value.some(({ id }) => id === current)
+              ? current
+              : "",
+        );
+        setTransferError(null);
+      } else {
+        throw result.error;
+      }
+    } catch (cause: unknown) {
+      if (sequence !== projectListSequence.current) return;
+      setProjects([]);
+      setSelectedProjectId("");
+      setTransferError(
+        `项目列表读取失败，请重新打开此页重试。${projectOrdinaryUiError(cause).description}`,
       );
-      setTransferError(null);
-    } else {
-      setTransferError(projectOrdinaryUiError(result.error).description);
+    } finally {
+      if (sequence === projectListSequence.current) setProjectsLoading(false);
     }
-    setProjectsLoading(false);
   }, [runtime]);
 
   useEffect(() => {
@@ -428,6 +448,7 @@ export function DataTransferPanel({
   ): Promise<void> {
     const project = projects.find(({ id }) => id === selectedProjectId);
     if (project === undefined) {
+      setTransferError("请先选择一个仍可读取的作品，再开始导出。没有生成或写入文件。");
       return;
     }
     const controller =
@@ -642,6 +663,7 @@ export function DataTransferPanel({
   async function exportProjectReport(): Promise<void> {
     const project = projects.find(({ id }) => id === selectedProjectId);
     if (project === undefined) {
+      setTransferError("请先选择一个仍可读取的作品，再导出报告。没有生成或写入文件。");
       return;
     }
     setExportBusy("report");
@@ -902,6 +924,8 @@ export function DataTransferPanel({
                       <Select
                         {...fieldProps}
                         value={selectedProjectId}
+                        placeholder="请选择要导出的作品"
+                        disabled={exportBusy !== null}
                         loading={projectsLoading}
                         options={projects.map((project) => ({
                           value: project.id,
@@ -917,6 +941,13 @@ export function DataTransferPanel({
                       />
                     )}
                   </FormField>
+                  {(projectsLoading || selectedExportProject === undefined) && (
+                    <p role="status">
+                      {projectsLoading
+                        ? "正在读取作品列表，准备完成前不能导出。"
+                        : "请先选择要导出的作品。"}
+                    </p>
+                  )}
                   <label className="private-export-option">
                     <input
                       type="checkbox"
@@ -939,7 +970,7 @@ export function DataTransferPanel({
                       loadingLabel={
                         exportDestinationPromptOpen ? "等待你选择保存位置" : "正在准备 TXT"
                       }
-                      disabled={exportBusy !== null || selectedProjectId.length === 0}
+                      disabled={exportUnavailable}
                       onClick={() => void exportProject("text")}
                     >
                       {runtime.mode === "tauri" ? "保存 TXT" : "下载 TXT"}
@@ -950,7 +981,7 @@ export function DataTransferPanel({
                       loadingLabel={
                         exportDestinationPromptOpen ? "等待你选择保存位置" : "正在准备 Markdown"
                       }
-                      disabled={exportBusy !== null || selectedProjectId.length === 0}
+                      disabled={exportUnavailable}
                       onClick={() => void exportProject("markdown")}
                     >
                       {runtime.mode === "tauri" ? "保存 Markdown" : "下载 Markdown"}
@@ -961,7 +992,7 @@ export function DataTransferPanel({
                       loadingLabel={
                         exportDestinationPromptOpen ? "等待你选择保存位置" : "正在生成 EPUB"
                       }
-                      disabled={exportBusy !== null || selectedProjectId.length === 0}
+                      disabled={exportUnavailable}
                       onClick={() => void exportProject("epub")}
                     >
                       {runtime.mode === "tauri" ? "保存 EPUB" : "下载 EPUB"}
@@ -972,7 +1003,7 @@ export function DataTransferPanel({
                       loadingLabel={
                         exportDestinationPromptOpen ? "等待你选择保存位置" : "正在生成 DOCX"
                       }
-                      disabled={exportBusy !== null || selectedProjectId.length === 0}
+                      disabled={exportUnavailable}
                       onClick={() => void exportProject("docx")}
                     >
                       {runtime.mode === "tauri" ? "保存 DOCX" : "下载 DOCX"}
@@ -983,7 +1014,7 @@ export function DataTransferPanel({
                       loadingLabel={
                         exportDestinationPromptOpen ? "等待你选择保存位置" : "正在生成 PDF"
                       }
-                      disabled={exportBusy !== null || selectedProjectId.length === 0}
+                      disabled={exportUnavailable}
                       onClick={() => void exportProject("pdf")}
                     >
                       {runtime.mode === "tauri" ? "保存 PDF" : "下载 PDF"}
@@ -993,7 +1024,7 @@ export function DataTransferPanel({
                       loadingLabel={
                         exportDestinationPromptOpen ? "等待你选择保存位置" : "正在准备项目包"
                       }
-                      disabled={exportBusy !== null || selectedProjectId.length === 0}
+                      disabled={exportUnavailable}
                       onClick={() => void exportProject("bundle")}
                     >
                       {runtime.mode === "tauri" ? "保存项目包" : "下载项目包"}
@@ -1053,7 +1084,7 @@ export function DataTransferPanel({
                       loadingLabel={
                         exportDestinationPromptOpen ? "等待你选择保存位置" : "正在准备领域报告"
                       }
-                      disabled={exportBusy !== null || selectedProjectId.length === 0}
+                      disabled={exportUnavailable}
                       onClick={() => void exportProjectReport()}
                     >
                       {runtime.mode === "tauri" ? "保存领域报告" : "下载领域报告"}

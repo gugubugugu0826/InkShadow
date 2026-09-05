@@ -87,7 +87,11 @@ test("keeps the 800 by 600 writing path visible and pointer targets usable", asy
 
   await page.getByRole("button", { name: "直接写空白正文" }).click();
   await expect(page.getByRole("textbox", { name: "章节正文" })).toBeVisible();
-  await expect(page.getByText(/\/ 5000000 字符/u)).toBeVisible();
+  await expect(page.getByText("共 0 字", { exact: true })).toBeVisible();
+  await expect(page.getByRole("textbox", { name: "章节正文" })).toHaveAttribute(
+    "maxlength",
+    "5000000",
+  );
   await expectDirectModeUsesPlainLanguage(page);
   await expectNoHorizontalPageOverflow(page);
   await expectSemanticBasics(page);
